@@ -1,0 +1,83 @@
+# Xenithium with Docker Compose (README.md, "Run with Docker Compose"):
+#
+#   mkdir -p .cache build/launch                # once: folders the containers write to
+#   docker compose build                        # the image (first build ~6 min on 32 cores)
+#   docker compose up -d server                 # the OpenAI-compatible server, settings from ./server.env
+#   docker compose run --rm launch              # the launcher TUI, as on the host
+#   docker compose logs -f server               # load progress; "serving on http://..." when ready
+#   docker compose down                         # stop it (releases both cards)
+#   docker compose run --rm tools xenithium-inspect ~/models/flint-int4    # any tool / script in the image
+#
+# scripts/docker.sh takes the same arguments and fills in the host's ids and mounts checkpoint folders outside $HOME.
+#
+# The containers see the host as the native tools do:
+# - your home folder at the same path and HOME = yours: every ~/... path (checkpoints, XEN_MODELS_DIR, drafters) works;
+#   scripts/docker.sh adds XEN_MODELS_DIR / XEN_MODEL folders outside it (compose.mounts.yaml in .cache/);
+# - the project's server.env, models/ (your settings files and the presets), .cache/ and build/launch/ (the launcher's state) are the host's files;
+# - the host's process table (pid: host): the launcher sees, stops and restarts any xenithium-server, native or in a
+#   container, and start-server.sh refuses while one runs, as on the host;
+# - the host's network (no port mapping): XEN_HOST / XEN_PORT in server.env apply as they do natively;
+# - the docker socket: the "containers hold the cards" checks see the host's containers (this image's are not counted).
+# Variables (set by scripts/docker.sh; plain `docker compose` takes them from the shell or ./.env): XEN_UID, XEN_GID,
+# XEN_RENDER_GID, XEN_VIDEO_GID, XEN_DOCKER_GID, XEN_PORT, XEN_SETTINGS.
+
+x-xenithium: &xenithium
+  image: xenithium:beta
+  build:
+    context: .
+    dockerfile: docker/Dockerfile
+    target: runtime
+  # the host user, so the files it writes stay yours
+  user: "${XEN_UID:-1000}:${XEN_GID:-1000}"
+  # render + video own /dev/dri/renderD*; docker owns the socket
+  group_add:
+    - "${XEN_RENDER_GID:-991}"
+    - "${XEN_VIDEO_GID:-44}"
+    - "${XEN_DOCKER_GID:-983}"
+  devices:
+    - /dev/dri:/dev/dri
+  network_mode: host
+  pid: host
+  ulimits:
+    memlock: -1
+  environment:
+    HOME: ${HOME}
+    XEN_SETTINGS: ${XEN_SETTINGS:-}
+    ZE_AFFINITY_MASK: ${ZE_AFFINITY_MASK:-}
+  volumes:
+    - ${HOME}:${HOME}                                      # checkpoints, models folder, drafters: ~/... as on the host
+    - .:/work                                              # server.env (the launcher rewrites it in place)
+    - ./models:/opt/xenithium/models                       # per-model settings files
+    - ./.cache:/opt/xenithium/.cache                       # learned hot-expert rankings (MoE models)
+    - ./build/launch:/opt/xenithium/build/launch           # the launcher's state, shared with the host's launcher
+    - /var/run/docker.sock:/var/run/docker.sock
+
+services:
+  server:
+    <<: *xenithium
+    command: ["scripts/start-server.sh"]
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:${XEN_PORT:-8000}/health"]
+      interval: 15s
+      timeout: 5s
+      start_period: 600s
+
+  launch:
+    <<: *xenithium
+    profiles: ["tools"]
+    command: ["scripts/launch.sh"]
+    # Docker's AppArmor profile only lets a container signal processes of other containers; the launcher also stops
+    # servers started natively (x in the Logs tab), which needs the host's rules
+    security_opt:
+      - apparmor=unconfined
+    stdin_open: true
+    tty: true
+
+  tools:
+    <<: *xenithium
+    profiles: ["tools"]
+    entrypoint: ["/opt/xenithium/docker/entrypoint.sh", "bash", "-c", 'PATH=/opt/xenithium/build:$$PATH exec "$$@"', "tools"]
+    command: ["bash"]
+    stdin_open: true
+    tty: true

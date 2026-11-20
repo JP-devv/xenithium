@@ -1,0 +1,12 @@
+/docs/internal/
+/build/
+/.spike/
+/server.env
+/server.env.*
+/profiles/
+/.cache/
+/.env
+# your own per-model settings (models/<id>.env, models/<id>.tp<N>.env) and anything else you keep in models/;
+# the shipped settings are models/presets/
+/models/*
+!/models/presets/

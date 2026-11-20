@@ -1,0 +1,922 @@
+{
+"about": "Nanbeige4.3 chat format render golden: the checkpoint chat_template via transformers apply_chat_template (5.16.1) on requests normalised as the serving layer does.",
+"render": [
+{
+"name": "plain",
+"request": {
+"messages": [
+{
+"role": "user",
+"content": "Hello"
+}
+]
+},
+"options": {
+"add_generation_prompt": true
+},
+"prompt": "<|im_start|>system\n你是南北阁，一款由BOSS直聘自主研发并训练的专业大语言模型。<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n<think>\n"
+},
+{
+"name": "plain-nothink",
+"request": {
+"messages": [
+{
+"role": "user",
+"content": "Hello"
+}
+]
+},
+"options": {
+"enable_thinking": false,
+"add_generation_prompt": true
+},
+"prompt": "<|im_start|>system\n你是南北阁，一款由BOSS直聘自主研发并训练的专业大语言模型。<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+},
+{
+"name": "plain-no-gen",
+"request": {
+"messages": [
+{
+"role": "user",
+"content": "Hello"
+}
+]
+},
+"options": {
+"add_generation_prompt": false
+},
+"prompt": "<|im_start|>system\n你是南北阁，一款由BOSS直聘自主研发并训练的专业大语言模型。<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n"
+},
+{
+"name": "system",
+"request": {
+"messages": [
+{
+"role": "system",
+"content": "You are terse."
+},
+{
+"role": "user",
+"content": "Hi"
+}
+]
+},
+"options": {
+"add_generation_prompt": true
+},
+"prompt": "<|im_start|>system\nYou are terse.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n"
+},
+{
+"name": "system-spaces",
+"request": {
+"messages": [
+{
+"role": "system",
+"content": "  padded system \n"
+},
+{
+"role": "user",
+"content": "  padded user  \n"
+}
+]
+},
+"options": {
+"add_generation_prompt": true
+},
+"prompt": "<|im_start|>system\n  padded system \n<|im_end|>\n<|im_start|>user\n  padded user  \n<|im_end|>\n<|im_start|>assistant\n<think>\n"
+},
+{
+"name": "system-empty",
+"request": {
+"messages": [
+{
+"role": "system",
+"content": ""
+},
+{
+"role": "user",
+"content": "x"
+}
+]
+},
+"options": {
+"add_generation_prompt": true
+},
+"prompt": "<|im_start|>system\n<|im_end|>\n<|im_start|>user\nx<|im_end|>\n<|im_start|>assistant\n<think>\n"
+},
+{
+"name": "chinese",
+"request": {
+"messages": [
+{
+"role": "user",
+"content": "你好，今天天气怎么样？"
+}
+]
+},
+"options": {
+"add_generation_prompt": true
+},
+"prompt": "<|im_start|>system\n你是南北阁，一款由BOSS直聘自主研发并训练的专业大语言模型。<|im_end|>\n<|im_start|>user\n你好，今天天气怎么样？<|im_end|>\n<|im_start|>assistant\n<think>\n"
+},
+{
+"name": "multi-turn",
+"request": {
+"messages": [
+{
+"role": "user",
+"content": "2+2?"
+},
+{
+"role": "assistant",
+"content": "4"
+},
+{
+"role": "user",
+"content": "and 3*3?"
+}
+]
+},
+"options": {
+"add_generation_prompt": true
+},
+"prompt": "<|im_start|>system\n你是南北阁，一款由BOSS直聘自主研发并训练的专业大语言模型。<|im_end|>\n<|im_start|>user\n2+2?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n4<|im_end|>\n<|im_start|>user\nand 3*3?<|im_end|>\n<|im_start|>assistant\n<think>\n"
+},
+{
+"name": "multi-turn-reasoning",
+"request": {
+"messages": [
+{
+"role": "user",
+"content": "2+2?"
+},
+{
+"role": "assistant",
+"content": "4",
+"reasoning": "simple add"
+},
+{
+"role": "user",
+"content": "and 3*3?"
+}
+]
+},
+"options": {
+"add_generation_prompt": true
+},
+"prompt": "<|im_start|>system\n你是南北阁，一款由BOSS直聘自主研发并训练的专业大语言模型。<|im_end|>\n<|im_start|>user\n2+2?<|im_end|>\n<|im_start|>assistant\n<think>\nsimple add\n</think>\n\n4<|im_end|>\n<|im_start|>user\nand 3*3?<|im_end|>\n<|im_start|>assistant\n<think>\n"
+},
+{
+"name": "multi-turn-reasoning-drop",
+"request": {
+"messages": [
+{
+"role": "user",
+"content": "2+2?"
+},
+{
+"role": "assistant",
+"content": "4",
+"reasoning": "simple add"
+},
+{
+"role": "user",
+"content": "and 3*3?"
+}
+]
+},
+"options": {
+"preserve_thinking": false,
+"add_generation_prompt": true
+},
+"prompt": "<|im_start|>system\n你是南北阁，一款由BOSS直聘自主研发并训练的专业大语言模型。<|im_end|>\n<|im_start|>user\n2+2?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n4<|im_end|>\n<|im_start|>user\nand 3*3?<|im_end|>\n<|im_start|>assistant\n<think>\n"
+},
+{
+"name": "multi-turn-reasoning-keep",
+"request": {
+"messages": [
+{
+"role": "user",
+"content": "2+2?"
+},
+{
+"role": "assistant",
+"content": "4",
+"reasoning": "simple add"
+},
+{
+"role": "user",
+"content": "and 3*3?"
+}
+]
+},
+"options": {
+"preserve_thinking": true,
+"add_generation_prompt": true
+},
+"prompt": "<|im_start|>system\n你是南北阁，一款由BOSS直聘自主研发并训练的专业大语言模型。<|im_end|>\n<|im_start|>user\n2+2?<|im_end|>\n<|im_start|>assistant\n<think>\nsimple add\n</think>\n\n4<|im_end|>\n<|im_start|>user\nand 3*3?<|im_end|>\n<|im_start|>assistant\n<think>\n"
+},
+{
+"name": "think-in-content",
+"request": {
+"messages": [
+{
+"role": "user",
+"content": "q"
+},
+{
+"role": "assistant",
+"content": "<think>\nmy reasoning\n</think>\n\nthe answer\n"
+},
+{
+"role": "user",
+"content": "q2"
+}
+]
+},
+"options": {
+"add_generation_prompt": true
+},
+"prompt": "<|im_start|>system\n你是南北阁，一款由BOSS直聘自主研发并训练的专业大语言模型。<|im_end|>\n<|im_start|>user\nq<|im_end|>\n<|im_start|>assistant\n<think>\nmy reasoning\n</think>\n\nthe answer<|im_end|>\n<|im_start|>user\nq2<|im_end|>\n<|im_start|>assistant\n<think>\n"
+},
+{
+"name": "think-in-content-drop",
+"request": {
+"messages": [
+{
+"role": "user",
+"content": "q"
+},
+{
+"role": "assistant",
+"content": "<think>\nmy reasoning\n</think>\n\nthe answer\n"
+},
+{
+"role": "user",
+"content": "q2"
+}
+]
+},
+"options": {
+"preserve_thinking": false,
+"add_generation_prompt": true
+},
+"prompt": "<|im_start|>system\n你是南北阁，一款由BOSS直聘自主研发并训练的专业大语言模型。<|im_end|>\n<|im_start|>user\nq<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\nthe answer<|im_end|>\n<|im_start|>user\nq2<|im_end|>\n<|im_start|>assistant\n<think>\n"
+},
+{
+"name": "think-close-only",
+"request": {
+"messages": [
+{
+"role": "user",
+"content": "q"
+},
+{
+"role": "assistant",
+"content": "reasoning only</think>answer"
+},
+{
+"role": "user",
+"content": "q2"
+}
+]
+},
+"options": {
+"add_generation_prompt": true
+},
+"prompt": "<|im_start|>system\n你是南北阁，一款由BOSS直聘自主研发并训练的专业大语言模型。<|im_end|>\n<|im_start|>user\nq<|im_end|>\n<|im_start|>assistant\n<think>\nreasoning only\n</think>\n\nanswer<|im_end|>\n<|im_start|>user\nq2<|im_end|>\n<|im_start|>assistant\n<think>\n"
+},
+{
+"name": "think-twice",
+"request": {
+"messages": [
+{
+"role": "user",
+"content": "q"
+},
+{
+"role": "assistant",
+"content": "<think>a</think>b<think>c</think>d"
+},
+{
+"role": "user",
+"content": "q2"
+}
+]
+},
+"options": {
+"add_generation_prompt": true
+},
+"prompt": "<|im_start|>system\n你是南北阁，一款由BOSS直聘自主研发并训练的专业大语言模型。<|im_end|>\n<|im_start|>user\nq<|im_end|>\n<|im_start|>assistant\n<think>\na\n</think>\n\nd<|im_end|>\n<|im_start|>user\nq2<|im_end|>\n<|im_start|>assistant\n<think>\n"
+},
+{
+"name": "assistant-last",
+"request": {
+"messages": [
+{
+"role": "user",
+"content": "q"
+},
+{
+"role": "assistant",
+"content": "  partial answer  "
+}
+]
+},
+"options": {
+"add_generation_prompt": false
+},
+"prompt": "<|im_start|>system\n你是南北阁，一款由BOSS直聘自主研发并训练的专业大语言模型。<|im_end|>\n<|im_start|>user\nq<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\npartial answer<|im_end|>\n"
+},
+{
+"name": "assistant-reasoning-ws",
+"request": {
+"messages": [
+{
+"role": "user",
+"content": "q"
+},
+{
+"role": "assistant",
+"content": " x ",
+"reasoning": "\n r \n"
+},
+{
+"role": "user",
+"content": "q2"
+}
+]
+},
+"options": {
+"add_generation_prompt": true
+},
+"prompt": "<|im_start|>system\n你是南北阁，一款由BOSS直聘自主研发并训练的专业大语言模型。<|im_end|>\n<|im_start|>user\nq<|im_end|>\n<|im_start|>assistant\n<think>\nr\n</think>\n\nx<|im_end|>\n<|im_start|>user\nq2<|im_end|>\n<|im_start|>assistant\n<think>\n"
+},
+{
+"name": "tools",
+"request": {
+"messages": [
+{
+"role": "user",
+"content": "Weather in Paris?"
+}
+],
+"tools": [
+{
+"type": "function",
+"function": {
+"name": "get_weather",
+"description": "Get the weather",
+"parameters": {
+"type": "object",
+"properties": {
+"city": {
+"type": "string"
+},
+"days": {
+"type": "integer"
+}
+},
+"required": [
+"city"
+]
+}
+}
+}
+]
+},
+"options": {
+"add_generation_prompt": true
+},
+"prompt": "<|im_start|>system\n你是一位工具函数调用专家，你会得到一个问题和一组可能的工具函数。根据问题，你需要进行一个或多个函数/工具调用以实现目的，请尽量尝试探索通过工具解决问题。\n如果没有一个函数可以使用，请直接使用自然语言回复用户。\n如果给定的问题缺少函数所需的参数，请使用自然语言进行提问，向用户询问必要信息。\n如果调用结果已经足够回答用户问题，请对历史结果进行总结，使用自然语言回复用户。# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the weather\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\nWeather in Paris?<|im_end|>\n<|im_start|>assistant\n<think>\n"
+},
+{
+"name": "tools-system",
+"request": {
+"messages": [
+{
+"role": "system",
+"content": "Be careful."
+},
+{
+"role": "user",
+"content": "Weather in Paris?"
+}
+],
+"tools": [
+{
+"type": "function",
+"function": {
+"name": "get_weather",
+"description": "Get the weather",
+"parameters": {
+"type": "object",
+"properties": {
+"city": {
+"type": "string"
+},
+"days": {
+"type": "integer"
+}
+},
+"required": [
+"city"
+]
+}
+}
+},
+{
+"type": "function",
+"function": {
+"name": "search",
+"description": null,
+"parameters": {
+"type": "object",
+"properties": {
+"q": {
+"type": "string",
+"description": "查询 \"quoted\""
+}
+}
+}
+}
+}
+]
+},
+"options": {
+"add_generation_prompt": true
+},
+"prompt": "<|im_start|>system\nBe careful.\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the weather\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"search\", \"description\": null, \"parameters\": {\"type\": \"object\", \"properties\": {\"q\": {\"type\": \"string\", \"description\": \"查询 \\\"quoted\\\"\"}}}}}\n</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\nWeather in Paris?<|im_end|>\n<|im_start|>assistant\n<think>\n"
+},
+{
+"name": "tools-nothink",
+"request": {
+"messages": [
+{
+"role": "user",
+"content": "Weather in Paris?"
+}
+],
+"tools": [
+{
+"type": "function",
+"function": {
+"name": "get_weather",
+"description": "Get the weather",
+"parameters": {
+"type": "object",
+"properties": {
+"city": {
+"type": "string"
+},
+"days": {
+"type": "integer"
+}
+},
+"required": [
+"city"
+]
+}
+}
+}
+]
+},
+"options": {
+"enable_thinking": false,
+"add_generation_prompt": true
+},
+"prompt": "<|im_start|>system\n你是一位工具函数调用专家，你会得到一个问题和一组可能的工具函数。根据问题，你需要进行一个或多个函数/工具调用以实现目的，请尽量尝试探索通过工具解决问题。\n如果没有一个函数可以使用，请直接使用自然语言回复用户。\n如果给定的问题缺少函数所需的参数，请使用自然语言进行提问，向用户询问必要信息。\n如果调用结果已经足够回答用户问题，请对历史结果进行总结，使用自然语言回复用户。# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the weather\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\nWeather in Paris?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+},
+{
+"name": "tool-call",
+"request": {
+"messages": [
+{
+"role": "user",
+"content": "Weather in Paris?"
+},
+{
+"role": "assistant",
+"content": "",
+"tool_calls": [
+{
+"id": "call_0",
+"type": "function",
+"function": {
+"name": "get_weather",
+"arguments": "{\"city\": \"Paris\", \"days\": 3}"
+}
+}
+]
+},
+{
+"role": "tool",
+"content": "{\"temp\": 21}",
+"tool_call_id": "call_0"
+}
+],
+"tools": [
+{
+"type": "function",
+"function": {
+"name": "get_weather",
+"description": "Get the weather",
+"parameters": {
+"type": "object",
+"properties": {
+"city": {
+"type": "string"
+},
+"days": {
+"type": "integer"
+}
+},
+"required": [
+"city"
+]
+}
+}
+}
+]
+},
+"options": {
+"add_generation_prompt": true
+},
+"prompt": "<|im_start|>system\n你是一位工具函数调用专家，你会得到一个问题和一组可能的工具函数。根据问题，你需要进行一个或多个函数/工具调用以实现目的，请尽量尝试探索通过工具解决问题。\n如果没有一个函数可以使用，请直接使用自然语言回复用户。\n如果给定的问题缺少函数所需的参数，请使用自然语言进行提问，向用户询问必要信息。\n如果调用结果已经足够回答用户问题，请对历史结果进行总结，使用自然语言回复用户。# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the weather\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\nWeather in Paris?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n<parameter=days>\n3\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n{\"temp\": 21}\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\n"
+},
+{
+"name": "tool-call-content",
+"request": {
+"messages": [
+{
+"role": "user",
+"content": "Weather?"
+},
+{
+"role": "assistant",
+"content": "Let me check.",
+"tool_calls": [
+{
+"id": "call_0",
+"type": "function",
+"function": {
+"name": "get_weather",
+"arguments": "{\"city\": \"Paris\"}"
+}
+}
+]
+},
+{
+"role": "tool",
+"content": "sunny",
+"tool_call_id": "call_0"
+}
+],
+"tools": [
+{
+"type": "function",
+"function": {
+"name": "get_weather",
+"description": "Get the weather",
+"parameters": {
+"type": "object",
+"properties": {
+"city": {
+"type": "string"
+},
+"days": {
+"type": "integer"
+}
+},
+"required": [
+"city"
+]
+}
+}
+}
+]
+},
+"options": {
+"add_generation_prompt": true
+},
+"prompt": "<|im_start|>system\n你是一位工具函数调用专家，你会得到一个问题和一组可能的工具函数。根据问题，你需要进行一个或多个函数/工具调用以实现目的，请尽量尝试探索通过工具解决问题。\n如果没有一个函数可以使用，请直接使用自然语言回复用户。\n如果给定的问题缺少函数所需的参数，请使用自然语言进行提问，向用户询问必要信息。\n如果调用结果已经足够回答用户问题，请对历史结果进行总结，使用自然语言回复用户。# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the weather\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\nWeather?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\nLet me check.\n\n<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\nsunny\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\n"
+},
+{
+"name": "tool-calls-two",
+"request": {
+"messages": [
+{
+"role": "user",
+"content": "Weather?"
+},
+{
+"role": "assistant",
+"content": null,
+"tool_calls": [
+{
+"id": "call_0",
+"type": "function",
+"function": {
+"name": "get_weather",
+"arguments": "{\"city\": \"Paris\"}"
+}
+},
+{
+"id": "call_1",
+"type": "function",
+"function": {
+"name": "search",
+"arguments": "{\"q\": \"x\", \"n\": [1, 2], \"o\": {\"a\": null}}"
+}
+}
+]
+},
+{
+"role": "tool",
+"content": "sunny",
+"tool_call_id": "call_0"
+},
+{
+"role": "tool",
+"content": "found",
+"tool_call_id": "call_1"
+},
+{
+"role": "assistant",
+"content": "Done."
+},
+{
+"role": "user",
+"content": "thanks"
+}
+],
+"tools": [
+{
+"type": "function",
+"function": {
+"name": "get_weather",
+"description": "Get the weather",
+"parameters": {
+"type": "object",
+"properties": {
+"city": {
+"type": "string"
+},
+"days": {
+"type": "integer"
+}
+},
+"required": [
+"city"
+]
+}
+}
+},
+{
+"type": "function",
+"function": {
+"name": "search",
+"description": null,
+"parameters": {
+"type": "object",
+"properties": {
+"q": {
+"type": "string",
+"description": "查询 \"quoted\""
+}
+}
+}
+}
+}
+]
+},
+"options": {
+"add_generation_prompt": true
+},
+"prompt": "<|im_start|>system\n你是一位工具函数调用专家，你会得到一个问题和一组可能的工具函数。根据问题，你需要进行一个或多个函数/工具调用以实现目的，请尽量尝试探索通过工具解决问题。\n如果没有一个函数可以使用，请直接使用自然语言回复用户。\n如果给定的问题缺少函数所需的参数，请使用自然语言进行提问，向用户询问必要信息。\n如果调用结果已经足够回答用户问题，请对历史结果进行总结，使用自然语言回复用户。# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the weather\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"search\", \"description\": null, \"parameters\": {\"type\": \"object\", \"properties\": {\"q\": {\"type\": \"string\", \"description\": \"查询 \\\"quoted\\\"\"}}}}}\n</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\nWeather?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=search>\n<parameter=q>\nx\n</parameter>\n<parameter=n>\n[1, 2]\n</parameter>\n<parameter=o>\n{\"a\": null}\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\nsunny\n</tool_response>\n<tool_response>\nfound\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\nDone.<|im_end|>\n<|im_start|>user\nthanks<|im_end|>\n<|im_start|>assistant\n<think>\n"
+},
+{
+"name": "tool-multistep",
+"request": {
+"messages": [
+{
+"role": "user",
+"content": "q"
+},
+{
+"role": "assistant",
+"content": "",
+"tool_calls": [
+{
+"id": "call_0",
+"type": "function",
+"function": {
+"name": "search",
+"arguments": "{\"q\": \"a\"}"
+}
+}
+]
+},
+{
+"role": "tool",
+"content": "r1",
+"tool_call_id": "call_0"
+},
+{
+"role": "assistant",
+"content": "",
+"reasoning": "more",
+"tool_calls": [
+{
+"id": "call_1",
+"type": "function",
+"function": {
+"name": "search",
+"arguments": "{\"q\": \"b\"}"
+}
+}
+]
+},
+{
+"role": "tool",
+"content": "r2",
+"tool_call_id": "call_0"
+}
+],
+"tools": [
+{
+"type": "function",
+"function": {
+"name": "search",
+"description": null,
+"parameters": {
+"type": "object",
+"properties": {
+"q": {
+"type": "string",
+"description": "查询 \"quoted\""
+}
+}
+}
+}
+}
+]
+},
+"options": {
+"preserve_thinking": false,
+"add_generation_prompt": true
+},
+"prompt": "<|im_start|>system\n你是一位工具函数调用专家，你会得到一个问题和一组可能的工具函数。根据问题，你需要进行一个或多个函数/工具调用以实现目的，请尽量尝试探索通过工具解决问题。\n如果没有一个函数可以使用，请直接使用自然语言回复用户。\n如果给定的问题缺少函数所需的参数，请使用自然语言进行提问，向用户询问必要信息。\n如果调用结果已经足够回答用户问题，请对历史结果进行总结，使用自然语言回复用户。# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"search\", \"description\": null, \"parameters\": {\"type\": \"object\", \"properties\": {\"q\": {\"type\": \"string\", \"description\": \"查询 \\\"quoted\\\"\"}}}}}\n</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\nq<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n<tool_call>\n<function=search>\n<parameter=q>\na\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\nr1\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\nmore\n</think>\n\n<tool_call>\n<function=search>\n<parameter=q>\nb\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\nr2\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\n"
+},
+{
+"name": "tool-response-user",
+"request": {
+"messages": [
+{
+"role": "user",
+"content": "<tool_response>\nx\n</tool_response>"
+}
+]
+},
+"options": {
+"add_generation_prompt": true
+},
+"prompt": "<|im_start|>system\n你是南北阁，一款由BOSS直聘自主研发并训练的专业大语言模型。<|im_end|>\n<|im_start|>user\n<tool_response>\nx\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\n"
+},
+{
+"name": "tool-response-user-only",
+"request": {
+"messages": [
+{
+"role": "user",
+"content": "<tool_response>\nx\n</tool_response>"
+},
+{
+"role": "assistant",
+"content": "ok"
+},
+{
+"role": "user",
+"content": "<tool_response>y</tool_response>"
+}
+]
+},
+"options": {
+"preserve_thinking": false,
+"add_generation_prompt": true
+},
+"prompt": "<|im_start|>system\n你是南北阁，一款由BOSS直聘自主研发并训练的专业大语言模型。<|im_end|>\n<|im_start|>user\n<tool_response>\nx\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\nok<|im_end|>\n<|im_start|>user\n<tool_response>y</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\n"
+},
+{
+"name": "content-parts",
+"request": {
+"messages": [
+{
+"role": "user",
+"content": [
+{
+"type": "text",
+"text": "part one "
+},
+{
+"type": "text",
+"text": "part two"
+}
+]
+}
+]
+},
+"options": {
+"add_generation_prompt": true
+},
+"prompt": "<|im_start|>system\n你是南北阁，一款由BOSS直聘自主研发并训练的专业大语言模型。<|im_end|>\n<|im_start|>user\npart one part two<|im_end|>\n<|im_start|>assistant\n<think>\n"
+},
+{
+"name": "tool-unicode-args",
+"request": {
+"messages": [
+{
+"role": "user",
+"content": "q"
+},
+{
+"role": "assistant",
+"content": "",
+"tool_calls": [
+{
+"id": "call_0",
+"type": "function",
+"function": {
+"name": "search",
+"arguments": "{\"q\": \"café 中文 \\\"x\\\"\\nline\"}"
+}
+}
+]
+},
+{
+"role": "tool",
+"content": "ok",
+"tool_call_id": "call_0"
+}
+],
+"tools": [
+{
+"type": "function",
+"function": {
+"name": "search",
+"description": null,
+"parameters": {
+"type": "object",
+"properties": {
+"q": {
+"type": "string",
+"description": "查询 \"quoted\""
+}
+}
+}
+}
+}
+]
+},
+"options": {
+"add_generation_prompt": true
+},
+"prompt": "<|im_start|>system\n你是一位工具函数调用专家，你会得到一个问题和一组可能的工具函数。根据问题，你需要进行一个或多个函数/工具调用以实现目的，请尽量尝试探索通过工具解决问题。\n如果没有一个函数可以使用，请直接使用自然语言回复用户。\n如果给定的问题缺少函数所需的参数，请使用自然语言进行提问，向用户询问必要信息。\n如果调用结果已经足够回答用户问题，请对历史结果进行总结，使用自然语言回复用户。# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"search\", \"description\": null, \"parameters\": {\"type\": \"object\", \"properties\": {\"q\": {\"type\": \"string\", \"description\": \"查询 \\\"quoted\\\"\"}}}}}\n</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\nq<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n<tool_call>\n<function=search>\n<parameter=q>\ncafé 中文 \"x\"\nline\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\nok\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\n"
+},
+{
+"name": "newlines",
+"request": {
+"messages": [
+{
+"role": "user",
+"content": "\n\nline\n\n"
+}
+]
+},
+"options": {
+"add_generation_prompt": true
+},
+"prompt": "<|im_start|>system\n你是南北阁，一款由BOSS直聘自主研发并训练的专业大语言模型。<|im_end|>\n<|im_start|>user\n\n\nline\n\n<|im_end|>\n<|im_start|>assistant\n<think>\n"
+},
+{
+"name": "custom-role",
+"request": {
+"messages": [
+{
+"role": "user",
+"content": "a"
+},
+{
+"role": "critic",
+"content": "b"
+}
+]
+},
+"options": {
+"add_generation_prompt": true
+},
+"prompt": "<|im_start|>system\n你是南北阁，一款由BOSS直聘自主研发并训练的专业大语言模型。<|im_end|>\n<|im_start|>user\na<|im_end|>\n<|im_start|>critic\nb<|im_end|>\n<|im_start|>assistant\n<think>\n"
+}
+],
+"parser": []
+}

@@ -1,0 +1,3101 @@
+# Kubernetes manifests: one Deployment and one Service per back-end service.
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: users-service
+  labels:
+    app: users-service
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: users-service
+  template:
+    metadata:
+      labels:
+        app: users-service
+    spec:
+      containers:
+        - name: users-service
+          image: registry.example.com/users-service:1.1.15
+          ports:
+            - containerPort: 8000
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database
+                  key: url
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: users-service
+spec:
+  selector:
+    app: users-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8000
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: products-service
+  labels:
+    app: products-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: products-service
+  template:
+    metadata:
+      labels:
+        app: products-service
+    spec:
+      containers:
+        - name: products-service
+          image: registry.example.com/products-service:1.4.9
+          ports:
+            - containerPort: 8001
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database
+                  key: url
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8001
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8001
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: products-service
+spec:
+  selector:
+    app: products-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8001
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orders-service
+  labels:
+    app: orders-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: orders-service
+  template:
+    metadata:
+      labels:
+        app: orders-service
+    spec:
+      containers:
+        - name: orders-service
+          image: registry.example.com/orders-service:1.6.4
+          ports:
+            - containerPort: 8002
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database
+                  key: url
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8002
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8002
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: orders-service
+spec:
+  selector:
+    app: orders-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8002
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-items-service
+  labels:
+    app: order-items-service
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: order-items-service
+  template:
+    metadata:
+      labels:
+        app: order-items-service
+    spec:
+      containers:
+        - name: order-items-service
+          image: registry.example.com/order-items-service:1.1.20
+          ports:
+            - containerPort: 8003
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database
+                  key: url
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8003
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8003
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: order-items-service
+spec:
+  selector:
+    app: order-items-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8003
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: customers-service
+  labels:
+    app: customers-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: customers-service
+  template:
+    metadata:
+      labels:
+        app: customers-service
+    spec:
+      containers:
+        - name: customers-service
+          image: registry.example.com/customers-service:1.4.0
+          ports:
+            - containerPort: 8004
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database
+                  key: url
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8004
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8004
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: customers-service
+spec:
+  selector:
+    app: customers-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8004
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: invoices-service
+  labels:
+    app: invoices-service
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: invoices-service
+  template:
+    metadata:
+      labels:
+        app: invoices-service
+    spec:
+      containers:
+        - name: invoices-service
+          image: registry.example.com/invoices-service:1.2.3
+          ports:
+            - containerPort: 8005
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database
+                  key: url
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8005
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8005
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: invoices-service
+spec:
+  selector:
+    app: invoices-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8005
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payments-service
+  labels:
+    app: payments-service
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: payments-service
+  template:
+    metadata:
+      labels:
+        app: payments-service
+    spec:
+      containers:
+        - name: payments-service
+          image: registry.example.com/payments-service:1.8.6
+          ports:
+            - containerPort: 8006
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database
+                  key: url
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8006
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8006
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: payments-service
+spec:
+  selector:
+    app: payments-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8006
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: categories-service
+  labels:
+    app: categories-service
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: categories-service
+  template:
+    metadata:
+      labels:
+        app: categories-service
+    spec:
+      containers:
+        - name: categories-service
+          image: registry.example.com/categories-service:1.8.16
+          ports:
+            - containerPort: 8007
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database
+                  key: url
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8007
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8007
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: categories-service
+spec:
+  selector:
+    app: categories-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8007
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: reviews-service
+  labels:
+    app: reviews-service
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: reviews-service
+  template:
+    metadata:
+      labels:
+        app: reviews-service
+    spec:
+      containers:
+        - name: reviews-service
+          image: registry.example.com/reviews-service:1.3.0
+          ports:
+            - containerPort: 8008
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database
+                  key: url
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8008
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8008
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: reviews-service
+spec:
+  selector:
+    app: reviews-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8008
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: addresses-service
+  labels:
+    app: addresses-service
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: addresses-service
+  template:
+    metadata:
+      labels:
+        app: addresses-service
+    spec:
+      containers:
+        - name: addresses-service
+          image: registry.example.com/addresses-service:1.9.2
+          ports:
+            - containerPort: 8009
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database
+                  key: url
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8009
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8009
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: addresses-service
+spec:
+  selector:
+    app: addresses-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8009
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shipments-service
+  labels:
+    app: shipments-service
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: shipments-service
+  template:
+    metadata:
+      labels:
+        app: shipments-service
+    spec:
+      containers:
+        - name: shipments-service
+          image: registry.example.com/shipments-service:1.4.13
+          ports:
+            - containerPort: 8010
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database
+                  key: url
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8010
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8010
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: shipments-service
+spec:
+  selector:
+    app: shipments-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8010
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: warehouses-service
+  labels:
+    app: warehouses-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: warehouses-service
+  template:
+    metadata:
+      labels:
+        app: warehouses-service
+    spec:
+      containers:
+        - name: warehouses-service
+          image: registry.example.com/warehouses-service:1.3.15
+          ports:
+            - containerPort: 8011
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database
+                  key: url
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8011
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8011
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: warehouses-service
+spec:
+  selector:
+    app: warehouses-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8011
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: suppliers-service
+  labels:
+    app: suppliers-service
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: suppliers-service
+  template:
+    metadata:
+      labels:
+        app: suppliers-service
+    spec:
+      containers:
+        - name: suppliers-service
+          image: registry.example.com/suppliers-service:1.0.10
+          ports:
+            - containerPort: 8012
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database
+                  key: url
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8012
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8012
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: suppliers-service
+spec:
+  selector:
+    app: suppliers-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8012
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: coupons-service
+  labels:
+    app: coupons-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: coupons-service
+  template:
+    metadata:
+      labels:
+        app: coupons-service
+    spec:
+      containers:
+        - name: coupons-service
+          image: registry.example.com/coupons-service:1.7.17
+          ports:
+            - containerPort: 8013
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database
+                  key: url
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8013
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8013
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: coupons-service
+spec:
+  selector:
+    app: coupons-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8013
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: employees-service
+  labels:
+    app: employees-service
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: employees-service
+  template:
+    metadata:
+      labels:
+        app: employees-service
+    spec:
+      containers:
+        - name: employees-service
+          image: registry.example.com/employees-service:1.2.19
+          ports:
+            - containerPort: 8014
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database
+                  key: url
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8014
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8014
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: employees-service
+spec:
+  selector:
+    app: employees-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8014
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: departments-service
+  labels:
+    app: departments-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: departments-service
+  template:
+    metadata:
+      labels:
+        app: departments-service
+    spec:
+      containers:
+        - name: departments-service
+          image: registry.example.com/departments-service:1.1.9
+          ports:
+            - containerPort: 8015
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database
+                  key: url
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8015
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8015
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: departments-service
+spec:
+  selector:
+    app: departments-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8015
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: projects-service
+  labels:
+    app: projects-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: projects-service
+  template:
+    metadata:
+      labels:
+        app: projects-service
+    spec:
+      containers:
+        - name: projects-service
+          image: registry.example.com/projects-service:1.9.3
+          ports:
+            - containerPort: 8016
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database
+                  key: url
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8016
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8016
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: projects-service
+spec:
+  selector:
+    app: projects-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8016
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tasks-service
+  labels:
+    app: tasks-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: tasks-service
+  template:
+    metadata:
+      labels:
+        app: tasks-service
+    spec:
+      containers:
+        - name: tasks-service
+          image: registry.example.com/tasks-service:1.6.15
+          ports:
+            - containerPort: 8017
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database
+                  key: url
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8017
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8017
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tasks-service
+spec:
+  selector:
+    app: tasks-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8017
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: comments-service
+  labels:
+    app: comments-service
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: comments-service
+  template:
+    metadata:
+      labels:
+        app: comments-service
+    spec:
+      containers:
+        - name: comments-service
+          image: registry.example.com/comments-service:1.4.9
+          ports:
+            - containerPort: 8018
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database
+                  key: url
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8018
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8018
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: comments-service
+spec:
+  selector:
+    app: comments-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8018
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tags-service
+  labels:
+    app: tags-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: tags-service
+  template:
+    metadata:
+      labels:
+        app: tags-service
+    spec:
+      containers:
+        - name: tags-service
+          image: registry.example.com/tags-service:1.9.11
+          ports:
+            - containerPort: 8019
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database
+                  key: url
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8019
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8019
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tags-service
+spec:
+  selector:
+    app: tags-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8019
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: articles-service
+  labels:
+    app: articles-service
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: articles-service
+  template:
+    metadata:
+      labels:
+        app: articles-service
+    spec:
+      containers:
+        - name: articles-service
+          image: registry.example.com/articles-service:1.1.5
+          ports:
+            - containerPort: 8020
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database
+                  key: url
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8020
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8020
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: articles-service
+spec:
+  selector:
+    app: articles-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8020
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: authors-service
+  labels:
+    app: authors-service
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: authors-service
+  template:
+    metadata:
+      labels:
+        app: authors-service
+    spec:
+      containers:
+        - name: authors-service
+          image: registry.example.com/authors-service:1.2.13
+          ports:
+            - containerPort: 8021
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database
+                  key: url
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8021
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8021
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: authors-service
+spec:
+  selector:
+    app: authors-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8021
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: books-service
+  labels:
+    app: books-service
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: books-service
+  template:
+    metadata:
+      labels:
+        app: books-service
+    spec:
+      containers:
+        - name: books-service
+          image: registry.example.com/books-service:1.8.10
+          ports:
+            - containerPort: 8022
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database
+                  key: url
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8022
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8022
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: books-service
+spec:
+  selector:
+    app: books-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8022
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: libraries-service
+  labels:
+    app: libraries-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: libraries-service
+  template:
+    metadata:
+      labels:
+        app: libraries-service
+    spec:
+      containers:
+        - name: libraries-service
+          image: registry.example.com/libraries-service:1.1.1
+          ports:
+            - containerPort: 8023
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database
+                  key: url
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8023
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8023
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: libraries-service
+spec:
+  selector:
+    app: libraries-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8023
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loans-service
+  labels:
+    app: loans-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: loans-service
+  template:
+    metadata:
+      labels:
+        app: loans-service
+    spec:
+      containers:
+        - name: loans-service
+          image: registry.example.com/loans-service:1.5.9
+          ports:
+            - containerPort: 8024
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database
+                  key: url
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8024
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8024
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: loans-service
+spec:
+  selector:
+    app: loans-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8024
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: members-service
+  labels:
+    app: members-service
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: members-service
+  template:
+    metadata:
+      labels:
+        app: members-service
+    spec:
+      containers:
+        - name: members-service
+          image: registry.example.com/members-service:1.3.18
+          ports:
+            - containerPort: 8025
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database
+                  key: url
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8025
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8025
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: members-service
+spec:
+  selector:
+    app: members-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8025
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: events-service
+  labels:
+    app: events-service
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: events-service
+  template:
+    metadata:
+      labels:
+        app: events-service
+    spec:
+      containers:
+        - name: events-service
+          image: registry.example.com/events-service:1.2.5
+          ports:
+            - containerPort: 8026
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database
+                  key: url
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8026
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8026
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: events-service
+spec:
+  selector:
+    app: events-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8026
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tickets-service
+  labels:
+    app: tickets-service
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: tickets-service
+  template:
+    metadata:
+      labels:
+        app: tickets-service
+    spec:
+      containers:
+        - name: tickets-service
+          image: registry.example.com/tickets-service:1.6.13
+          ports:
+            - containerPort: 8027
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database
+                  key: url
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8027
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8027
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tickets-service
+spec:
+  selector:
+    app: tickets-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8027
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: venues-service
+  labels:
+    app: venues-service
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: venues-service
+  template:
+    metadata:
+      labels:
+        app: venues-service
+    spec:
+      containers:
+        - name: venues-service
+          image: registry.example.com/venues-service:1.9.12
+          ports:
+            - containerPort: 8028
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database
+                  key: url
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8028
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8028
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: venues-service
+spec:
+  selector:
+    app: venues-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8028
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vehicles-service
+  labels:
+    app: vehicles-service
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: vehicles-service
+  template:
+    metadata:
+      labels:
+        app: vehicles-service
+    spec:
+      containers:
+        - name: vehicles-service
+          image: registry.example.com/vehicles-service:1.7.11
+          ports:
+            - containerPort: 8029
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database
+                  key: url
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8029
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8029
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vehicles-service
+spec:
+  selector:
+    app: vehicles-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8029
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: drivers-service
+  labels:
+    app: drivers-service
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: drivers-service
+  template:
+    metadata:
+      labels:
+        app: drivers-service
+    spec:
+      containers:
+        - name: drivers-service
+          image: registry.example.com/drivers-service:1.7.4
+          ports:
+            - containerPort: 8030
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database
+                  key: url
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8030
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8030
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: drivers-service
+spec:
+  selector:
+    app: drivers-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8030
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trips-service
+  labels:
+    app: trips-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: trips-service
+  template:
+    metadata:
+      labels:
+        app: trips-service
+    spec:
+      containers:
+        - name: trips-service
+          image: registry.example.com/trips-service:1.3.4
+          ports:
+            - containerPort: 8031
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database
+                  key: url
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8031
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8031
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: trips-service
+spec:
+  selector:
+    app: trips-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8031
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: patients-service
+  labels:
+    app: patients-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: patients-service
+  template:
+    metadata:
+      labels:
+        app: patients-service
+    spec:
+      containers:
+        - name: patients-service
+          image: registry.example.com/patients-service:1.5.19
+          ports:
+            - containerPort: 8032
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database
+                  key: url
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8032
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8032
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: patients-service
+spec:
+  selector:
+    app: patients-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8032
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: doctors-service
+  labels:
+    app: doctors-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: doctors-service
+  template:
+    metadata:
+      labels:
+        app: doctors-service
+    spec:
+      containers:
+        - name: doctors-service
+          image: registry.example.com/doctors-service:1.4.7
+          ports:
+            - containerPort: 8033
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database
+                  key: url
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8033
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8033
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: doctors-service
+spec:
+  selector:
+    app: doctors-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8033
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: appointments-service
+  labels:
+    app: appointments-service
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: appointments-service
+  template:
+    metadata:
+      labels:
+        app: appointments-service
+    spec:
+      containers:
+        - name: appointments-service
+          image: registry.example.com/appointments-service:1.5.0
+          ports:
+            - containerPort: 8034
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database
+                  key: url
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8034
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8034
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: appointments-service
+spec:
+  selector:
+    app: appointments-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8034
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: courses-service
+  labels:
+    app: courses-service
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: courses-service
+  template:
+    metadata:
+      labels:
+        app: courses-service
+    spec:
+      containers:
+        - name: courses-service
+          image: registry.example.com/courses-service:1.1.12
+          ports:
+            - containerPort: 8035
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database
+                  key: url
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8035
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8035
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: courses-service
+spec:
+  selector:
+    app: courses-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8035
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: students-service
+  labels:
+    app: students-service
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: students-service
+  template:
+    metadata:
+      labels:
+        app: students-service
+    spec:
+      containers:
+        - name: students-service
+          image: registry.example.com/students-service:1.9.11
+          ports:
+            - containerPort: 8036
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database
+                  key: url
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8036
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8036
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: students-service
+spec:
+  selector:
+    app: students-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8036
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: enrollments-service
+  labels:
+    app: enrollments-service
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: enrollments-service
+  template:
+    metadata:
+      labels:
+        app: enrollments-service
+    spec:
+      containers:
+        - name: enrollments-service
+          image: registry.example.com/enrollments-service:1.1.8
+          ports:
+            - containerPort: 8037
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database
+                  key: url
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8037
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8037
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: enrollments-service
+spec:
+  selector:
+    app: enrollments-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8037
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rooms-service
+  labels:
+    app: rooms-service
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: rooms-service
+  template:
+    metadata:
+      labels:
+        app: rooms-service
+    spec:
+      containers:
+        - name: rooms-service
+          image: registry.example.com/rooms-service:1.4.2
+          ports:
+            - containerPort: 8038
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database
+                  key: url
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8038
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8038
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rooms-service
+spec:
+  selector:
+    app: rooms-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8038
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bookings-service
+  labels:
+    app: bookings-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: bookings-service
+  template:
+    metadata:
+      labels:
+        app: bookings-service
+    spec:
+      containers:
+        - name: bookings-service
+          image: registry.example.com/bookings-service:1.6.16
+          ports:
+            - containerPort: 8039
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database
+                  key: url
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8039
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8039
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bookings-service
+spec:
+  selector:
+    app: bookings-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8039
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: subscriptions-service
+  labels:
+    app: subscriptions-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: subscriptions-service
+  template:
+    metadata:
+      labels:
+        app: subscriptions-service
+    spec:
+      containers:
+        - name: subscriptions-service
+          image: registry.example.com/subscriptions-service:1.3.11
+          ports:
+            - containerPort: 8040
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database
+                  key: url
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8040
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8040
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: subscriptions-service
+spec:
+  selector:
+    app: subscriptions-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8040
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notifications-service
+  labels:
+    app: notifications-service
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: notifications-service
+  template:
+    metadata:
+      labels:
+        app: notifications-service
+    spec:
+      containers:
+        - name: notifications-service
+          image: registry.example.com/notifications-service:1.2.19
+          ports:
+            - containerPort: 8041
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database
+                  key: url
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8041
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8041
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: notifications-service
+spec:
+  selector:
+    app: notifications-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8041
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sessions-service
+  labels:
+    app: sessions-service
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: sessions-service
+  template:
+    metadata:
+      labels:
+        app: sessions-service
+    spec:
+      containers:
+        - name: sessions-service
+          image: registry.example.com/sessions-service:1.3.9
+          ports:
+            - containerPort: 8042
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database
+                  key: url
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8042
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8042
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sessions-service
+spec:
+  selector:
+    app: sessions-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8042
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: audit-logs-service
+  labels:
+    app: audit-logs-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: audit-logs-service
+  template:
+    metadata:
+      labels:
+        app: audit-logs-service
+    spec:
+      containers:
+        - name: audit-logs-service
+          image: registry.example.com/audit-logs-service:1.7.9
+          ports:
+            - containerPort: 8043
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database
+                  key: url
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8043
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8043
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: audit-logs-service
+spec:
+  selector:
+    app: audit-logs-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8043
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: settings-service
+  labels:
+    app: settings-service
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: settings-service
+  template:
+    metadata:
+      labels:
+        app: settings-service
+    spec:
+      containers:
+        - name: settings-service
+          image: registry.example.com/settings-service:1.1.4
+          ports:
+            - containerPort: 8044
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database
+                  key: url
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8044
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8044
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: settings-service
+spec:
+  selector:
+    app: settings-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8044
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: recipes-service
+  labels:
+    app: recipes-service
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: recipes-service
+  template:
+    metadata:
+      labels:
+        app: recipes-service
+    spec:
+      containers:
+        - name: recipes-service
+          image: registry.example.com/recipes-service:1.0.9
+          ports:
+            - containerPort: 8045
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database
+                  key: url
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8045
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8045
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: recipes-service
+spec:
+  selector:
+    app: recipes-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8045
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ingredients-service
+  labels:
+    app: ingredients-service
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: ingredients-service
+  template:
+    metadata:
+      labels:
+        app: ingredients-service
+    spec:
+      containers:
+        - name: ingredients-service
+          image: registry.example.com/ingredients-service:1.8.8
+          ports:
+            - containerPort: 8046
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database
+                  key: url
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8046
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8046
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ingredients-service
+spec:
+  selector:
+    app: ingredients-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8046
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: playlists-service
+  labels:
+    app: playlists-service
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: playlists-service
+  template:
+    metadata:
+      labels:
+        app: playlists-service
+    spec:
+      containers:
+        - name: playlists-service
+          image: registry.example.com/playlists-service:1.7.19
+          ports:
+            - containerPort: 8047
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database
+                  key: url
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8047
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8047
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: playlists-service
+spec:
+  selector:
+    app: playlists-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8047
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tracks-service
+  labels:
+    app: tracks-service
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: tracks-service
+  template:
+    metadata:
+      labels:
+        app: tracks-service
+    spec:
+      containers:
+        - name: tracks-service
+          image: registry.example.com/tracks-service:1.9.16
+          ports:
+            - containerPort: 8048
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database
+                  key: url
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8048
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8048
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tracks-service
+spec:
+  selector:
+    app: tracks-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8048
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: devices-service
+  labels:
+    app: devices-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: devices-service
+  template:
+    metadata:
+      labels:
+        app: devices-service
+    spec:
+      containers:
+        - name: devices-service
+          image: registry.example.com/devices-service:1.4.11
+          ports:
+            - containerPort: 8049
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database
+                  key: url
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8049
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8049
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: devices-service
+spec:
+  selector:
+    app: devices-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8049

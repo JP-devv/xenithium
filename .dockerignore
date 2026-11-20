@@ -1,0 +1,11 @@
+# Docker build context (docker/Dockerfile): the sources only, not the host's build tree, notes or settings.
+.git
+build/
+.spike/
+.cache/
+docs/internal/
+profiles/
+server.env
+server.env.*
+results.html
+*.log

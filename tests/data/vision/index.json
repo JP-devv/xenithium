@@ -1,0 +1,92 @@
+{
+ "c_adam7.png": {
+  "w": 130,
+  "h": 77,
+  "path": "c_adam7.png"
+ },
+ "c_base420.jpg": {
+  "w": 97,
+  "h": 61,
+  "path": "c_base420.jpg"
+ },
+ "c_base422.jpg": {
+  "w": 97,
+  "h": 61,
+  "path": "c_base422.jpg"
+ },
+ "c_base444.jpg": {
+  "w": 130,
+  "h": 77,
+  "path": "c_base444.jpg"
+ },
+ "c_bw.png": {
+  "w": 97,
+  "h": 61,
+  "path": "c_bw.png"
+ },
+ "c_exif6.jpg": {
+  "w": 61,
+  "h": 97,
+  "path": "c_exif6.jpg"
+ },
+ "c_gray.jpg": {
+  "w": 97,
+  "h": 61,
+  "path": "c_gray.jpg"
+ },
+ "c_gray.png": {
+  "w": 97,
+  "h": 61,
+  "path": "c_gray.png"
+ },
+ "c_gray_prog.jpg": {
+  "w": 130,
+  "h": 77,
+  "path": "c_gray_prog.jpg"
+ },
+ "c_la.png": {
+  "w": 97,
+  "h": 61,
+  "path": "c_la.png"
+ },
+ "c_pal.png": {
+  "w": 97,
+  "h": 61,
+  "path": "c_pal.png"
+ },
+ "c_pal_2bit.png": {
+  "w": 97,
+  "h": 61,
+  "path": "c_pal_2bit.png"
+ },
+ "c_pal_trns.png": {
+  "w": 97,
+  "h": 61,
+  "path": "c_pal_trns.png"
+ },
+ "c_prog420.jpg": {
+  "w": 97,
+  "h": 61,
+  "path": "c_prog420.jpg"
+ },
+ "c_prog444.jpg": {
+  "w": 130,
+  "h": 77,
+  "path": "c_prog444.jpg"
+ },
+ "c_restart.jpg": {
+  "w": 130,
+  "h": 77,
+  "path": "c_restart.jpg"
+ },
+ "c_rgb.png": {
+  "w": 97,
+  "h": 61,
+  "path": "c_rgb.png"
+ },
+ "c_rgba.png": {
+  "w": 97,
+  "h": 61,
+  "path": "c_rgba.png"
+ }
+}

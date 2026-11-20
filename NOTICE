@@ -1,0 +1,22 @@
+Xenithium
+Copyright 2026 Niluthon
+
+Xenithium is developed and owned by Niluthon. It is licensed under the Apache License, Version 2.0 (see LICENSE);
+all rights not expressly granted by that licence are reserved by Niluthon.
+
+Downloaded models and drafters — the weights this engine runs, which it does not distribute.
+Xenithium ships no model weights. The checkpoints and drafters you download carry the licence of the repository they
+come from, and a quantised export carries with it the licence of the base model it was made from: the W4A16 and INT4
+exports of Qwen3.8 Flash-Next, Qwen3.8-27B and Nanbeige4.3-33B, Recursive Flint INT4, and the DFlash 2 and DSpine b16
+drafters, every source linked in the Supported models table of README.md. That table is as of this writing and the
+download page is the authority. Those terms are set by their authors, not here: the Apache licence above applies to
+Xenithium's own code, documentation, tests and benchmark text, grants nothing over any model, and nothing in this
+repository modifies or re-licenses one. Read the licence shown on each download page and keep the licence file that
+comes with the weights.
+
+DDTree — the draft tree the block drafters' trees run (XEN_DRAFTER_TREE and friends).
+The tree walk is Xenithium's own implementation; the name and the idea are the authors': Liran Ringel and Yaniv
+Romano, "Accelerating Speculative Decoding with Block Diffusion Draft Trees" (arXiv:2604.12989), reference
+implementation https://github.com/liranringel/ddtree (MIT licensed). No code from that repository is distributed
+with Xenithium; should any ever be incorporated, this file must additionally carry its copyright notice and
+license text as the MIT license requires.

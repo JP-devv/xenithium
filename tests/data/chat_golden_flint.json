@@ -1,0 +1,4587 @@
+{
+ "about": "Flint chat format golden from the reference (render path and parsers; transformers 5.16.1): OnlineRenderer.render_chat on a stand-in model dir with the checkpoint tokenizer + chat_template.jinja, and the glm47 reasoning + tool parser (parse(), non-streaming; reference_stream = parse_delta per token). tool_calls are [] when the request's tools are off.",
+ "render": [
+  {
+   "name": "plain",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "Hello"
+     }
+    ]
+   },
+   "options": {
+    "add_generation_prompt": true
+   },
+   "prompt": "<|user|>Hello<|assistant|>"
+  },
+  {
+   "name": "plain-no-gen",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "Hello"
+     }
+    ]
+   },
+   "options": {
+    "add_generation_prompt": false
+   },
+   "prompt": "<|user|>Hello"
+  },
+  {
+   "name": "system",
+   "request": {
+    "messages": [
+     {
+      "role": "system",
+      "content": "You are terse."
+     },
+     {
+      "role": "user",
+      "content": "Hi"
+     }
+    ]
+   },
+   "options": {
+    "add_generation_prompt": true
+   },
+   "prompt": "<|system|>You are terse.<|user|>Hi<|assistant|>"
+  },
+  {
+   "name": "system-two",
+   "request": {
+    "messages": [
+     {
+      "role": "system",
+      "content": "a"
+     },
+     {
+      "role": "system",
+      "content": "b"
+     },
+     {
+      "role": "user",
+      "content": "Hi"
+     }
+    ]
+   },
+   "options": {
+    "add_generation_prompt": true
+   },
+   "prompt": "<|system|>a<|system|>b<|user|>Hi<|assistant|>"
+  },
+  {
+   "name": "system-late",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "Hi"
+     },
+     {
+      "role": "system",
+      "content": "late"
+     },
+     {
+      "role": "user",
+      "content": "again"
+     }
+    ]
+   },
+   "options": {
+    "add_generation_prompt": true
+   },
+   "prompt": "<|user|>Hi<|system|>late<|user|>again<|assistant|>"
+  },
+  {
+   "name": "developer",
+   "request": {
+    "messages": [
+     {
+      "role": "developer",
+      "content": "Be brief."
+     },
+     {
+      "role": "user",
+      "content": "Hi"
+     }
+    ]
+   },
+   "options": {
+    "add_generation_prompt": true
+   },
+   "prompt": "<|developer|>Be brief.<|user|>Hi<|assistant|>"
+  },
+  {
+   "name": "developer-system",
+   "request": {
+    "messages": [
+     {
+      "role": "system",
+      "content": "sys"
+     },
+     {
+      "role": "developer",
+      "content": "dev"
+     },
+     {
+      "role": "user",
+      "content": "Hi"
+     }
+    ]
+   },
+   "options": {
+    "add_generation_prompt": true
+   },
+   "prompt": "<|system|>sys<|developer|>dev<|user|>Hi<|assistant|>"
+  },
+  {
+   "name": "system-spaces",
+   "request": {
+    "messages": [
+     {
+      "role": "system",
+      "content": "  padded system \n"
+     },
+     {
+      "role": "user",
+      "content": "  padded user  \n"
+     }
+    ]
+   },
+   "options": {
+    "add_generation_prompt": true
+   },
+   "prompt": "<|system|>  padded system \n<|user|>  padded user  \n<|assistant|>"
+  },
+  {
+   "name": "chinese",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "你好，今天天气怎么样？"
+     }
+    ]
+   },
+   "options": {
+    "add_generation_prompt": true
+   },
+   "prompt": "<|user|>你好，今天天气怎么样？<|assistant|>"
+  },
+  {
+   "name": "multi-turn",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "2+2?"
+     },
+     {
+      "role": "assistant",
+      "content": "4"
+     },
+     {
+      "role": "user",
+      "content": "and 3*3?"
+     }
+    ]
+   },
+   "options": {
+    "add_generation_prompt": true
+   },
+   "prompt": "<|user|>2+2?<|assistant|>4<|user|>and 3*3?<|assistant|>"
+  },
+  {
+   "name": "multi-turn-reasoning",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "2+2?"
+     },
+     {
+      "role": "assistant",
+      "content": "4",
+      "reasoning": "simple add"
+     },
+     {
+      "role": "user",
+      "content": "and 3*3?"
+     }
+    ]
+   },
+   "options": {
+    "add_generation_prompt": true
+   },
+   "prompt": "<|user|>2+2?<|assistant|><think>simple add</think>4<|user|>and 3*3?<|assistant|>"
+  },
+  {
+   "name": "reasoning-content-field",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "q"
+     },
+     {
+      "role": "assistant",
+      "content": "a",
+      "reasoning": "rc"
+     },
+     {
+      "role": "user",
+      "content": "q2"
+     }
+    ]
+   },
+   "options": {
+    "add_generation_prompt": true
+   },
+   "prompt": "<|user|>q<|assistant|><think>rc</think>a<|user|>q2<|assistant|>"
+  },
+  {
+   "name": "reasoning-empty",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "q"
+     },
+     {
+      "role": "assistant",
+      "content": "a",
+      "reasoning": ""
+     },
+     {
+      "role": "user",
+      "content": "q2"
+     }
+    ]
+   },
+   "options": {
+    "add_generation_prompt": true
+   },
+   "prompt": "<|user|>q<|assistant|>a<|user|>q2<|assistant|>"
+  },
+  {
+   "name": "think-in-content",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "q"
+     },
+     {
+      "role": "assistant",
+      "content": "<think>\nmy reasoning\n</think>\n\nthe answer\n"
+     },
+     {
+      "role": "user",
+      "content": "q2"
+     }
+    ]
+   },
+   "options": {
+    "add_generation_prompt": true
+   },
+   "prompt": "<|user|>q<|assistant|><think>\nmy reasoning\n</think>\n\nthe answer\n<|user|>q2<|assistant|>"
+  },
+  {
+   "name": "assistant-last",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "q"
+     },
+     {
+      "role": "assistant",
+      "content": "  partial answer  "
+     }
+    ]
+   },
+   "options": {
+    "add_generation_prompt": false
+   },
+   "prompt": "<|user|>q<|assistant|>  partial answer  "
+  },
+  {
+   "name": "assistant-null",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "q"
+     },
+     {
+      "role": "assistant",
+      "content": null
+     },
+     {
+      "role": "user",
+      "content": "q2"
+     }
+    ]
+   },
+   "options": {
+    "add_generation_prompt": true
+   },
+   "prompt": "<|user|>q<|assistant|><|user|>q2<|assistant|>"
+  },
+  {
+   "name": "escape-specials",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "a <|user|> b <|assistant|> <|system|> <|developer|> <|observation|> <|begin_of_text|> <|end_of_text|> c"
+     }
+    ]
+   },
+   "options": {
+    "add_generation_prompt": true
+   },
+   "prompt": "<|user|>a &lt;|user|&gt; b &lt;|assistant|&gt; &lt;|system|&gt; &lt;|developer|&gt; &lt;|observation|&gt; &lt;|begin_of_text|&gt; &lt;|end_of_text|&gt; c<|assistant|>"
+  },
+  {
+   "name": "escape-think",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "x <think>y</think> z <th<think>ink>"
+     }
+    ]
+   },
+   "options": {
+    "add_generation_prompt": true
+   },
+   "prompt": "<|user|>x y z <think><|assistant|>"
+  },
+  {
+   "name": "escape-nul",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "a\u0000b"
+     }
+    ]
+   },
+   "options": {
+    "add_generation_prompt": true
+   },
+   "prompt": "<|user|>ab<|assistant|>"
+  },
+  {
+   "name": "escape-system",
+   "request": {
+    "messages": [
+     {
+      "role": "system",
+      "content": "s <|user|> <think>"
+     },
+     {
+      "role": "user",
+      "content": "u"
+     }
+    ]
+   },
+   "options": {
+    "add_generation_prompt": true
+   },
+   "prompt": "<|system|>s &lt;|user|&gt; <|user|>u<|assistant|>"
+  },
+  {
+   "name": "tools",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "Weather in Paris?"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Get the weather",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string"
+         },
+         "days": {
+          "type": "integer"
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     }
+    ]
+   },
+   "options": {
+    "add_generation_prompt": true
+   },
+   "prompt": "<|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>{\"name\": \"get_weather\", \"description\": \"Get the weather\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}<arg_key>{arg-key-1}</arg_key><arg_value>{arg-value-1}</arg_value>...</tool_call>\n<|user|>Weather in Paris?<|assistant|>"
+  },
+  {
+   "name": "tools-system",
+   "request": {
+    "messages": [
+     {
+      "role": "system",
+      "content": "Be careful."
+     },
+     {
+      "role": "user",
+      "content": "Weather in Paris?"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Get the weather",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string"
+         },
+         "days": {
+          "type": "integer"
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "search",
+       "description": null,
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "q": {
+          "type": "string",
+          "description": "查询 \"quoted\""
+         }
+        }
+       }
+      }
+     }
+    ]
+   },
+   "options": {
+    "add_generation_prompt": true
+   },
+   "prompt": "<|system|>Be careful.<|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>{\"name\": \"get_weather\", \"description\": \"Get the weather\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}{\"name\": \"search\", \"description\": null, \"parameters\": {\"type\": \"object\", \"properties\": {\"q\": {\"type\": \"string\", \"description\": \"查询 \\\"quoted\\\"\"}}}}</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}<arg_key>{arg-key-1}</arg_key><arg_value>{arg-value-1}</arg_value>...</tool_call>\n<|user|>Weather in Paris?<|assistant|>"
+  },
+  {
+   "name": "tools-system-only",
+   "request": {
+    "messages": [
+     {
+      "role": "system",
+      "content": "only system"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Get the weather",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string"
+         },
+         "days": {
+          "type": "integer"
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     }
+    ]
+   },
+   "options": {
+    "add_generation_prompt": true
+   },
+   "prompt": "<|system|>only system<|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>{\"name\": \"get_weather\", \"description\": \"Get the weather\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}<arg_key>{arg-key-1}</arg_key><arg_value>{arg-value-1}</arg_value>...</tool_call>\n<|assistant|>"
+  },
+  {
+   "name": "tools-typed",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "q"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "typed",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "n": {
+          "type": "integer"
+         },
+         "x": {
+          "type": "number"
+         },
+         "b": {
+          "type": "boolean"
+         },
+         "o": {
+          "type": "object"
+         },
+         "a": {
+          "type": "array"
+         },
+         "s": {
+          "type": "string"
+         },
+         "ns": {
+          "type": [
+           "null",
+           "string"
+          ]
+         },
+         "any": {}
+        }
+       }
+      }
+     }
+    ]
+   },
+   "options": {
+    "add_generation_prompt": true
+   },
+   "prompt": "<|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>{\"name\": \"typed\", \"description\": null, \"parameters\": {\"type\": \"object\", \"properties\": {\"n\": {\"type\": \"integer\"}, \"x\": {\"type\": \"number\"}, \"b\": {\"type\": \"boolean\"}, \"o\": {\"type\": \"object\"}, \"a\": {\"type\": \"array\"}, \"s\": {\"type\": \"string\"}, \"ns\": {\"type\": [\"null\", \"string\"]}, \"any\": {}}}}</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}<arg_key>{arg-key-1}</arg_key><arg_value>{arg-value-1}</arg_value>...</tool_call>\n<|user|>q<|assistant|>"
+  },
+  {
+   "name": "tool-call",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "Weather in Paris?"
+     },
+     {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+       {
+        "id": "call_0",
+        "type": "function",
+        "function": {
+         "name": "get_weather",
+         "arguments": "{\"city\": \"Paris\", \"days\": 3}"
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "content": "{\"temp\": 21}",
+      "tool_call_id": "call_0"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Get the weather",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string"
+         },
+         "days": {
+          "type": "integer"
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     }
+    ]
+   },
+   "options": {
+    "add_generation_prompt": true
+   },
+   "prompt": "<|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>{\"name\": \"get_weather\", \"description\": \"Get the weather\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}<arg_key>{arg-key-1}</arg_key><arg_value>{arg-value-1}</arg_value>...</tool_call>\n<|user|>Weather in Paris?<|assistant|><tool_call>get_weather<arg_key>city</arg_key><arg_value>Paris</arg_value><arg_key>days</arg_key><arg_value>3</arg_value></tool_call><|observation|><tool_response>{\"temp\": 21}</tool_response><|assistant|>"
+  },
+  {
+   "name": "tool-call-content",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "Weather?"
+     },
+     {
+      "role": "assistant",
+      "content": "Let me check.",
+      "tool_calls": [
+       {
+        "id": "call_0",
+        "type": "function",
+        "function": {
+         "name": "get_weather",
+         "arguments": "{\"city\": \"Paris\"}"
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "content": "sunny",
+      "tool_call_id": "call_0"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Get the weather",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string"
+         },
+         "days": {
+          "type": "integer"
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     }
+    ]
+   },
+   "options": {
+    "add_generation_prompt": true
+   },
+   "prompt": "<|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>{\"name\": \"get_weather\", \"description\": \"Get the weather\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}<arg_key>{arg-key-1}</arg_key><arg_value>{arg-value-1}</arg_value>...</tool_call>\n<|user|>Weather?<|assistant|>Let me check.<tool_call>get_weather<arg_key>city</arg_key><arg_value>Paris</arg_value></tool_call><|observation|><tool_response>sunny</tool_response><|assistant|>"
+  },
+  {
+   "name": "tool-calls-two",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "Weather?"
+     },
+     {
+      "role": "assistant",
+      "content": null,
+      "tool_calls": [
+       {
+        "id": "call_0",
+        "type": "function",
+        "function": {
+         "name": "get_weather",
+         "arguments": "{\"city\": \"Paris\"}"
+        }
+       },
+       {
+        "id": "call_1",
+        "type": "function",
+        "function": {
+         "name": "search",
+         "arguments": "{\"q\": \"x\", \"n\": [1, 2], \"o\": {\"a\": null}, \"f\": 1.5, \"t\": true}"
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "content": "sunny",
+      "tool_call_id": "call_0"
+     },
+     {
+      "role": "tool",
+      "content": "found",
+      "tool_call_id": "call_1"
+     },
+     {
+      "role": "assistant",
+      "content": "Done."
+     },
+     {
+      "role": "user",
+      "content": "thanks"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Get the weather",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string"
+         },
+         "days": {
+          "type": "integer"
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "search",
+       "description": null,
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "q": {
+          "type": "string",
+          "description": "查询 \"quoted\""
+         }
+        }
+       }
+      }
+     }
+    ]
+   },
+   "options": {
+    "add_generation_prompt": true
+   },
+   "prompt": "<|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>{\"name\": \"get_weather\", \"description\": \"Get the weather\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}{\"name\": \"search\", \"description\": null, \"parameters\": {\"type\": \"object\", \"properties\": {\"q\": {\"type\": \"string\", \"description\": \"查询 \\\"quoted\\\"\"}}}}</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}<arg_key>{arg-key-1}</arg_key><arg_value>{arg-value-1}</arg_value>...</tool_call>\n<|user|>Weather?<|assistant|><tool_call>get_weather<arg_key>city</arg_key><arg_value>Paris</arg_value></tool_call><tool_call>search<arg_key>q</arg_key><arg_value>x</arg_value><arg_key>n</arg_key><arg_value>[1, 2]</arg_value><arg_key>o</arg_key><arg_value>{\"a\": null}</arg_value><arg_key>f</arg_key><arg_value>1.5</arg_value><arg_key>t</arg_key><arg_value>true</arg_value></tool_call><|observation|><tool_response>sunny</tool_response><|observation|><tool_response>found</tool_response><|assistant|>Done.<|user|>thanks<|assistant|>"
+  },
+  {
+   "name": "tool-multistep",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "q"
+     },
+     {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+       {
+        "id": "call_0",
+        "type": "function",
+        "function": {
+         "name": "search",
+         "arguments": "{\"q\": \"a\"}"
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "content": "r1",
+      "tool_call_id": "call_0"
+     },
+     {
+      "role": "assistant",
+      "content": "",
+      "reasoning": "more",
+      "tool_calls": [
+       {
+        "id": "call_1",
+        "type": "function",
+        "function": {
+         "name": "search",
+         "arguments": "{\"q\": \"b\"}"
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "content": "r2",
+      "tool_call_id": "call_0"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "search",
+       "description": null,
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "q": {
+          "type": "string",
+          "description": "查询 \"quoted\""
+         }
+        }
+       }
+      }
+     }
+    ]
+   },
+   "options": {
+    "add_generation_prompt": true
+   },
+   "prompt": "<|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>{\"name\": \"search\", \"description\": null, \"parameters\": {\"type\": \"object\", \"properties\": {\"q\": {\"type\": \"string\", \"description\": \"查询 \\\"quoted\\\"\"}}}}</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}<arg_key>{arg-key-1}</arg_key><arg_value>{arg-value-1}</arg_value>...</tool_call>\n<|user|>q<|assistant|><tool_call>search<arg_key>q</arg_key><arg_value>a</arg_value></tool_call><|observation|><tool_response>r1</tool_response><|assistant|><think>more</think><tool_call>search<arg_key>q</arg_key><arg_value>b</arg_value></tool_call><|observation|><tool_response>r2</tool_response><|assistant|>"
+  },
+  {
+   "name": "tool-unicode-args",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "q"
+     },
+     {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+       {
+        "id": "call_0",
+        "type": "function",
+        "function": {
+         "name": "search",
+         "arguments": "{\"q\": \"café 中文 \\\"x\\\"\\nline\"}"
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "content": "ok <|user|>",
+      "tool_call_id": "call_0"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "search",
+       "description": null,
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "q": {
+          "type": "string",
+          "description": "查询 \"quoted\""
+         }
+        }
+       }
+      }
+     }
+    ]
+   },
+   "options": {
+    "add_generation_prompt": true
+   },
+   "prompt": "<|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>{\"name\": \"search\", \"description\": null, \"parameters\": {\"type\": \"object\", \"properties\": {\"q\": {\"type\": \"string\", \"description\": \"查询 \\\"quoted\\\"\"}}}}</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}<arg_key>{arg-key-1}</arg_key><arg_value>{arg-value-1}</arg_value>...</tool_call>\n<|user|>q<|assistant|><tool_call>search<arg_key>q</arg_key><arg_value>café 中文 \"x\"\nline</arg_value></tool_call><|observation|><tool_response>ok &lt;|user|&gt;</tool_response><|assistant|>"
+  },
+  {
+   "name": "tool-call-no-args",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "q"
+     },
+     {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+       {
+        "id": "call_0",
+        "type": "function",
+        "function": {
+         "name": "search",
+         "arguments": "{}"
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "content": "ok",
+      "tool_call_id": "call_0"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "search",
+       "description": null,
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "q": {
+          "type": "string",
+          "description": "查询 \"quoted\""
+         }
+        }
+       }
+      }
+     }
+    ]
+   },
+   "options": {
+    "add_generation_prompt": true
+   },
+   "prompt": "<|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>{\"name\": \"search\", \"description\": null, \"parameters\": {\"type\": \"object\", \"properties\": {\"q\": {\"type\": \"string\", \"description\": \"查询 \\\"quoted\\\"\"}}}}</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}<arg_key>{arg-key-1}</arg_key><arg_value>{arg-value-1}</arg_value>...</tool_call>\n<|user|>q<|assistant|><tool_call>search</tool_call><|observation|><tool_response>ok</tool_response><|assistant|>"
+  },
+  {
+   "name": "content-parts",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": [
+       {
+        "type": "text",
+        "text": "part one "
+       },
+       {
+        "type": "text",
+        "text": "part two"
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "add_generation_prompt": true
+   },
+   "prompt": "<|user|>part one \npart two<|assistant|>"
+  },
+  {
+   "name": "tool-parts",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "q"
+     },
+     {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+       {
+        "id": "call_0",
+        "type": "function",
+        "function": {
+         "name": "search",
+         "arguments": "{\"q\": \"a\"}"
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "tool_call_id": "call_0",
+      "content": [
+       {
+        "type": "text",
+        "text": "r1"
+       },
+       {
+        "type": "text",
+        "text": "r2"
+       }
+      ]
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "search",
+       "description": null,
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "q": {
+          "type": "string",
+          "description": "查询 \"quoted\""
+         }
+        }
+       }
+      }
+     }
+    ]
+   },
+   "options": {
+    "add_generation_prompt": true
+   },
+   "prompt": "<|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>{\"name\": \"search\", \"description\": null, \"parameters\": {\"type\": \"object\", \"properties\": {\"q\": {\"type\": \"string\", \"description\": \"查询 \\\"quoted\\\"\"}}}}</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}<arg_key>{arg-key-1}</arg_key><arg_value>{arg-value-1}</arg_value>...</tool_call>\n<|user|>q<|assistant|><tool_call>search<arg_key>q</arg_key><arg_value>a</arg_value></tool_call><|observation|><tool_response>r1\nr2</tool_response><|assistant|>"
+  },
+  {
+   "name": "newlines",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "\n\nline\n\n"
+     }
+    ]
+   },
+   "options": {
+    "add_generation_prompt": true
+   },
+   "prompt": "<|user|>\n\nline\n\n<|assistant|>"
+  },
+  {
+   "name": "custom-role",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "a"
+     },
+     {
+      "role": "critic",
+      "content": "b"
+     }
+    ]
+   },
+   "options": {
+    "add_generation_prompt": true
+   },
+   "prompt": "<|user|>a<|assistant|>"
+  }
+ ],
+ "parser": [
+  {
+   "name": "reasoning-content",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "q"
+     }
+    ]
+   },
+   "output": "<think>Let me think.\nOK.\n</think>The answer is 4.",
+   "thinking": true,
+   "tools": null,
+   "expected": {
+    "reasoning": "Let me think.\nOK.",
+    "content": "The answer is 4.",
+    "tool_calls": []
+   },
+   "reference_tools_called": false,
+   "reference_stream": {
+    "per_token": {
+     "reasoning": "Let me think.\nOK.",
+     "content": "The answer is 4.",
+     "tool_calls": []
+    }
+   }
+  },
+  {
+   "name": "reasoning-no-open",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "q"
+     }
+    ]
+   },
+   "output": "Let me think.</think>\n\nThe answer is 4.",
+   "thinking": true,
+   "tools": null,
+   "expected": {
+    "reasoning": "Let me think.",
+    "content": "\n\nThe answer is 4.",
+    "tool_calls": []
+   },
+   "reference_tools_called": false,
+   "reference_stream": {
+    "per_token": {
+     "reasoning": "Let me think.",
+     "content": "\n\nThe answer is 4.",
+     "tool_calls": []
+    }
+   }
+  },
+  {
+   "name": "reasoning-trailing-ws",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "q"
+     }
+    ]
+   },
+   "output": "<think>r  \n\n</think>\n\nanswer\n",
+   "thinking": true,
+   "tools": null,
+   "expected": {
+    "reasoning": "r",
+    "content": "\n\nanswer\n",
+    "tool_calls": []
+   },
+   "reference_tools_called": false,
+   "reference_stream": {
+    "per_token": {
+     "reasoning": "r",
+     "content": "\n\nanswer\n",
+     "tool_calls": []
+    }
+   }
+  },
+  {
+   "name": "reasoning-unclosed",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "q"
+     }
+    ]
+   },
+   "output": "<think>still thinking and the budget ran out",
+   "thinking": true,
+   "tools": null,
+   "expected": {
+    "reasoning": "still thinking and the budget ran out",
+    "content": null,
+    "tool_calls": []
+   },
+   "reference_tools_called": false,
+   "reference_stream": {
+    "per_token": {
+     "reasoning": "still thinking and the budget ran out",
+     "content": null,
+     "tool_calls": []
+    }
+   }
+  },
+  {
+   "name": "no-think-at-all",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "q"
+     }
+    ]
+   },
+   "output": "plain answer",
+   "thinking": true,
+   "tools": null,
+   "expected": {
+    "reasoning": "plain answer",
+    "content": null,
+    "tool_calls": []
+   },
+   "reference_tools_called": false,
+   "reference_stream": {
+    "per_token": {
+     "reasoning": "plain answer",
+     "content": null,
+     "tool_calls": []
+    }
+   }
+  },
+  {
+   "name": "empty",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "q"
+     }
+    ]
+   },
+   "output": "",
+   "thinking": true,
+   "tools": null,
+   "expected": {
+    "reasoning": null,
+    "content": null,
+    "tool_calls": []
+   },
+   "reference_tools_called": false,
+   "reference_stream": {
+    "per_token": {
+     "reasoning": null,
+     "content": null,
+     "tool_calls": []
+    }
+   }
+  },
+  {
+   "name": "think-twice",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "q"
+     }
+    ]
+   },
+   "output": "<think>a</think>b<think>c</think>d",
+   "thinking": true,
+   "tools": null,
+   "expected": {
+    "reasoning": "ac",
+    "content": "bd",
+    "tool_calls": []
+   },
+   "reference_tools_called": false,
+   "reference_stream": {
+    "per_token": {
+     "reasoning": "ac",
+     "content": "bd",
+     "tool_calls": []
+    }
+   }
+  },
+  {
+   "name": "think-end-in-content",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "q"
+     }
+    ]
+   },
+   "output": "<think>a</think>b</think>c",
+   "thinking": true,
+   "tools": null,
+   "expected": {
+    "reasoning": "a",
+    "content": "bc",
+    "tool_calls": []
+   },
+   "reference_tools_called": false,
+   "reference_stream": {
+    "per_token": {
+     "reasoning": "a",
+     "content": "bc",
+     "tool_calls": []
+    }
+   }
+  },
+  {
+   "name": "thinking-off",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "q"
+     }
+    ],
+    "chat_template_kwargs": {
+     "enable_thinking": false
+    }
+   },
+   "output": "<think>x</think>y",
+   "thinking": false,
+   "tools": null,
+   "expected": {
+    "reasoning": null,
+    "content": "y",
+    "tool_calls": []
+   },
+   "reference_tools_called": false,
+   "enable_thinking": false,
+   "reference_stream": {
+    "per_token": {
+     "reasoning": "x",
+     "content": "y",
+     "tool_calls": []
+    }
+   }
+  },
+  {
+   "name": "thinking-null",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "q"
+     }
+    ],
+    "chat_template_kwargs": {
+     "enable_thinking": null
+    }
+   },
+   "output": "<think>x</think>y",
+   "thinking": true,
+   "tools": null,
+   "expected": {
+    "reasoning": "x",
+    "content": "y",
+    "tool_calls": []
+   },
+   "reference_tools_called": false,
+   "enable_thinking": null,
+   "reference_stream": {
+    "per_token": {
+     "reasoning": "x",
+     "content": "y",
+     "tool_calls": []
+    }
+   }
+  },
+  {
+   "name": "call",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "q"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Get the weather",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string"
+         },
+         "days": {
+          "type": "integer"
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "search",
+       "description": null,
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "q": {
+          "type": "string",
+          "description": "查询 \"quoted\""
+         }
+        }
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "typed",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "n": {
+          "type": "integer"
+         },
+         "x": {
+          "type": "number"
+         },
+         "b": {
+          "type": "boolean"
+         },
+         "o": {
+          "type": "object"
+         },
+         "a": {
+          "type": "array"
+         },
+         "s": {
+          "type": "string"
+         },
+         "ns": {
+          "type": [
+           "null",
+           "string"
+          ]
+         },
+         "any": {}
+        }
+       }
+      }
+     }
+    ]
+   },
+   "output": "<think>need weather</think><tool_call>get_weather<arg_key>city</arg_key><arg_value>Paris</arg_value></tool_call>",
+   "thinking": true,
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the weather",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "search",
+      "description": null,
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "q": {
+         "type": "string",
+         "description": "查询 \"quoted\""
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "typed",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "n": {
+         "type": "integer"
+        },
+        "x": {
+         "type": "number"
+        },
+        "b": {
+         "type": "boolean"
+        },
+        "o": {
+         "type": "object"
+        },
+        "a": {
+         "type": "array"
+        },
+        "s": {
+         "type": "string"
+        },
+        "ns": {
+         "type": [
+          "null",
+          "string"
+         ]
+        },
+        "any": {}
+       }
+      }
+     }
+    }
+   ],
+   "expected": {
+    "reasoning": "need weather",
+    "content": null,
+    "tool_calls": [
+     {
+      "name": "get_weather",
+      "arguments": "{\"city\": \"Paris\"}"
+     }
+    ]
+   },
+   "reference_tools_called": true,
+   "reference_stream": {
+    "per_token": {
+     "reasoning": "need weather",
+     "content": null,
+     "tool_calls": [
+      {
+       "name": "get_weather",
+       "arguments": "{\"city\": \"Paris\"}"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "call-typed",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "q"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Get the weather",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string"
+         },
+         "days": {
+          "type": "integer"
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "search",
+       "description": null,
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "q": {
+          "type": "string",
+          "description": "查询 \"quoted\""
+         }
+        }
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "typed",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "n": {
+          "type": "integer"
+         },
+         "x": {
+          "type": "number"
+         },
+         "b": {
+          "type": "boolean"
+         },
+         "o": {
+          "type": "object"
+         },
+         "a": {
+          "type": "array"
+         },
+         "s": {
+          "type": "string"
+         },
+         "ns": {
+          "type": [
+           "null",
+           "string"
+          ]
+         },
+         "any": {}
+        }
+       }
+      }
+     }
+    ]
+   },
+   "output": "<think>r</think><tool_call>typed<arg_key>n</arg_key><arg_value>5</arg_value><arg_key>x</arg_key><arg_value>2.5</arg_value><arg_key>b</arg_key><arg_value>true</arg_value><arg_key>o</arg_key><arg_value>{\"k\": [1, 2]}</arg_value><arg_key>a</arg_key><arg_value>[1, \"x\"]</arg_value><arg_key>s</arg_key><arg_value>007</arg_value><arg_key>ns</arg_key><arg_value>null</arg_value><arg_key>any</arg_key><arg_value>12</arg_value></tool_call>",
+   "thinking": true,
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the weather",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "search",
+      "description": null,
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "q": {
+         "type": "string",
+         "description": "查询 \"quoted\""
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "typed",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "n": {
+         "type": "integer"
+        },
+        "x": {
+         "type": "number"
+        },
+        "b": {
+         "type": "boolean"
+        },
+        "o": {
+         "type": "object"
+        },
+        "a": {
+         "type": "array"
+        },
+        "s": {
+         "type": "string"
+        },
+        "ns": {
+         "type": [
+          "null",
+          "string"
+         ]
+        },
+        "any": {}
+       }
+      }
+     }
+    }
+   ],
+   "expected": {
+    "reasoning": "r",
+    "content": null,
+    "tool_calls": [
+     {
+      "name": "typed",
+      "arguments": "{\"n\": 5, \"x\": 2.5, \"b\": true, \"o\": {\"k\": [1, 2]}, \"a\": [1, \"x\"], \"s\": \"007\", \"ns\": null, \"any\": \"12\"}"
+     }
+    ]
+   },
+   "reference_tools_called": true,
+   "reference_stream": {
+    "per_token": {
+     "reasoning": "r",
+     "content": null,
+     "tool_calls": [
+      {
+       "name": "typed",
+       "arguments": "{\"n\": 5, \"x\": 2.5, \"b\": true, \"o\": {\"k\": [1, 2]}, \"a\": [1, \"x\"], \"s\": \"007\", \"ns\": null, \"any\": \"12\"}"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "call-content-before",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "q"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Get the weather",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string"
+         },
+         "days": {
+          "type": "integer"
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "search",
+       "description": null,
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "q": {
+          "type": "string",
+          "description": "查询 \"quoted\""
+         }
+        }
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "typed",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "n": {
+          "type": "integer"
+         },
+         "x": {
+          "type": "number"
+         },
+         "b": {
+          "type": "boolean"
+         },
+         "o": {
+          "type": "object"
+         },
+         "a": {
+          "type": "array"
+         },
+         "s": {
+          "type": "string"
+         },
+         "ns": {
+          "type": [
+           "null",
+           "string"
+          ]
+         },
+         "any": {}
+        }
+       }
+      }
+     }
+    ]
+   },
+   "output": "<think>r</think>\n\nLet me check.\n<tool_call>search<arg_key>q</arg_key><arg_value>x</arg_value></tool_call>",
+   "thinking": true,
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the weather",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "search",
+      "description": null,
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "q": {
+         "type": "string",
+         "description": "查询 \"quoted\""
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "typed",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "n": {
+         "type": "integer"
+        },
+        "x": {
+         "type": "number"
+        },
+        "b": {
+         "type": "boolean"
+        },
+        "o": {
+         "type": "object"
+        },
+        "a": {
+         "type": "array"
+        },
+        "s": {
+         "type": "string"
+        },
+        "ns": {
+         "type": [
+          "null",
+          "string"
+         ]
+        },
+        "any": {}
+       }
+      }
+     }
+    }
+   ],
+   "expected": {
+    "reasoning": "r",
+    "content": "Let me check.",
+    "tool_calls": [
+     {
+      "name": "search",
+      "arguments": "{\"q\": \"x\"}"
+     }
+    ]
+   },
+   "reference_tools_called": true,
+   "reference_stream": {
+    "per_token": {
+     "reasoning": "r",
+     "content": "\n\nLet me check.\n",
+     "tool_calls": [
+      {
+       "name": "search",
+       "arguments": "{\"q\": \"x\"}"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "call-content-after",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "q"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Get the weather",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string"
+         },
+         "days": {
+          "type": "integer"
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "search",
+       "description": null,
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "q": {
+          "type": "string",
+          "description": "查询 \"quoted\""
+         }
+        }
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "typed",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "n": {
+          "type": "integer"
+         },
+         "x": {
+          "type": "number"
+         },
+         "b": {
+          "type": "boolean"
+         },
+         "o": {
+          "type": "object"
+         },
+         "a": {
+          "type": "array"
+         },
+         "s": {
+          "type": "string"
+         },
+         "ns": {
+          "type": [
+           "null",
+           "string"
+          ]
+         },
+         "any": {}
+        }
+       }
+      }
+     }
+    ]
+   },
+   "output": "<think>r</think>Before.<tool_call>search<arg_key>q</arg_key><arg_value>x</arg_value></tool_call>After.",
+   "thinking": true,
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the weather",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "search",
+      "description": null,
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "q": {
+         "type": "string",
+         "description": "查询 \"quoted\""
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "typed",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "n": {
+         "type": "integer"
+        },
+        "x": {
+         "type": "number"
+        },
+        "b": {
+         "type": "boolean"
+        },
+        "o": {
+         "type": "object"
+        },
+        "a": {
+         "type": "array"
+        },
+        "s": {
+         "type": "string"
+        },
+        "ns": {
+         "type": [
+          "null",
+          "string"
+         ]
+        },
+        "any": {}
+       }
+      }
+     }
+    }
+   ],
+   "expected": {
+    "reasoning": "r",
+    "content": "Before.",
+    "tool_calls": [
+     {
+      "name": "search",
+      "arguments": "{\"q\": \"x\"}"
+     }
+    ]
+   },
+   "reference_tools_called": true,
+   "reference_stream": {
+    "per_token": {
+     "reasoning": "r",
+     "content": "Before.After.",
+     "tool_calls": [
+      {
+       "name": "search",
+       "arguments": "{\"q\": \"x\"}"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "calls-two",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "q"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Get the weather",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string"
+         },
+         "days": {
+          "type": "integer"
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "search",
+       "description": null,
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "q": {
+          "type": "string",
+          "description": "查询 \"quoted\""
+         }
+        }
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "typed",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "n": {
+          "type": "integer"
+         },
+         "x": {
+          "type": "number"
+         },
+         "b": {
+          "type": "boolean"
+         },
+         "o": {
+          "type": "object"
+         },
+         "a": {
+          "type": "array"
+         },
+         "s": {
+          "type": "string"
+         },
+         "ns": {
+          "type": [
+           "null",
+           "string"
+          ]
+         },
+         "any": {}
+        }
+       }
+      }
+     }
+    ]
+   },
+   "output": "<think>r</think><tool_call>search<arg_key>q</arg_key><arg_value>a</arg_value></tool_call>\n<tool_call>get_weather<arg_key>city</arg_key><arg_value>Rome</arg_value><arg_key>days</arg_key><arg_value>2</arg_value></tool_call>",
+   "thinking": true,
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the weather",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "search",
+      "description": null,
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "q": {
+         "type": "string",
+         "description": "查询 \"quoted\""
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "typed",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "n": {
+         "type": "integer"
+        },
+        "x": {
+         "type": "number"
+        },
+        "b": {
+         "type": "boolean"
+        },
+        "o": {
+         "type": "object"
+        },
+        "a": {
+         "type": "array"
+        },
+        "s": {
+         "type": "string"
+        },
+        "ns": {
+         "type": [
+          "null",
+          "string"
+         ]
+        },
+        "any": {}
+       }
+      }
+     }
+    }
+   ],
+   "expected": {
+    "reasoning": "r",
+    "content": null,
+    "tool_calls": [
+     {
+      "name": "search",
+      "arguments": "{\"q\": \"a\"}"
+     },
+     {
+      "name": "get_weather",
+      "arguments": "{\"city\": \"Rome\", \"days\": 2}"
+     }
+    ]
+   },
+   "reference_tools_called": true,
+   "reference_stream": {
+    "per_token": {
+     "reasoning": "r",
+     "content": null,
+     "tool_calls": [
+      {
+       "name": "search",
+       "arguments": "{\"q\": \"a\"}"
+      },
+      {
+       "name": "get_weather",
+       "arguments": "{\"city\": \"Rome\", \"days\": 2}"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "call-from-reasoning",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "q"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Get the weather",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string"
+         },
+         "days": {
+          "type": "integer"
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "search",
+       "description": null,
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "q": {
+          "type": "string",
+          "description": "查询 \"quoted\""
+         }
+        }
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "typed",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "n": {
+          "type": "integer"
+         },
+         "x": {
+          "type": "number"
+         },
+         "b": {
+          "type": "boolean"
+         },
+         "o": {
+          "type": "object"
+         },
+         "a": {
+          "type": "array"
+         },
+         "s": {
+          "type": "string"
+         },
+         "ns": {
+          "type": [
+           "null",
+           "string"
+          ]
+         },
+         "any": {}
+        }
+       }
+      }
+     }
+    ]
+   },
+   "output": "thinking...<tool_call>search<arg_key>q</arg_key><arg_value>z</arg_value></tool_call>",
+   "thinking": true,
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the weather",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "search",
+      "description": null,
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "q": {
+         "type": "string",
+         "description": "查询 \"quoted\""
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "typed",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "n": {
+         "type": "integer"
+        },
+        "x": {
+         "type": "number"
+        },
+        "b": {
+         "type": "boolean"
+        },
+        "o": {
+         "type": "object"
+        },
+        "a": {
+         "type": "array"
+        },
+        "s": {
+         "type": "string"
+        },
+        "ns": {
+         "type": [
+          "null",
+          "string"
+         ]
+        },
+        "any": {}
+       }
+      }
+     }
+    }
+   ],
+   "expected": {
+    "reasoning": "thinking...",
+    "content": null,
+    "tool_calls": [
+     {
+      "name": "search",
+      "arguments": "{\"q\": \"z\"}"
+     }
+    ]
+   },
+   "reference_tools_called": true,
+   "reference_stream": {
+    "per_token": {
+     "reasoning": "thinking...",
+     "content": null,
+     "tool_calls": [
+      {
+       "name": "search",
+       "arguments": "{\"q\": \"z\"}"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "call-no-args",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "q"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Get the weather",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string"
+         },
+         "days": {
+          "type": "integer"
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "search",
+       "description": null,
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "q": {
+          "type": "string",
+          "description": "查询 \"quoted\""
+         }
+        }
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "typed",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "n": {
+          "type": "integer"
+         },
+         "x": {
+          "type": "number"
+         },
+         "b": {
+          "type": "boolean"
+         },
+         "o": {
+          "type": "object"
+         },
+         "a": {
+          "type": "array"
+         },
+         "s": {
+          "type": "string"
+         },
+         "ns": {
+          "type": [
+           "null",
+           "string"
+          ]
+         },
+         "any": {}
+        }
+       }
+      }
+     }
+    ]
+   },
+   "output": "<think>r</think><tool_call>search</tool_call>",
+   "thinking": true,
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the weather",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "search",
+      "description": null,
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "q": {
+         "type": "string",
+         "description": "查询 \"quoted\""
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "typed",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "n": {
+         "type": "integer"
+        },
+        "x": {
+         "type": "number"
+        },
+        "b": {
+         "type": "boolean"
+        },
+        "o": {
+         "type": "object"
+        },
+        "a": {
+         "type": "array"
+        },
+        "s": {
+         "type": "string"
+        },
+        "ns": {
+         "type": [
+          "null",
+          "string"
+         ]
+        },
+        "any": {}
+       }
+      }
+     }
+    }
+   ],
+   "expected": {
+    "reasoning": "r",
+    "content": null,
+    "tool_calls": [
+     {
+      "name": "search",
+      "arguments": "{}"
+     }
+    ]
+   },
+   "reference_tools_called": true,
+   "reference_stream": {
+    "per_token": {
+     "reasoning": "r",
+     "content": null,
+     "tool_calls": [
+      {
+       "name": "search",
+       "arguments": "{}"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "call-name-ws",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "q"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Get the weather",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string"
+         },
+         "days": {
+          "type": "integer"
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "search",
+       "description": null,
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "q": {
+          "type": "string",
+          "description": "查询 \"quoted\""
+         }
+        }
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "typed",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "n": {
+          "type": "integer"
+         },
+         "x": {
+          "type": "number"
+         },
+         "b": {
+          "type": "boolean"
+         },
+         "o": {
+          "type": "object"
+         },
+         "a": {
+          "type": "array"
+         },
+         "s": {
+          "type": "string"
+         },
+         "ns": {
+          "type": [
+           "null",
+           "string"
+          ]
+         },
+         "any": {}
+        }
+       }
+      }
+     }
+    ]
+   },
+   "output": "<think>r</think><tool_call>\n search \n<arg_key> q </arg_key>\n<arg_value> v \n</arg_value>\n</tool_call>",
+   "thinking": true,
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the weather",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "search",
+      "description": null,
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "q": {
+         "type": "string",
+         "description": "查询 \"quoted\""
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "typed",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "n": {
+         "type": "integer"
+        },
+        "x": {
+         "type": "number"
+        },
+        "b": {
+         "type": "boolean"
+        },
+        "o": {
+         "type": "object"
+        },
+        "a": {
+         "type": "array"
+        },
+        "s": {
+         "type": "string"
+        },
+        "ns": {
+         "type": [
+          "null",
+          "string"
+         ]
+        },
+        "any": {}
+       }
+      }
+     }
+    }
+   ],
+   "expected": {
+    "reasoning": "r",
+    "content": null,
+    "tool_calls": [
+     {
+      "name": "search",
+      "arguments": "{\"q\": \" v \\n\"}"
+     }
+    ]
+   },
+   "reference_tools_called": true,
+   "reference_stream": {
+    "per_token": {
+     "reasoning": "r",
+     "content": null,
+     "tool_calls": [
+      {
+       "name": "search",
+       "arguments": "{\"q\": \" v \\n\"}"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "call-unknown-name",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "q"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Get the weather",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string"
+         },
+         "days": {
+          "type": "integer"
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "search",
+       "description": null,
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "q": {
+          "type": "string",
+          "description": "查询 \"quoted\""
+         }
+        }
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "typed",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "n": {
+          "type": "integer"
+         },
+         "x": {
+          "type": "number"
+         },
+         "b": {
+          "type": "boolean"
+         },
+         "o": {
+          "type": "object"
+         },
+         "a": {
+          "type": "array"
+         },
+         "s": {
+          "type": "string"
+         },
+         "ns": {
+          "type": [
+           "null",
+           "string"
+          ]
+         },
+         "any": {}
+        }
+       }
+      }
+     }
+    ]
+   },
+   "output": "<think>r</think>Hi.<tool_call>nope<arg_key>q</arg_key><arg_value>x</arg_value></tool_call>tail",
+   "thinking": true,
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the weather",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "search",
+      "description": null,
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "q": {
+         "type": "string",
+         "description": "查询 \"quoted\""
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "typed",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "n": {
+         "type": "integer"
+        },
+        "x": {
+         "type": "number"
+        },
+        "b": {
+         "type": "boolean"
+        },
+        "o": {
+         "type": "object"
+        },
+        "a": {
+         "type": "array"
+        },
+        "s": {
+         "type": "string"
+        },
+        "ns": {
+         "type": [
+          "null",
+          "string"
+         ]
+        },
+        "any": {}
+       }
+      }
+     }
+    }
+   ],
+   "expected": {
+    "reasoning": "r",
+    "content": "Hi.tail",
+    "tool_calls": []
+   },
+   "reference_tools_called": false,
+   "reference_stream": {
+    "per_token": {
+     "reasoning": "r",
+     "content": "Hi.tail",
+     "tool_calls": []
+    }
+   }
+  },
+  {
+   "name": "call-truncated",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "q"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Get the weather",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string"
+         },
+         "days": {
+          "type": "integer"
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "search",
+       "description": null,
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "q": {
+          "type": "string",
+          "description": "查询 \"quoted\""
+         }
+        }
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "typed",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "n": {
+          "type": "integer"
+         },
+         "x": {
+          "type": "number"
+         },
+         "b": {
+          "type": "boolean"
+         },
+         "o": {
+          "type": "object"
+         },
+         "a": {
+          "type": "array"
+         },
+         "s": {
+          "type": "string"
+         },
+         "ns": {
+          "type": [
+           "null",
+           "string"
+          ]
+         },
+         "any": {}
+        }
+       }
+      }
+     }
+    ]
+   },
+   "output": "<think>r</think><tool_call>search<arg_key>q</arg_key><arg_value>par",
+   "thinking": true,
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the weather",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "search",
+      "description": null,
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "q": {
+         "type": "string",
+         "description": "查询 \"quoted\""
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "typed",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "n": {
+         "type": "integer"
+        },
+        "x": {
+         "type": "number"
+        },
+        "b": {
+         "type": "boolean"
+        },
+        "o": {
+         "type": "object"
+        },
+        "a": {
+         "type": "array"
+        },
+        "s": {
+         "type": "string"
+        },
+        "ns": {
+         "type": [
+          "null",
+          "string"
+         ]
+        },
+        "any": {}
+       }
+      }
+     }
+    }
+   ],
+   "expected": {
+    "reasoning": "r",
+    "content": null,
+    "tool_calls": [
+     {
+      "name": "search",
+      "arguments": "{}"
+     }
+    ]
+   },
+   "reference_tools_called": true,
+   "reference_stream": {
+    "per_token": {
+     "reasoning": "r",
+     "content": null,
+     "tool_calls": [
+      {
+       "name": "search",
+       "arguments": "{\"q\": \"par"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "call-truncated-name",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "q"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Get the weather",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string"
+         },
+         "days": {
+          "type": "integer"
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "search",
+       "description": null,
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "q": {
+          "type": "string",
+          "description": "查询 \"quoted\""
+         }
+        }
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "typed",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "n": {
+          "type": "integer"
+         },
+         "x": {
+          "type": "number"
+         },
+         "b": {
+          "type": "boolean"
+         },
+         "o": {
+          "type": "object"
+         },
+         "a": {
+          "type": "array"
+         },
+         "s": {
+          "type": "string"
+         },
+         "ns": {
+          "type": [
+           "null",
+           "string"
+          ]
+         },
+         "any": {}
+        }
+       }
+      }
+     }
+    ]
+   },
+   "output": "<think>r</think><tool_call>sea",
+   "thinking": true,
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the weather",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "search",
+      "description": null,
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "q": {
+         "type": "string",
+         "description": "查询 \"quoted\""
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "typed",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "n": {
+         "type": "integer"
+        },
+        "x": {
+         "type": "number"
+        },
+        "b": {
+         "type": "boolean"
+        },
+        "o": {
+         "type": "object"
+        },
+        "a": {
+         "type": "array"
+        },
+        "s": {
+         "type": "string"
+        },
+        "ns": {
+         "type": [
+          "null",
+          "string"
+         ]
+        },
+        "any": {}
+       }
+      }
+     }
+    }
+   ],
+   "expected": {
+    "reasoning": "r",
+    "content": null,
+    "tool_calls": []
+   },
+   "reference_tools_called": false,
+   "reference_stream": {
+    "per_token": {
+     "reasoning": "r",
+     "content": null,
+     "tool_calls": []
+    }
+   }
+  },
+  {
+   "name": "call-dup-key",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "q"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Get the weather",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string"
+         },
+         "days": {
+          "type": "integer"
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "search",
+       "description": null,
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "q": {
+          "type": "string",
+          "description": "查询 \"quoted\""
+         }
+        }
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "typed",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "n": {
+          "type": "integer"
+         },
+         "x": {
+          "type": "number"
+         },
+         "b": {
+          "type": "boolean"
+         },
+         "o": {
+          "type": "object"
+         },
+         "a": {
+          "type": "array"
+         },
+         "s": {
+          "type": "string"
+         },
+         "ns": {
+          "type": [
+           "null",
+           "string"
+          ]
+         },
+         "any": {}
+        }
+       }
+      }
+     }
+    ]
+   },
+   "output": "<think>r</think><tool_call>search<arg_key>q</arg_key><arg_value>1</arg_value><arg_key>q</arg_key><arg_value>2</arg_value></tool_call>",
+   "thinking": true,
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the weather",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "search",
+      "description": null,
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "q": {
+         "type": "string",
+         "description": "查询 \"quoted\""
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "typed",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "n": {
+         "type": "integer"
+        },
+        "x": {
+         "type": "number"
+        },
+        "b": {
+         "type": "boolean"
+        },
+        "o": {
+         "type": "object"
+        },
+        "a": {
+         "type": "array"
+        },
+        "s": {
+         "type": "string"
+        },
+        "ns": {
+         "type": [
+          "null",
+          "string"
+         ]
+        },
+        "any": {}
+       }
+      }
+     }
+    }
+   ],
+   "expected": {
+    "reasoning": "r",
+    "content": null,
+    "tool_calls": [
+     {
+      "name": "search",
+      "arguments": "{\"q\": \"2\"}"
+     }
+    ]
+   },
+   "reference_tools_called": true,
+   "reference_stream": {
+    "per_token": {
+     "reasoning": "r",
+     "content": null,
+     "tool_calls": [
+      {
+       "name": "search",
+       "arguments": "{\"q\": \"1"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "call-value-tags",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "q"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Get the weather",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string"
+         },
+         "days": {
+          "type": "integer"
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "search",
+       "description": null,
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "q": {
+          "type": "string",
+          "description": "查询 \"quoted\""
+         }
+        }
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "typed",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "n": {
+          "type": "integer"
+         },
+         "x": {
+          "type": "number"
+         },
+         "b": {
+          "type": "boolean"
+         },
+         "o": {
+          "type": "object"
+         },
+         "a": {
+          "type": "array"
+         },
+         "s": {
+          "type": "string"
+         },
+         "ns": {
+          "type": [
+           "null",
+           "string"
+          ]
+         },
+         "any": {}
+        }
+       }
+      }
+     }
+    ]
+   },
+   "output": "<think>r</think><tool_call>search<arg_key>q</arg_key><arg_value>a <b> c</arg_value></tool_call>",
+   "thinking": true,
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the weather",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "search",
+      "description": null,
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "q": {
+         "type": "string",
+         "description": "查询 \"quoted\""
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "typed",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "n": {
+         "type": "integer"
+        },
+        "x": {
+         "type": "number"
+        },
+        "b": {
+         "type": "boolean"
+        },
+        "o": {
+         "type": "object"
+        },
+        "a": {
+         "type": "array"
+        },
+        "s": {
+         "type": "string"
+        },
+        "ns": {
+         "type": [
+          "null",
+          "string"
+         ]
+        },
+        "any": {}
+       }
+      }
+     }
+    }
+   ],
+   "expected": {
+    "reasoning": "r",
+    "content": null,
+    "tool_calls": [
+     {
+      "name": "search",
+      "arguments": "{\"q\": \"a <b> c\"}"
+     }
+    ]
+   },
+   "reference_tools_called": true,
+   "reference_stream": {
+    "per_token": {
+     "reasoning": "r",
+     "content": null,
+     "tool_calls": [
+      {
+       "name": "search",
+       "arguments": "{\"q\": \"a <b> c\"}"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "call-json-body",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "q"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Get the weather",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string"
+         },
+         "days": {
+          "type": "integer"
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "search",
+       "description": null,
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "q": {
+          "type": "string",
+          "description": "查询 \"quoted\""
+         }
+        }
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "typed",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "n": {
+          "type": "integer"
+         },
+         "x": {
+          "type": "number"
+         },
+         "b": {
+          "type": "boolean"
+         },
+         "o": {
+          "type": "object"
+         },
+         "a": {
+          "type": "array"
+         },
+         "s": {
+          "type": "string"
+         },
+         "ns": {
+          "type": [
+           "null",
+           "string"
+          ]
+         },
+         "any": {}
+        }
+       }
+      }
+     }
+    ]
+   },
+   "output": "<think>r</think><tool_call>{\"name\": \"search\", \"arguments\": {\"q\": \"j\"}}</tool_call>",
+   "thinking": true,
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the weather",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "search",
+      "description": null,
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "q": {
+         "type": "string",
+         "description": "查询 \"quoted\""
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "typed",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "n": {
+         "type": "integer"
+        },
+        "x": {
+         "type": "number"
+        },
+        "b": {
+         "type": "boolean"
+        },
+        "o": {
+         "type": "object"
+        },
+        "a": {
+         "type": "array"
+        },
+        "s": {
+         "type": "string"
+        },
+        "ns": {
+         "type": [
+          "null",
+          "string"
+         ]
+        },
+        "any": {}
+       }
+      }
+     }
+    }
+   ],
+   "expected": {
+    "reasoning": "r",
+    "content": null,
+    "tool_calls": []
+   },
+   "reference_tools_called": false,
+   "reference_stream": {
+    "per_token": {
+     "reasoning": "r",
+     "content": null,
+     "tool_calls": []
+    }
+   }
+  },
+  {
+   "name": "call-no-tools",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "q"
+     }
+    ]
+   },
+   "output": "<think>r</think>text <tool_call>search<arg_key>q</arg_key><arg_value>x</arg_value></tool_call> more",
+   "thinking": true,
+   "tools": null,
+   "expected": {
+    "reasoning": "r",
+    "content": "text",
+    "tool_calls": []
+   },
+   "reference_tools_called": false,
+   "reference_stream": {
+    "per_token": {
+     "reasoning": "r",
+     "content": "text  more",
+     "tool_calls": []
+    }
+   }
+  },
+  {
+   "name": "call-thinking-off",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "q"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Get the weather",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string"
+         },
+         "days": {
+          "type": "integer"
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "search",
+       "description": null,
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "q": {
+          "type": "string",
+          "description": "查询 \"quoted\""
+         }
+        }
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "typed",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "n": {
+          "type": "integer"
+         },
+         "x": {
+          "type": "number"
+         },
+         "b": {
+          "type": "boolean"
+         },
+         "o": {
+          "type": "object"
+         },
+         "a": {
+          "type": "array"
+         },
+         "s": {
+          "type": "string"
+         },
+         "ns": {
+          "type": [
+           "null",
+           "string"
+          ]
+         },
+         "any": {}
+        }
+       }
+      }
+     }
+    ],
+    "chat_template_kwargs": {
+     "enable_thinking": false
+    }
+   },
+   "output": "Sure.<tool_call>search<arg_key>q</arg_key><arg_value>x</arg_value></tool_call>",
+   "thinking": false,
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the weather",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "search",
+      "description": null,
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "q": {
+         "type": "string",
+         "description": "查询 \"quoted\""
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "typed",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "n": {
+         "type": "integer"
+        },
+        "x": {
+         "type": "number"
+        },
+        "b": {
+         "type": "boolean"
+        },
+        "o": {
+         "type": "object"
+        },
+        "a": {
+         "type": "array"
+        },
+        "s": {
+         "type": "string"
+        },
+        "ns": {
+         "type": [
+          "null",
+          "string"
+         ]
+        },
+        "any": {}
+       }
+      }
+     }
+    }
+   ],
+   "expected": {
+    "reasoning": null,
+    "content": "Sure.",
+    "tool_calls": [
+     {
+      "name": "search",
+      "arguments": "{\"q\": \"x\"}"
+     }
+    ]
+   },
+   "reference_tools_called": true,
+   "enable_thinking": false,
+   "reference_stream": {
+    "per_token": {
+     "reasoning": null,
+     "content": "Sure.",
+     "tool_calls": [
+      {
+       "name": "search",
+       "arguments": "{\"q\": \"x\"}"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "tool-choice-none",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "q"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "search",
+       "description": null,
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "q": {
+          "type": "string",
+          "description": "查询 \"quoted\""
+         }
+        }
+       }
+      }
+     }
+    ],
+    "tool_choice": "none"
+   },
+   "output": "<think>r</think>a<tool_call>search<arg_key>q</arg_key><arg_value>x</arg_value></tool_call>b",
+   "thinking": true,
+   "tools": null,
+   "expected": {
+    "reasoning": "r",
+    "content": "ab",
+    "tool_calls": []
+   },
+   "reference_tools_called": false,
+   "reference_stream": {
+    "per_token": {
+     "reasoning": "r",
+     "content": "ab",
+     "tool_calls": []
+    }
+   }
+  },
+  {
+   "name": "ws-only-content-call",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "q"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Get the weather",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string"
+         },
+         "days": {
+          "type": "integer"
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "search",
+       "description": null,
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "q": {
+          "type": "string",
+          "description": "查询 \"quoted\""
+         }
+        }
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "typed",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "n": {
+          "type": "integer"
+         },
+         "x": {
+          "type": "number"
+         },
+         "b": {
+          "type": "boolean"
+         },
+         "o": {
+          "type": "object"
+         },
+         "a": {
+          "type": "array"
+         },
+         "s": {
+          "type": "string"
+         },
+         "ns": {
+          "type": [
+           "null",
+           "string"
+          ]
+         },
+         "any": {}
+        }
+       }
+      }
+     }
+    ]
+   },
+   "output": "<think>r</think>\n\n<tool_call>search<arg_key>q</arg_key><arg_value>x</arg_value></tool_call>\n",
+   "thinking": true,
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the weather",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "search",
+      "description": null,
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "q": {
+         "type": "string",
+         "description": "查询 \"quoted\""
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "typed",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "n": {
+         "type": "integer"
+        },
+        "x": {
+         "type": "number"
+        },
+        "b": {
+         "type": "boolean"
+        },
+        "o": {
+         "type": "object"
+        },
+        "a": {
+         "type": "array"
+        },
+        "s": {
+         "type": "string"
+        },
+        "ns": {
+         "type": [
+          "null",
+          "string"
+         ]
+        },
+        "any": {}
+       }
+      }
+     }
+    }
+   ],
+   "expected": {
+    "reasoning": "r",
+    "content": null,
+    "tool_calls": [
+     {
+      "name": "search",
+      "arguments": "{\"q\": \"x\"}"
+     }
+    ]
+   },
+   "reference_tools_called": true,
+   "reference_stream": {
+    "per_token": {
+     "reasoning": "r",
+     "content": null,
+     "tool_calls": [
+      {
+       "name": "search",
+       "arguments": "{\"q\": \"x\"}"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "unicode",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "q"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Get the weather",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string"
+         },
+         "days": {
+          "type": "integer"
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "search",
+       "description": null,
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "q": {
+          "type": "string",
+          "description": "查询 \"quoted\""
+         }
+        }
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "typed",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "n": {
+          "type": "integer"
+         },
+         "x": {
+          "type": "number"
+         },
+         "b": {
+          "type": "boolean"
+         },
+         "o": {
+          "type": "object"
+         },
+         "a": {
+          "type": "array"
+         },
+         "s": {
+          "type": "string"
+         },
+         "ns": {
+          "type": [
+           "null",
+           "string"
+          ]
+         },
+         "any": {}
+        }
+       }
+      }
+     }
+    ]
+   },
+   "output": "<think>思考</think>答案 <tool_call>search<arg_key>q</arg_key><arg_value>中文 \"x\"\nline</arg_value></tool_call>",
+   "thinking": true,
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the weather",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "search",
+      "description": null,
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "q": {
+         "type": "string",
+         "description": "查询 \"quoted\""
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "typed",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "n": {
+         "type": "integer"
+        },
+        "x": {
+         "type": "number"
+        },
+        "b": {
+         "type": "boolean"
+        },
+        "o": {
+         "type": "object"
+        },
+        "a": {
+         "type": "array"
+        },
+        "s": {
+         "type": "string"
+        },
+        "ns": {
+         "type": [
+          "null",
+          "string"
+         ]
+        },
+        "any": {}
+       }
+      }
+     }
+    }
+   ],
+   "expected": {
+    "reasoning": "思考",
+    "content": "答案",
+    "tool_calls": [
+     {
+      "name": "search",
+      "arguments": "{\"q\": \"中文 \\\"x\\\"\\nline\"}"
+     }
+    ]
+   },
+   "reference_tools_called": true,
+   "reference_stream": {
+    "per_token": {
+     "reasoning": "思考",
+     "content": "答案 ",
+     "tool_calls": [
+      {
+       "name": "search",
+       "arguments": "{\"q\": \"中文 \\\"x\\\"\\nline\"}"
+      }
+     ]
+    }
+   }
+  }
+ ]
+}

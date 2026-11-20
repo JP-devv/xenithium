@@ -1,0 +1,713 @@
+{
+ "about": "Jinja interpreter golden: jinja2 3.1.6, transformers 5.16.1 chat-template environment",
+ "cases": [
+  {
+   "name": "ws-trim-blocks",
+   "template": "{% if true %}\nA\n{% endif %}\nB",
+   "context": {},
+   "output": "A\nB"
+  },
+  {
+   "name": "ws-lstrip",
+   "template": "x\n    {% if true %}\n    A\n    {% endif %}\ny",
+   "context": {},
+   "output": "x\n    A\ny"
+  },
+  {
+   "name": "ws-minus",
+   "template": "a   {{- \"b\" -}}   c\n  {%- if 1 %} d {% endif -%}  \n e",
+   "context": {},
+   "output": "abc d e"
+  },
+  {
+   "name": "ws-plus",
+   "template": "x\n    {%+ if true %}A{% endif +%}\nB",
+   "context": {},
+   "output": "x\n    A\nB"
+  },
+  {
+   "name": "ws-expr-no-trim",
+   "template": "{{ \"a\" }}\n{{ \"b\" }}\n",
+   "context": {},
+   "output": "a\nb"
+  },
+  {
+   "name": "ws-comment",
+   "template": "a\n  {# c #}\nb {#- x -#} c",
+   "context": {},
+   "output": "a\nbc"
+  },
+  {
+   "name": "ws-trailing-newline",
+   "template": "a\n",
+   "context": {},
+   "output": "a"
+  },
+  {
+   "name": "ws-crlf",
+   "template": "{% if true %}\r\nA{% endif %}\r\nB",
+   "context": {},
+   "output": "AB"
+  },
+  {
+   "name": "ws-raw",
+   "template": "{% raw %}{{ x }} {% if %}{% endraw %}!",
+   "context": {},
+   "output": "{{ x }} {% if %}!"
+  },
+  {
+   "name": "lit-strings",
+   "template": "{{ 'a\\nb' }}|{{ \"q'\" }}|{{ 'x' 'y' }}|{{ '\\x41\\u00e9\\U0001F600' }}|{{ 'a\\qb' }}",
+   "context": {},
+   "output": "a\nb|q'|xy|Aé😀|a\\qb"
+  },
+  {
+   "name": "lit-numbers",
+   "template": "{{ 1 }} {{ 1.5 }} {{ 1e3 }} {{ 10/4 }} {{ 10//4 }} {{ -7//2 }} {{ -7%3 }} {{ 2**10 }} {{ 1_000 }} {{ 0.1+0.2 }}",
+   "context": {},
+   "output": "1 1.5 1000.0 2.5 2 -4 2 1024 1000 0.30000000000000004"
+  },
+  {
+   "name": "lit-bools",
+   "template": "{{ true }} {{ False }} {{ none }} {{ None }} {{ [1, \"a\", none, true] }} {{ (1,) }} {{ {\"k\": [1]} }}",
+   "context": {},
+   "output": "True False None None [1, 'a', None, True] (1,) {'k': [1]}"
+  },
+  {
+   "name": "op-concat",
+   "template": "{{ 1 ~ \"a\" ~ none ~ undefined_x }}|{{ \"a\" + \"b\" }}|{{ [1] + [2] }}|{{ \"ab\" * 3 }}",
+   "context": {},
+   "output": "1aNone|ab|[1, 2]|ababab"
+  },
+  {
+   "name": "op-compare",
+   "template": "{{ 1 < 2 }} {{ \"a\" < \"b\" }} {{ 1 == 1.0 }} {{ true == 1 }} {{ [1,2] == [1,2] }} {{ (1,) == [1] }} {{ 1 != 2 }}",
+   "context": {},
+   "output": "True True True True True False True"
+  },
+  {
+   "name": "op-in",
+   "template": "{{ 'a' in 'cat' }} {{ 2 in [1,2] }} {{ 'k' in {'k':1} }} {{ 'x' not in 'abc' }} {{ 'b' in d }}",
+   "context": {
+    "d": {
+     "a": 1,
+     "b": [
+      1,
+      2.5,
+      null,
+      true
+     ],
+     "c": {
+      "x": "é\"\n\t"
+     },
+     "z": "end"
+    }
+   },
+   "output": "True True True True True"
+  },
+  {
+   "name": "op-logic",
+   "template": "{{ 0 or \"x\" }} {{ 1 and \"y\" }} {{ not 0 }} {{ none or [] }} {{ \"\" and 1 }} {{ not (1 and 0) }}",
+   "context": {},
+   "output": "x y True []  True"
+  },
+  {
+   "name": "op-cond",
+   "template": "{{ 'y' if 1 else 'n' }} {{ 'y' if 0 else 'n' }} [{{ 'y' if 0 }}] {{ ('a' + 'b' if true else '') }}",
+   "context": {},
+   "output": "y n [] ab"
+  },
+  {
+   "name": "op-precedence",
+   "template": "{{ 1 + 2 * 3 }} {{ (1 + 2) * 3 }} {{ \"a\" ~ 1 + 2 }} {{ -2 ** 2 }} {{ [1,2,3]|length - 1 }} {{ not 1 == 2 }}",
+   "context": {},
+   "error": "TypeError",
+   "message": "can only concatenate str (not \"int\") to str"
+  },
+  {
+   "name": "op-unary",
+   "template": "{{ -x }} {{ +x }} {{ -1.5 }} {{ - - 3 }}",
+   "context": {
+    "x": 4
+   },
+   "output": "-4 4 -1.5 3"
+  },
+  {
+   "name": "acc-attr-item",
+   "template": "{{ d.a }} {{ d[\"b\"][1] }} {{ d.c.x }} {{ d.b[-1] }} {{ d.missing }}|{{ d[\"nope\"] }}|{{ d.b.0 }}",
+   "context": {
+    "d": {
+     "a": 1,
+     "b": [
+      1,
+      2.5,
+      null,
+      true
+     ],
+     "c": {
+      "x": "é\"\n\t"
+     },
+     "z": "end"
+    }
+   },
+   "output": "1 2.5 é\"\n\t True ||1"
+  },
+  {
+   "name": "acc-slice",
+   "template": "{{ m[::-1]|map(attribute=\"role\")|join(\",\") }} {{ \"hello\"[1:3] }} {{ \"hello\"[::-1] }} {{ [1,2,3,4][1:] }} {{ [1,2,3][:-1] }} {{ \"héllo\"[1] }}",
+   "context": {
+    "m": [
+     {
+      "role": "system",
+      "content": "S"
+     },
+     {
+      "role": "user",
+      "content": "Hi"
+     },
+     {
+      "role": "assistant",
+      "content": "Yo"
+     },
+     {
+      "role": "user",
+      "content": "Q2"
+     }
+    ]
+   },
+   "output": "user,assistant,user,system el olleh [2, 3, 4] [1, 2] é"
+  },
+  {
+   "name": "acc-methods",
+   "template": "{{ ' a b '.strip() }}|{{ 'xxaxx'.strip('x') }}|{{ 'a,b,,c'.split(',') }}|{{ ' a  b '.split() }}|{{ 'a b c'.split(' ', 1) }}|{{ 'abc'.startswith('ab') }}|{{ 'abc'.endswith(('x','c')) }}|{{ 'aXa'.replace('a','b') }}|{{ 'AbC'.lower() }}{{ 'abc'.upper() }}|{{ '-'.join(['a','b']) }}|{{ 'abcb'.find('b') }}|{{ 'abcb'.rfind('b') }}|{{ 'abcb'.count('b') }}|{{ 'hello world'.title() }}|{{ 'hELLO'.capitalize() }}|{{ 'a\\nb\\r\\nc'.splitlines() }}|{{ '\\n\\nx\\n'.lstrip('\\n') }}|{{ 'a</think>b'.split('</think>')[-1] }}|{{ 'a,b,c'.rsplit(',', 1) }}",
+   "context": {},
+   "output": "a b|a|['a', 'b', '', 'c']|['a', 'b']|['a', 'b c']|True|True|bXb|abcABC|a-b|1|3|2|Hello World|Hello|['a', 'b', 'c']|x\n|b|['a,b', 'c']"
+  },
+  {
+   "name": "acc-dict-methods",
+   "template": "{{ d.get('a') }} {{ d.get('q', 7) }} {{ d.get('q') }} {% for k, v in d.items() %}{{ k }}={{ v }};{% endfor %} {{ d.keys()|list }} {{ d.values()|list|length }}",
+   "context": {
+    "d": {
+     "a": 1,
+     "b": [
+      1,
+      2.5,
+      null,
+      true
+     ],
+     "c": {
+      "x": "é\"\n\t"
+     },
+     "z": "end"
+    }
+   },
+   "output": "1 7 None a=1;b=[1, 2.5, None, True];c={'x': 'é\"\\n\\t'};z=end; ['a', 'b', 'c', 'z'] 4"
+  },
+  {
+   "name": "f-trim-replace",
+   "template": "[{{ '  x \\n'|trim }}] [{{ 'xxyxx'|trim('x') }}] {{ 'aaa'|replace('a','b', 2) }} {{ 'ab'|replace('', '-') }}",
+   "context": {},
+   "output": "[x] [y] bba -a-b-"
+  },
+  {
+   "name": "f-tojson",
+   "template": "{{ d|tojson }}|{{ d|tojson(ensure_ascii=True) }}|{{ d|tojson(indent=2) }}|{{ d|tojson(sort_keys=True, separators=(\",\", \":\")) }}|{{ \"é😀\"|tojson(ensure_ascii=True) }}|{{ [1.0, 1e-07, 1e16, 3.14159, -0.0, 100]|tojson }}|{{ \"\\u001b\\u007f\"|tojson }}",
+   "context": {
+    "d": {
+     "a": 1,
+     "b": [
+      1,
+      2.5,
+      null,
+      true
+     ],
+     "c": {
+      "x": "é\"\n\t"
+     },
+     "z": "end"
+    }
+   },
+   "output": "{\"a\": 1, \"b\": [1, 2.5, null, true], \"c\": {\"x\": \"é\\\"\\n\\t\"}, \"z\": \"end\"}|{\"a\": 1, \"b\": [1, 2.5, null, true], \"c\": {\"x\": \"\\u00e9\\\"\\n\\t\"}, \"z\": \"end\"}|{\n  \"a\": 1,\n  \"b\": [\n    1,\n    2.5,\n    null,\n    true\n  ],\n  \"c\": {\n    \"x\": \"é\\\"\\n\\t\"\n  },\n  \"z\": \"end\"\n}|{\"a\":1,\"b\":[1,2.5,null,true],\"c\":{\"x\":\"é\\\"\\n\\t\"},\"z\":\"end\"}|\"\\u00e9\\ud83d\\ude00\"|[1.0, 1e-07, 1e+16, 3.14159, -0.0, 100]|\"\\u001b\""
+  },
+  {
+   "name": "f-tojson-big",
+   "template": "{{ x|tojson }} {{ x }}",
+   "context": {
+    "x": 123456789012345678901234567890
+   },
+   "output": "123456789012345678901234567890 123456789012345678901234567890"
+  },
+  {
+   "name": "f-default",
+   "template": "{{ x|default('d') }} {{ none|default('d') }} {{ ''|default('d', true) }} {{ 0|d('z', boolean=true) }} {{ 'v'|default('d') }}",
+   "context": {},
+   "output": "d None d z v"
+  },
+  {
+   "name": "f-length-items",
+   "template": "{{ 'héllo'|length }} {{ [1,2]|length }} {{ d|length }} {{ nothing|length }} {% for k, v in d|items %}{{ k }}{% endfor %} {{ nothing|items|list }}",
+   "context": {
+    "d": {
+     "a": 1,
+     "b": [
+      1,
+      2.5,
+      null,
+      true
+     ],
+     "c": {
+      "x": "é\"\n\t"
+     },
+     "z": "end"
+    }
+   },
+   "output": "5 2 4 0 abcz []"
+  },
+  {
+   "name": "f-string-list",
+   "template": "{{ 5|string + 'x' }} {{ none|string }} {{ 'ab'|list }} {{ d|list }} {{ [3,1,2]|sort }} {{ [3,1,2]|sort(reverse=true) }} {{ [1,2,1]|unique|list }} {{ [1,2]|reverse|list }} {{ 'ab'|reverse }}",
+   "context": {
+    "d": {
+     "a": 1,
+     "b": [
+      1,
+      2.5,
+      null,
+      true
+     ],
+     "c": {
+      "x": "é\"\n\t"
+     },
+     "z": "end"
+    }
+   },
+   "output": "5x None ['a', 'b'] ['a', 'b', 'c', 'z'] [1, 2, 3] [3, 2, 1] [1, 2] [2, 1] ba"
+  },
+  {
+   "name": "f-join-map",
+   "template": "{{ m|map(attribute='role')|join(', ') }} {{ [1,2]|join }} {{ m|selectattr('role', 'equalto', 'user')|map(attribute='content')|join('+') }} {{ m|rejectattr('role', 'eq', 'user')|list|length }} {{ [0,1,2,'',none]|select|list }} {{ [1,2,3,4]|select('odd')|list }} {{ [1,2,3]|reject('even')|list }} {{ ['a','b']|map('upper')|join }}",
+   "context": {
+    "m": [
+     {
+      "role": "system",
+      "content": "S"
+     },
+     {
+      "role": "user",
+      "content": "Hi"
+     },
+     {
+      "role": "assistant",
+      "content": "Yo"
+     },
+     {
+      "role": "user",
+      "content": "Q2"
+     }
+    ]
+   },
+   "output": "system, user, assistant, user 12 Hi+Q2 2 [1, 2] [1, 3] [1, 3] AB"
+  },
+  {
+   "name": "f-first-last-minmax",
+   "template": "{{ [4,5]|first }} {{ [4,5]|last }} {{ 'ab'|first }} {{ [3,1,2]|min }} {{ [3,1,2]|max }} {{ [1,2,3]|sum }} {{ m|map(attribute='content')|first }}",
+   "context": {
+    "m": [
+     {
+      "role": "system",
+      "content": "S"
+     },
+     {
+      "role": "user",
+      "content": "Hi"
+     },
+     {
+      "role": "assistant",
+      "content": "Yo"
+     },
+     {
+      "role": "user",
+      "content": "Q2"
+     }
+    ]
+   },
+   "output": "4 5 a 1 3 6 S"
+  },
+  {
+   "name": "f-numbers",
+   "template": "{{ '12'|int + 1 }} {{ 'x'|int }} {{ 3.7|int }} {{ '2.5'|float }} {{ -3|abs }} {{ 2.567|round(2) }} {{ 2.5|round }} {{ 7|float }}",
+   "context": {},
+   "output": "13 0 3 2.5 3 2.57 2.0 7.0"
+  },
+  {
+   "name": "f-case-escape",
+   "template": "{{ 'aBc'|upper }} {{ 'aBc'|lower }} {{ 'hi there'|title }} {{ 'hI'|capitalize }} {{ '<a href=\"x\">&\\'</a>'|e }} {{ 'a b  c'|wordcount }}",
+   "context": {},
+   "output": "ABC abc Hi There Hi &lt;a href=&#34;x&#34;&gt;&amp;&#39;&lt;/a&gt; 3"
+  },
+  {
+   "name": "f-indent",
+   "template": "{{ 'a\\nb\\n\\nc'|indent(2) }}|{{ 'a\\nb'|indent(2, true) }}|{{ 'a\\n\\nb'|indent(width='> ', blank=true) }}",
+   "context": {},
+   "output": "a\n  b\n\n  c|  a\n  b|a\n> \n> b"
+  },
+  {
+   "name": "f-dictsort-attr",
+   "template": "{{ {'b': 1, 'a': 2}|dictsort }} {{ {'b': 1, 'a': 2}|dictsort(by='value') }} {{ m[0]|attr('role') }}",
+   "context": {
+    "m": [
+     {
+      "role": "system",
+      "content": "S"
+     },
+     {
+      "role": "user",
+      "content": "Hi"
+     },
+     {
+      "role": "assistant",
+      "content": "Yo"
+     },
+     {
+      "role": "user",
+      "content": "Q2"
+     }
+    ]
+   },
+   "output": "[('a', 2), ('b', 1)] [('b', 1), ('a', 2)] "
+  },
+  {
+   "name": "f-chain",
+   "template": "{{ m|length }} {{ (m|map(attribute='content')|list)[1:]|join('|')|lower|replace('q', 'Q') }}",
+   "context": {
+    "m": [
+     {
+      "role": "system",
+      "content": "S"
+     },
+     {
+      "role": "user",
+      "content": "Hi"
+     },
+     {
+      "role": "assistant",
+      "content": "Yo"
+     },
+     {
+      "role": "user",
+      "content": "Q2"
+     }
+    ]
+   },
+   "output": "4 hi|yo|Q2"
+  },
+  {
+   "name": "t-types",
+   "template": "{{ x is string }} {{ x is not string }} {{ 1 is number }} {{ true is number }} {{ 1 is integer }} {{ 1.0 is float }} {{ d is mapping }} {{ m is iterable }} {{ \"s\" is iterable }} {{ nope is iterable }} {{ m is sequence }} {{ none is none }} {{ nope is defined }} {{ nope is undefined }} {{ x is defined }}",
+   "context": {
+    "x": "v",
+    "d": {
+     "a": 1,
+     "b": [
+      1,
+      2.5,
+      null,
+      true
+     ],
+     "c": {
+      "x": "é\"\n\t"
+     },
+     "z": "end"
+    },
+    "m": [
+     {
+      "role": "system",
+      "content": "S"
+     },
+     {
+      "role": "user",
+      "content": "Hi"
+     },
+     {
+      "role": "assistant",
+      "content": "Yo"
+     },
+     {
+      "role": "user",
+      "content": "Q2"
+     }
+    ]
+   },
+   "output": "True False True True True True True True True True True True False True True"
+  },
+  {
+   "name": "t-bool-values",
+   "template": "{{ true is true }} {{ 1 is true }} {{ false is false }} {{ 0 is false }} {{ none is false }} {{ e is true }} {{ e is false }}",
+   "context": {
+    "e": false
+   },
+   "output": "True False True False False False True"
+  },
+  {
+   "name": "t-compare",
+   "template": "{{ 3 is odd }} {{ 4 is even }} {{ 9 is divisibleby 3 }} {{ 9 is divisibleby(4) }} {{ \"a\" is equalto \"a\" }} {{ 2 is eq 3 }} {{ 1 is lt 2 }} {{ 2 is in [1,2] }} {{ \"ab\" is lower }} {{ \"AB\" is upper }} {{ none is sameas none }} {{ f is callable }} {{ 3 is ge 3 }}",
+   "context": {},
+   "output": "True True True False True False True True True True True True True"
+  },
+  {
+   "name": "s-if-elif",
+   "template": "{% for v in [0, 1, 2, 3] %}{% if v == 0 %}z{% elif v == 1 %}o{% elif v is odd %}O{% else %}e{% endif %}{% endfor %}",
+   "context": {},
+   "output": "zoeO"
+  },
+  {
+   "name": "s-for-loop",
+   "template": "{% for x in \"abc\" %}{{ loop.index }}{{ loop.index0 }}{{ loop.revindex }}{{ loop.revindex0 }}{{ loop.first }}{{ loop.last }}{{ loop.length }}{{ loop.previtem }}{{ loop.nextitem }}{{ loop.cycle(\"x\", \"y\") }};{% endfor %}",
+   "context": {},
+   "output": "1032TrueFalse3bx;2121FalseFalse3acy;3210FalseTrue3bx;"
+  },
+  {
+   "name": "s-for-else-filter",
+   "template": "{% for x in [] %}a{% else %}empty{% endfor %} {% for x in [1,2,3,4] if x is even %}{{ x }}{{ loop.length }}{% endfor %} {% for x in nope %}n{% else %}u{% endfor %}",
+   "context": {},
+   "output": "empty 2242 u"
+  },
+  {
+   "name": "s-for-unpack-dict",
+   "template": "{% for k, v in d.items() %}{{ k }}:{{ v|tojson }} {% endfor %}{% for k in d %}{{ k }}{% endfor %}",
+   "context": {
+    "d": {
+     "a": 1,
+     "b": [
+      1,
+      2.5,
+      null,
+      true
+     ],
+     "c": {
+      "x": "é\"\n\t"
+     },
+     "z": "end"
+    }
+   },
+   "output": "a:1 b:[1, 2.5, null, true] c:{\"x\": \"é\\\"\\n\\t\"} z:\"end\" abcz"
+  },
+  {
+   "name": "s-break-continue",
+   "template": "{% for x in range(10) %}{% if x == 2 %}{% continue %}{% endif %}{% if x == 5 %}{% break %}{% endif %}{{ x }}{% endfor %}",
+   "context": {},
+   "output": "0134"
+  },
+  {
+   "name": "s-nested-loops",
+   "template": "{% for a in [1,2] %}{% for b in \"xy\" %}{{ loop.index }}{{ a }}{{ b }}{% endfor %}/{{ loop.index }} {% endfor %}",
+   "context": {},
+   "output": "11x21y/1 12x22y/2 "
+  },
+  {
+   "name": "s-scoping",
+   "template": "{% set x = 1 %}{% for i in [1, 2] %}{% set x = x + i %}{{ x }}{% endfor %}|{{ x }}|{% if true %}{% set y = 5 %}{% endif %}{{ y }}",
+   "context": {},
+   "output": "23|1|5"
+  },
+  {
+   "name": "s-namespace",
+   "template": "{% set ns = namespace(n=0, s=\"\") %}{% for i in [1,2,3] %}{% set ns.n = ns.n + i %}{% set ns.s = ns.s ~ i %}{% endfor %}{{ ns.n }} {{ ns.s }}",
+   "context": {},
+   "output": "6 123"
+  },
+  {
+   "name": "s-set-unpack-block",
+   "template": "{% set a, b = [1, 2] %}{{ a }}{{ b }} {% set t = 1, 2 %}{{ t }} {% set blk %}  in {{ a }}\n{% endset %}[{{ blk }}]",
+   "context": {},
+   "output": "12 (1, 2) [  in 1\n]"
+  },
+  {
+   "name": "s-macro",
+   "template": "{% macro f(x, y='d', z=none) -%}[{{ x }}|{{ y }}|{{ z }}]{%- endmacro %}{{ f(1) }}{{ f(1, 2) }}{{ f(1, z=3) }}{{ f(x=4) }}{{ f() }}{% set r = f('q')|trim %}{{ r|length }}",
+   "context": {},
+   "output": "[1|d|None][1|2|None][1|d|3][4|d|None][|d|None]10"
+  },
+  {
+   "name": "s-macro-globals",
+   "template": "{% set ns = namespace(c=0) %}{% macro bump() %}{% set ns.c = ns.c + 1 %}{{ g }}{{ ns.c }}{% endmacro %}{{ bump() }}{{ bump() }}{{ ns.c }}",
+   "context": {
+    "g": "G"
+   },
+   "output": "G1G22"
+  },
+  {
+   "name": "s-macro-in-loop",
+   "template": "{% macro show(c) %}{% if c is string %}{{ c }}{% else %}{% for p in c %}{{ p.text }}{% endfor %}{% endif %}{% endmacro %}{% for m in ms %}{{ show(m.content) }};{% endfor %}",
+   "context": {
+    "ms": [
+     {
+      "content": "a"
+     },
+     {
+      "content": [
+       {
+        "type": "text",
+        "text": "b"
+       },
+       {
+        "type": "text",
+        "text": "c"
+       }
+      ]
+     }
+    ]
+   },
+   "output": "a;bc;"
+  },
+  {
+   "name": "s-filter-block",
+   "template": "{% filter upper %}abc {{ x }}{% endfilter %}",
+   "context": {
+    "x": "y"
+   },
+   "output": "ABC Y"
+  },
+  {
+   "name": "s-generation",
+   "template": "{% generation %}gen{% endgeneration %}",
+   "context": {},
+   "output": "gen"
+  },
+  {
+   "name": "s-raise",
+   "template": "{{ raise_exception('bad thing ' ~ 1) }}",
+   "context": {},
+   "error": "TemplateError",
+   "message": "bad thing 1"
+  },
+  {
+   "name": "s-undefined-attr-error",
+   "template": "{{ nope.attr }}",
+   "context": {},
+   "error": "UndefinedError",
+   "message": "'nope' is undefined"
+  },
+  {
+   "name": "s-undefined-ops",
+   "template": "[{{ nope }}] [{{ nope|default(\"d\") }}] [{% if nope %}t{% endif %}] [{{ nope == nope }}] [{{ d.x.y is defined }}]",
+   "context": {
+    "d": {}
+   },
+   "error": "UndefinedError",
+   "message": "'dict object' has no attribute 'x'"
+  },
+  {
+   "name": "idiom-last-query",
+   "template": "{%- set ns = namespace(multi_step_tool=true, last_query_index=messages|length - 1) %}{%- for message in messages[::-1] %}{%- set index = (messages|length - 1) - loop.index0 %}{%- if ns.multi_step_tool and message.role == 'user' %}{%- set ns.multi_step_tool = false %}{%- set ns.last_query_index = index %}{%- endif %}{%- endfor %}{{ ns.last_query_index }}",
+   "context": {
+    "messages": [
+     {
+      "role": "system",
+      "content": "S"
+     },
+     {
+      "role": "user",
+      "content": "Hi"
+     },
+     {
+      "role": "assistant",
+      "content": "Yo"
+     },
+     {
+      "role": "user",
+      "content": "Q2"
+     }
+    ]
+   },
+   "output": "3"
+  },
+  {
+   "name": "idiom-roles",
+   "template": "{%- for message in messages %}{%- if loop.first and message.role != 'system' %}<s>{% endif %}<|{{ message.role }}|>\n{{ message.content | trim }}{% if not loop.last %}\n{% endif %}{%- endfor %}{%- if add_generation_prompt %}\n<|assistant|>\n{%- endif %}",
+   "context": {
+    "messages": [
+     {
+      "role": "system",
+      "content": "S"
+     },
+     {
+      "role": "user",
+      "content": "Hi"
+     },
+     {
+      "role": "assistant",
+      "content": "Yo"
+     },
+     {
+      "role": "user",
+      "content": "Q2"
+     }
+    ],
+    "add_generation_prompt": true
+   },
+   "output": "<|system|>\nS<|user|>\nHi<|assistant|>\nYo<|user|>\nQ2<|assistant|>"
+  },
+  {
+   "name": "idiom-tools",
+   "template": "{%- if tools %}{%- for tool in tools %}\n{{ tool | tojson }}{%- endfor %}{% endif %}{%- for tc in calls %}{%- set fn = tc.function if tc.function is defined else tc %}<{{ fn.name }}>{%- for k, v in fn.arguments|items %}{{ k }}={{ v | tojson(ensure_ascii=False) if v is not string else v }};{%- endfor %}{%- endfor %}",
+   "context": {
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "f",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "q": {
+          "type": "string",
+          "description": "中文"
+         }
+        }
+       }
+      }
+     }
+    ],
+    "calls": [
+     {
+      "function": {
+       "name": "f",
+       "arguments": {
+        "q": "x",
+        "n": 5,
+        "o": {
+         "a": [
+          1
+         ]
+        }
+       }
+      }
+     },
+     {
+      "name": "g",
+      "arguments": {}
+     }
+    ]
+   },
+   "output": "{\"type\": \"function\", \"function\": {\"name\": \"f\", \"parameters\": {\"type\": \"object\", \"properties\": {\"q\": {\"type\": \"string\", \"description\": \"中文\"}}}}}<f>q=x;n=5;o={\"a\": [1]};<g>"
+  },
+  {
+   "name": "idiom-effort",
+   "template": "{%- if enable_thinking is undefined or enable_thinking is true %}{%- set e = reasoning_effort|default('xhigh') %}{%- if e not in ('xhigh', 'medium', 'low') %}{{- raise_exception('Unexpected reasoning effort ' ~ reasoning_effort ~ '.') }}{%- endif %}{{ e }}{%- endif %}",
+   "context": {
+    "reasoning_effort": "none"
+   },
+   "error": "TemplateError",
+   "message": "Unexpected reasoning effort none."
+  },
+  {
+   "name": "idiom-think-split",
+   "template": "{%- set content = c %}{%- if '</think>' in content %}{%- set r = content.split('</think>')[0].rstrip('\\n').split('<think>')[-1].lstrip('\\n') %}{%- set content = content.split('</think>')[-1].lstrip('\\n') %}{%- endif %}[{{ r }}][{{ content }}]",
+   "context": {
+    "c": "<think>\nplan\n</think>\n\nanswer"
+   },
+   "output": "[plan][answer]"
+  }
+ ]
+}
