@@ -35,6 +35,8 @@ constexpr int kDenseOneDnnRows = 1024;  // rows per call from which the int8 tru
 serve::VisionPlan vision_plan(const serve::Options &o, const model::ModelConfig &cfg) { return serve::vision_plan(o, cfg, o.tp); }
 
 ModelOptions model_options(const serve::Options &o, const model::ModelConfig &cfg) {
+  if (o.prefill_gemm == "onednn-all")  // (qwen35's int4 trunk only; this arch's trunk is int8)
+    throw serve::OptionError("--prefill-gemm onednn-all: every int4 prefill GEMM on oneDNN is built for the dense 27B (qwen35); arch qwen38 takes onednn|esimd");
   ModelOptions mo;
   mo.slots = o.slots;
   mo.step_rows_cap = o.step_rows > kernels::kStepRows32 ? kernels::kMaxRows : 0;  // --step-rows 64 (four cards)

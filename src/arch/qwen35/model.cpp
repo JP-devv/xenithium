@@ -824,6 +824,25 @@ void Model::lend_layout() {
         add(mw.gate_up.w, mw.gate_up.n, cfg_.hidden);
       }
     }
+  // the narrow matrices (the mixers' out / o and the MLP's down, n = hidden) after every wide one: they take the oneDNN
+  // route only under a lower width threshold, and the wide ones keep their place in the lending order
+  for (size_t c = 0; c < C; ++c)
+    for (int l = 0; l < cfg_.layers; ++l) {
+      auto add = [&](const uint8_t *w, int n, int kk) {
+        if (w && n >= min_n) lend_mat_[c].push_back(LendMat{w, n, kk});
+      };
+      if (std::find(attn_.layers.begin(), attn_.layers.end(), l) != attn_.layers.end()) {
+        const k::GqaWeights &w = attn_.w[c][static_cast<size_t>(l)];
+        if (!w.dense()) add(w.o.w, w.o.n, w.o.k);
+      } else if (std::find(gdn_.layers.begin(), gdn_.layers.end(), l) != gdn_.layers.end()) {
+        const k::GdnWeights &w = gdn_.w[c][static_cast<size_t>(l)];
+        add(w.out4.w, w.out4.n, w.out4.k);
+      }
+      if (mlp_ && !moe_) {
+        const MlpWeights mw = mlp_->weights(*dense_, static_cast<int>(c), l);
+        add(mw.down.w, mw.down.n, mw.down.k);
+      }
+    }
   for (size_t c = 1; c < C; ++c)
     if (lend_mat_[c].size() != lend_mat_[0].size()) return lend_mat_.clear(), refuse("the cards' wide matrices differ");
   if (lend_mat_[0].empty()) return lend_mat_.clear(), refuse("no matrix on the oneDNN route");

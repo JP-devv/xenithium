@@ -631,10 +631,13 @@ const char *brief_of(std::string_view key) {
        "Which kernels run the prompt's large matrix products.\n"
        "\n"
        "`onednn`  library GEMMs where they win, repacked per call (no extra weight copy)\n"
+       "`onednn-all`  qwen35: the library for every int4 matrix of the prompt, the narrow ones too (down, out, o)\n"
        "`esimd`  the engine's own kernels only\n"
        "\n"
        "Gives (onednn): + prompt reading speed.\n"
        "Takes (onednn): - VRAM on qwen38: about 0.12 GiB per card, taken from the hot experts.\n"
+       "Gives (onednn-all): + prompt reading speed on the dense 27B: +4.8 % at 2K, +3.1 % at 8K, +2.9 % at 32K over `onednn` (two cards, KV lending on).\n"
+       "Takes (onednn-all): - a small numerics change: the narrow matrices take the library's rounding. - KV lending keeps 128 more layouts (about 1.8 GiB per card of free KV pages; given back when the pool fills).\n"
        "- qwen35 (with `XEN_PREFILL_W4` a8): the wide int4 matrices run on oneDNN. Calls under `XEN_PREFILL_GEMM_ROWS` rows stay on esimd.\n"
        "- qwen38: its int8 dense matrices run on oneDNN with prefill chunks of 2,048+ (same output). With smaller chunks it stays off."},
       {"XEN_PREFILL_W4",
@@ -1376,8 +1379,8 @@ std::vector<Spec> schema() {
   {
     auto &s = add("XEN_PREFILL_GEMM", "Prefill GEMM library", num, Kind::Choice);
     s.scope = Scope::All;  // qwen35 and qwen38 (applies)
-    s.choices = {"onednn", "esimd"};
-    s.names = {{"onednn", "oneDNN where it wins"}, {"esimd", "engine kernels only"}};
+    s.choices = {"onednn", "onednn-all", "esimd"};
+    s.names = {{"onednn", "oneDNN where it wins"}, {"onednn-all", "oneDNN for every int4 matrix (qwen35)"}, {"esimd", "engine kernels only"}};
   }
   {
     auto &s = add("XEN_PREFILL_GEMM_ROWS", "Prefill GEMM library: from rows per call", num, Kind::Choice);
@@ -2078,11 +2081,11 @@ std::string unused_reason(const Spec &s, std::string_view arch, const Values &va
   // B70s every expert fits in VRAM at TP4: nothing is cold)
   if (s.key.rfind("XEN_MOE_CPU", 0) == 0 && arch == "qwen38" && v("XEN_Q38_TP") == "4") return "not at TP4 (32-column expert quarters)";
   if ((s.key == "XEN_KV_LEND" || s.key == "XEN_KV_LEND_KEEP") && arch == "qwen35") {
-    if (v("XEN_PREFILL_W4") != "a8" || v("XEN_PREFILL_GEMM") != "onednn") return "only with the prefill GEMMs on oneDNN (int4 GEMMs a8)";
+    if (v("XEN_PREFILL_W4") != "a8" || v("XEN_PREFILL_GEMM").rfind("onednn", 0) != 0) return "only with the prefill GEMMs on oneDNN (int4 GEMMs a8)";
     if (v("XEN_KV_POOL_TOKENS") == "0") return "needs the shared KV pool";
     if (s.key == "XEN_KV_LEND_KEEP" && v("XEN_KV_LEND") == "off") return "needs KV lending on";
   }
-  if (s.key == "XEN_PREFILL_GEMM_ROWS" && (v("XEN_PREFILL_W4") != "a8" || v("XEN_PREFILL_GEMM") != "onednn")) return "only with the prefill GEMMs on oneDNN (int4 GEMMs a8)";
+  if (s.key == "XEN_PREFILL_GEMM_ROWS" && (v("XEN_PREFILL_W4") != "a8" || v("XEN_PREFILL_GEMM").rfind("onednn", 0) != 0)) return "only with the prefill GEMMs on oneDNN (int4 GEMMs a8)";
   if (s.key == "XEN_PREFILL_A8_KEEP" && v("XEN_PREFILL_W4") != "a8") return "only with prefill int4 GEMMs a8";
   if (s.key == "XEN_PREFILL_A8_BODY" && v("XEN_PREFILL_W4") != "a8") return "only with prefill int4 GEMMs a8";
   if (s.key == "XEN_PREFILL_GEMM" && arch != "qwen38" && v("XEN_PREFILL_W4") != "a8") return "only with prefill int4 GEMMs a8";

@@ -81,6 +81,9 @@ serve::Options resolve(serve::Options o, std::string_view arch_id) {
     throw serve::OptionError(std::string("--attn-select: page-selected attention is built for head_dim 256 (qwen35); arch ") + name + " runs dense attention");
   if (o.prefill_select > 0)
     throw serve::OptionError(std::string("--prefill-select: page-selected prefill is built for head_dim 256 (qwen35); arch ") + name + " runs dense attention");
+  if (o.prefill_gemm == "onednn-all")  // (the routing and lending of the dense 27B's symmetric g128 matrices only)
+    throw serve::OptionError(std::string("--prefill-gemm onednn-all: every int4 prefill GEMM on oneDNN is built for the dense 27B (qwen35); arch ") + name +
+                             " takes onednn|esimd");
   if (o.wire == "int8")  // (built for the dense 27B's sums only)
     throw serve::OptionError(std::string("--wire int8: the int8 wire is built for the dense 27B (qwen35); arch ") + name + " takes bf16 or fp32");
   if (o.decode_w4 != "exact")  // (the dense 27B's symmetric g128 matrices only)
@@ -136,9 +139,13 @@ ModelOptions model_options(const serve::Options &o, bool flint) {
   // the W4A8 GEMMs' ESIMD body; auto = slm at TP2 (its consumer GEMMs run under the split sums' sends) with direct on
   // calls of <= 128 rows, direct at TP1 (Model::a8_body_for)
   mo.prefill_a8_body = o.prefill_a8_body == "slm" ? 0 : o.prefill_a8_body == "direct" ? 1 : -1;
-  // the W4A8 prefill's wide GEMMs (gate|up, GDN qkvz, attn qkv: n >= 6144 per card) on oneDNN, repacked per call
-  // into a 2-slot scratch (no stored copy); calls under 1,024 rows per card stay ESIMD
-  kernels::w4a16_pf_set_onednn(o.prefill_gemm == "onednn" && o.prefill_w4 == "a8" ? 6144 : 0);
+  // the W4A8 prefill GEMMs on oneDNN by their output width per card, repacked per call into a 2-slot scratch (no
+  // stored copy) or read from the layouts KV lending keeps; calls under 1,024 rows per card stay ESIMD.
+  // onednn = the wide ones (gate|up, GDN qkvz, attn qkv: n >= kOneDnnWideMinN); onednn-all = every W4A8 prefill GEMM
+  // (also down, GDN out and attn o: oneDNN's rounding on them, a numerics change)
+  constexpr int kOneDnnWideMinN = 6144, kOneDnnAllMinN = 1;
+  const int onednn_min_n = o.prefill_w4 != "a8" ? 0 : o.prefill_gemm == "onednn" ? kOneDnnWideMinN : o.prefill_gemm == "onednn-all" ? kOneDnnAllMinN : 0;
+  kernels::w4a16_pf_set_onednn(onednn_min_n);
   // the route's row threshold (default 1,024; lower = more calls on oneDNN's rounding, a numerics change, meant for the
   // layouts kept by KV lending: --kv-lend)
   kernels::w4a16_pf_set_onednn_rows(o.prefill_gemm_rows);
@@ -240,7 +247,7 @@ std::string plan_of(const serve::Options &opt, const model::ModelConfig &cfg, st
     if (o.lm_head == "int4-rescore") m.weights_gib += 0.078 * half;
     if (o.prefill_attn == "onednn") m.scratch_gib += 0.95 * ctx_m;  // its scratch grows with the context (0.50 GiB at 524,288, 0.27 at 262,144)
     if (o.prefill_w4 == "exact") m.scratch_gib -= 0.182;  // (dequant on this arch: counted as a8)
-    else if (o.prefill_w4 == "a8" && o.prefill_gemm != "onednn") m.scratch_gib -= 0.142;
+    else if (o.prefill_w4 == "a8" && o.prefill_gemm == "esimd") m.scratch_gib -= 0.142;
     first_use = 0.24;
   } else if (llama) {
     m.scratch_gib = 0.938 + (C == 1 ? 0.026 : 0.0) + 0.230 * kchunk;
