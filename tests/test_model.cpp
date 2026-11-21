@@ -2,6 +2,7 @@
 // corruption must throw), then the real qwen38-w4a16 checkpoint when present
 // (XEN_TEST_MODEL overrides the path; absent = those checks are skipped, not passed).
 #include <algorithm>
+#include <cmath>
 #include <stdexcept>
 #include <thread>
 #include <future>
@@ -24,6 +25,7 @@
 #include "xenithium/arch/llama/arch.hpp"
 #include "xenithium/arch/qwen35/arch.hpp"
 #include "xenithium/arch/qwen38/experts.hpp"
+#include "xenithium/arch/common/dflash_plan.hpp"
 #include "xenithium/arch/qwen38/mtp.hpp"
 #include "xenithium/kernels/pack.hpp"
 #include "xenithium/model/arch.hpp"
@@ -777,6 +779,193 @@ void select_share() {
 }
 
 
+
+// Host stand-in for DenseStore's GPTQ drafter path: a group dequantises as scale x (code - 8), and
+// pack_w4_gptq preserves those codes (the path o / gate / down take when the drafter is held int4).
+void dflash_gptq_dequant() {
+  namespace kk = xenithium::kernels;
+  const int n = 16, k = 128;
+  std::vector<uint32_t> qw(static_cast<size_t>(k / 8) * n);
+  std::vector<float> scales(static_cast<size_t>(n));
+  for (int col = 0; col < n; ++col) {
+    scales[static_cast<size_t>(col)] = 0.25f * static_cast<float>(col + 1);
+    for (int word = 0; word < k / 8; ++word) {
+      uint32_t w = 0;
+      for (int b = 0; b < 8; ++b) {
+        const int q = (col + word * 8 + b) % 16;
+        w |= static_cast<uint32_t>(q) << (4 * b);
+      }
+      qw[static_cast<size_t>(word) * n + col] = w;
+    }
+  }
+  std::vector<float> w(static_cast<size_t>(n) * k);
+  for (int col = 0; col < n; ++col)
+    for (int kk_ = 0; kk_ < k; ++kk_) {
+      const uint32_t word = qw[static_cast<size_t>(kk_ / 8) * n + col];
+      const int q = static_cast<int>((word >> (4 * (kk_ % 8))) & 15u);
+      w[static_cast<size_t>(col) * k + kk_] = scales[static_cast<size_t>(col)] * static_cast<float>(q - 8);
+    }
+  expect(w[0] == -2.f && w[1] == scales[0] * (1 - 8), "dflash gptq dequant: scale x (code - 8) (col 0: q0=0 -> -2, q1=1 -> -1.75)");
+
+  std::vector<uint8_t> blocks(static_cast<size_t>(n) * k / 2);
+  kk::pack_w4_gptq(qw.data(), n, k, blocks.data());
+  size_t bmism = 0;
+  for (int col = 0; col < n; ++col)
+    for (int kk_ = 0; kk_ < k; ++kk_) {
+      const int g = kk_ / 128, kg = kk_ % 128, tile = col / 16, lane = col % 16;
+      const uint8_t byte = blocks[(static_cast<size_t>(g) * (n / 16) + tile) * 1024 + (kg / 2) * 16 + lane];
+      const int q = (kg & 1) ? (byte >> 4) : (byte & 15);
+      const uint32_t word = qw[static_cast<size_t>(kk_ / 8) * n + col];
+      if (q != static_cast<int>((word >> (4 * (kk_ % 8))) & 15u)) ++bmism;
+    }
+  expect(bmism == 0, "dflash gptq dequant: pack_w4_gptq preserves the GPTQ codes in the W4 blocks (" + std::to_string(bmism) + " mismatches)");
+
+  std::vector<float> a(static_cast<size_t>(k), 1.f);
+  std::vector<double> c(static_cast<size_t>(n));
+  kk::w4a16_ref(a.data(), qw.data(), scales.data(), 1, n, k, c.data());
+  size_t bad = 0;
+  for (int col = 0; col < n; ++col) {
+    double sum = 0;
+    for (int kk_ = 0; kk_ < k; ++kk_) sum += w[static_cast<size_t>(col) * k + kk_];
+    if (std::fabs(c[static_cast<size_t>(col)] - sum) > 1e-6) ++bad;
+  }
+  expect(bad == 0, "dflash gptq dequant: w4a16_ref matches the packed scale x (code - 8) sums (" + std::to_string(bad) + " off)");
+}
+
+// A 1-layer DFlash 2 catalog: Launch80-style (GPTQ fc / o / gate / up / down, bf16 elsewhere) and an all-bf16 drafter.
+void dflash_gptq_plan() {
+  const char *tmp = std::getenv("TMPDIR");
+  const fs::path dir = fs::path(tmp ? tmp : "/tmp") / ("xen-test-dflash-" + std::to_string(::getpid()));
+  auto shard = [&](const std::vector<std::pair<std::string, std::string>> &tensors) {
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    std::string hdr = "{", data;
+    size_t off = 0;
+    for (size_t i = 0; i < tensors.size(); ++i) {
+      const auto &name = tensors[i].first;
+      const auto &dt = tensors[i].second;
+      const int bytes = dt == "I32" ? 4 : 2;
+      if (i) hdr += ",";
+      hdr += "\"" + name + "\":{\"dtype\":\"" + dt + "\",\"shape\":[1],\"data_offsets\":[" + std::to_string(off) + "," + std::to_string(off + bytes) + "]}";
+      data.append(bytes, '\0');
+      off += bytes;
+    }
+    hdr += "}";
+    write_shard(dir / "m.safetensors", hdr, data);
+    return m::Checkpoint::open(dir.string());
+  };
+  auto names = [](bool gptq_big) {
+    std::vector<std::pair<std::string, std::string>> t;
+    auto w = [&](const std::string &n) { t.push_back({n, "BF16"}); };
+    auto q = [&](const std::string &mod) {
+      t.push_back({mod + ".qweight", "I32"});
+      t.push_back({mod + ".scales", "F16"});
+      t.push_back({mod + ".qzeros", "I32"});
+    };
+    if (gptq_big) q("fc");
+    else w("fc.weight");
+    w("hidden_norm.weight");
+    w("norm.weight");
+    w("candidate_selector.hidden_projection.weight");
+    w("layers.0.input_layernorm.weight");
+    w("layers.0.post_attention_layernorm.weight");
+    w("layers.0.self_attn.q_proj.weight");
+    w("layers.0.self_attn.k_proj.weight");
+    w("layers.0.self_attn.v_proj.weight");
+    if (gptq_big) q("layers.0.self_attn.o_proj");
+    else w("layers.0.self_attn.o_proj.weight");
+    w("layers.0.self_attn.q_norm.weight");
+    w("layers.0.self_attn.k_norm.weight");
+    if (gptq_big) {
+      q("layers.0.mlp.gate_proj");
+      q("layers.0.mlp.up_proj");
+      q("layers.0.mlp.down_proj");
+    } else {
+      w("layers.0.mlp.gate_proj.weight");
+      w("layers.0.mlp.up_proj.weight");
+      w("layers.0.mlp.down_proj.weight");
+    }
+    w("layers.0.attention_conv.kernel_projection.weight");
+    w("layers.0.attention_conv.base_kernel");
+    w("layers.0.mlp_conv.kernel_projection.weight");
+    w("layers.0.mlp_conv.base_kernel");
+    return t;
+  };
+  auto by_key = [](const std::vector<m::DenseSpec> &plan, const std::string &key) -> const m::DenseSpec * {
+    for (const auto &sp : plan)
+      if ((sp.key.empty() ? sp.name : sp.key) == key) return &sp;
+    return nullptr;
+  };
+  {
+    const auto ck = shard(names(true));
+    const auto p4 = xenithium::arch::dflash_dense_plan(ck, 1, 4);
+    const auto *fc = by_key(p4, "fc.weight");
+    const auto *o = by_key(p4, "layers.0.self_attn.o_proj.weight");
+    const auto *gu = by_key(p4, "layers.0.mlp.gate_proj.weight");
+    const auto *dn = by_key(p4, "layers.0.mlp.down_proj.weight");
+    const auto *q = by_key(p4, "layers.0.self_attn.q_proj.weight");
+    const auto *kv = by_key(p4, "layers.0.self_attn.k_proj.weight");
+    const bool gptq4 = fc && fc->name == "fc.qweight" && fc->store == m::DenseSpec::Store::w4d && fc->w4_layout == m::DenseSpec::W4Layout::gptq && fc->dense_bytes == 1 &&
+                       o && o->name == "layers.0.self_attn.o_proj.qweight" && o->store == m::DenseSpec::Store::w4 && o->w4_layout == m::DenseSpec::W4Layout::gptq &&
+                       dn && dn->store == m::DenseSpec::Store::w4 && dn->w4_layout == m::DenseSpec::W4Layout::gptq &&
+                       gu && gu->name == "layers.0.mlp.gate_proj.qweight" && gu->store == m::DenseSpec::Store::w4 && gu->append == std::vector<std::string>{"layers.0.mlp.up_proj.qweight"} &&
+                       q && q->name == "layers.0.self_attn.q_proj.weight" && q->store == m::DenseSpec::Store::w4r &&
+                       kv && kv->store == m::DenseSpec::Store::i8 && kv->append == std::vector<std::string>{"layers.0.self_attn.v_proj.weight"};
+    expect(gptq4, "dflash plan: GPTQ fc dequants to int8; o / gate|up / down stay int4 (gptq); q / k|v stay the bf16 path at dense_bytes 4");
+    const auto p2 = xenithium::arch::dflash_dense_plan(ck, 1, 2);
+    const auto *fc2 = by_key(p2, "fc.weight");
+    const auto *o2 = by_key(p2, "layers.0.self_attn.o_proj.weight");
+    expect(fc2 && fc2->store == m::DenseSpec::Store::w4d && fc2->dense_bytes == 2 && o2 && o2->store == m::DenseSpec::Store::w4d && o2->dense_bytes == 2,
+           "dflash plan: at dense_bytes 2, GPTQ mats dequant to bf16");
+    const auto p1 = xenithium::arch::dflash_dense_plan(ck, 1, 1);
+    const auto *o1 = by_key(p1, "layers.0.self_attn.o_proj.weight");
+    expect(o1 && o1->store == m::DenseSpec::Store::w4d && o1->dense_bytes == 1, "dflash plan: at dense_bytes 1, GPTQ mats dequant to int8");
+  }
+  {
+    const auto ck = shard(names(false));
+    const auto p4 = xenithium::arch::dflash_dense_plan(ck, 1, 4);
+    const auto *fc = by_key(p4, "fc.weight");
+    const auto *o = by_key(p4, "layers.0.self_attn.o_proj.weight");
+    const auto *q = by_key(p4, "layers.0.self_attn.q_proj.weight");
+    const auto *gu = by_key(p4, "layers.0.mlp.gate_proj.weight");
+    expect(fc && fc->name == "fc.weight" && fc->store == m::DenseSpec::Store::i8 && fc->key.empty() && o && o->name == "layers.0.self_attn.o_proj.weight" &&
+               o->store == m::DenseSpec::Store::w4r && q && q->store == m::DenseSpec::Store::w4r && gu && gu->append == std::vector<std::string>{"layers.0.mlp.up_proj.weight"},
+           "dflash plan: an all-bf16 drafter still uses .weight (fc int8, q / o / gate|up / down w4r) at dense_bytes 4");
+  }
+  fs::remove_all(dir);
+
+  const char *env = std::getenv("XEN_TEST_MODEL_DFLASH2");
+  const char *home = std::getenv("HOME");
+  const std::string real = env ? env : std::string(home ? home : "") + "/models/qwen38-27b-dflash2";
+  if (!fs::exists(real + "/config.json")) {
+    std::printf("[SKIP] dflash gptq plan: %s not present\n", real.c_str());
+    return;
+  }
+  const auto ck = m::Checkpoint::open(real);
+  int layers = 0;
+  for (const auto &t : ck.tensors())
+    if (t.name.rfind("layers.", 0) == 0) layers = std::max(layers, std::stoi(t.name.substr(7)) + 1);
+  expect(layers > 0, "dflash plan: Launch80 catalog names layers.* (" + std::to_string(layers) + ")");
+  const auto plan = xenithium::arch::dflash_dense_plan(ck, layers, 4);
+  const auto *fc = by_key(plan, "fc.weight");
+  const auto *o = by_key(plan, "layers.0.self_attn.o_proj.weight");
+  const auto *q = by_key(plan, "layers.0.self_attn.q_proj.weight");
+  const auto *gu = by_key(plan, "layers.0.mlp.gate_proj.weight");
+  const auto *dn = by_key(plan, "layers.0.mlp.down_proj.weight");
+  expect(fc && fc->name == "fc.qweight" && fc->store == m::DenseSpec::Store::w4d && fc->w4_layout == m::DenseSpec::W4Layout::gptq && fc->dense_bytes == 1 && o &&
+             o->name == "layers.0.self_attn.o_proj.qweight" && o->store == m::DenseSpec::Store::w4 && q && q->name == "layers.0.self_attn.q_proj.weight" &&
+             q->store == m::DenseSpec::Store::w4r && gu && gu->append.size() == 1 && gu->append[0] == "layers.0.mlp.up_proj.qweight" && dn &&
+             dn->name == "layers.0.mlp.down_proj.qweight" && dn->store == m::DenseSpec::Store::w4,
+         "dflash plan: Launch80 GPTQ bake (5 layers, dense_bytes 4): fc w4d, o / gate|up / down w4 gptq, q RTN from .weight");
+  bool threw = false;
+  try {
+    (void)xenithium::arch::dflash_dense_plan(ck, layers + 1, 4);
+  } catch (const std::runtime_error &e) {
+    threw = std::string(e.what()).find("missing") != std::string::npos;
+  }
+  expect(threw, "dflash plan: a layer count past the checkpoint throws");
+}
+
 void mtp35_plan() {
   using R = std::vector<std::pair<int64_t, int64_t>>;
   const R ranges{{0, 98304}, {248000, 248128}};
@@ -1156,6 +1345,8 @@ int main() {
     real_model_llama();
     real_model_flint();
     real_model_qwen35_gptq();
+    dflash_gptq_dequant();
+    dflash_gptq_plan();
     mtp35_plan();
     select_share();
     kv_pages();
