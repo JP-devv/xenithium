@@ -152,10 +152,12 @@ Four tabs, `1`-`4` or `Tab`; the Chat tab is hidden for now, so the header shows
   setting of `build/launch/launch.env` when the launcher started the server. A server started outside the
   launcher records its command line as `server_cmd` instead. The report (`Enter`) lists the notes as
   `KEY=value` pairs.
-- `m` picks the mode, the text the long prompts are cut from (`xenithium-bench --corpus`): **Easy** (the default),
-  conventional template-made code and prose that drafters guess well, or **Hard**, this engine's own code and
-  documentation (the published numbers). The bottom line shows the mode; it applies to the next runs of the session,
-  each run's tag ends in `-easy` / `-hard`, and its report (`Enter`) names it. Runs of different modes do not compare.
+- `m` picks the mode (`xenithium-bench --mode`, [bench.md](bench.md#modes)): **Easy** (the default) measures the
+  way the usual public benchmarks do - tasks that repeat or reshape their input, replies that end where the model ends
+  them, a code-led weighted mean; **Medium** is the hard method over conventional template-made code and prose;
+  **Hard** is this engine's own code and documentation (the published numbers). The bottom line shows the mode; it
+  applies to the next runs of the session, each run's tag ends in `-easy` / `-medium` / `-hard`, and its report
+  (`Enter`) names it. Runs of different modes do not compare.
 - `x` stops a run the tab started — `Esc` deliberately does not, so an accidental press can't
   kill a run. The binary and the runs directory come from `--bench-bin` and `--bench-runs` (defaults
   `build/xenithium-bench` and `$XEN_BENCH_RUNS`, else `~/.xenithium/bench/runs`).

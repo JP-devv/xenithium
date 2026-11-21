@@ -1207,8 +1207,8 @@ void test_bench(const std::string &root) {
   std::string s = run({ch('3')});  // Benchmark is the third shown tab while Chat stays hidden
   expect(app.tab() == 3 && has(s, "Benchmark") && has(s, "beta") && has(s, "alpha") && has(s, "3 runs"),
          "bench: key 3 opens the Benchmark tab (the digits name the shown tabs), runs grouped by model with a run count");
-  // The mouse regression (the owner: "when you enter Bench you can't click another tab"): a left click on a
-  // header chip switches tabs from any tab - the Benchmark tab used to swallow every mouse event for its scroll handling.
+  // A mouse regression: a left click on a header chip switches tabs from any tab - the Benchmark tab used to swallow
+  // every mouse event for its scroll handling.
   auto click_tab = [&](int t) {
     int x = 0, y = 0;
     if (!app.tab_click_point(t, x, y)) return false;
@@ -1263,14 +1263,15 @@ void test_bench(const std::string &root) {
   s = run({Key::of(Key::Enter)});
   expect(!has(s, "Run the benchmark") && !has(s, "Concurrency at your stream counts") && has(s, "no ready server"),
          "bench: the stream-count mode without a ready server warns instead of asking for counts");
-  // m on Benchmark picks the mode (the corpus the long prompts are cut from): easy by default, hard = the engine's own
-  // code. The tab stays: a letter acts only on the tab whose hint row shows it (m once jumped to Settings' model list).
+  // m on Benchmark picks the mode (xenithium-bench --mode): easy by default, then medium and hard. The tab stays: a
+  // letter acts only on the tab whose hint row shows it (m once jumped to Settings' model list).
   // (the hint row shows "m mode: easy" / "hard"; a toast covers it here, so the menu's "(now)" mark is read instead)
   s = run({ch('m')});
-  expect(app.tab() == 3 && app.popup_open() && has(s, "Benchmark mode") && has(s, "Easy: conventional code") && has(s, "Hard: this engine's own code") &&
-             has(s, "guess it well  (now)") && !has(s, "guessed least well  (now)") && !has(s, "dense-b"),
+  expect(app.tab() == 3 && app.popup_open() && has(s, "Benchmark mode") && has(s, "Easy: tasks that repeat") && has(s, "Medium: conventional code") &&
+             has(s, "Hard: this engine's own code") && has(s, "model ends them  (now)") && !has(s, "guess it well  (now)") && !has(s, "guessed least well  (now)") &&
+             !has(s, "dense-b"),
          "bench: m opens the mode menu on the Benchmark tab (easy by default), not the model list");
-  s = run({Key::of(Key::Down), Key::of(Key::Enter)});
+  s = run({Key::of(Key::Down), Key::of(Key::Down), Key::of(Key::Enter)});
   expect(app.tab() == 3 && !app.popup_open() && has(s, "benchmark mode: hard"), "bench: picking Hard sets the mode; the tab stays");
   s = run({ch('m')});
   expect(has(s, "guessed least well  (now)"), "bench: the menu marks the mode now in use");

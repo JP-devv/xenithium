@@ -452,6 +452,8 @@ std::string to_json(const Run &run) {
   config.set("top_p", json::Value::real(i.sampling.top_p));
   config.set("top_k", json::Value::integer(i.sampling.top_k));
   config.set("thinking", json::Value::string(thinking_or_default(i.thinking)));
+  config.set("mode", json::Value::string(i.mode));
+  config.set("mode_version", json::Value::integer(i.mode_version));
   config.set("reply_length", json::Value::string(i.reply_length));
   config.set("corpus", json::Value::string(i.corpus));
   config.set("corpus_version", json::Value::integer(i.corpus_version));
@@ -489,7 +491,13 @@ std::optional<Run> run_from_json(std::string_view text, std::string &err) {
     i.seed = static_cast<uint64_t>(number_at(*config, "seed"));
     i.corpus_version = static_cast<int>(number_at(*config, "corpus_version"));
     i.corpus = text_at(*config, "corpus");
-    if (i.corpus.empty()) i.corpus = "hard";  // runs from before the easy set read the engine's own code
+    if (i.corpus.empty()) i.corpus = "hard";  // runs from before the second set read the engine's own code
+    i.mode = text_at(*config, "mode");
+    i.mode_version = std::max(1, static_cast<int>(number_at(*config, "mode_version")));
+    if (i.mode.empty()) {  // runs from before the modes: the set named "easy" then is the medium corpus now
+      if (i.corpus == "easy") i.corpus = "medium";
+      i.mode = i.corpus == "medium" ? "medium" : "hard";
+    }
     i.sampling = {.temperature = number_at(*config, "temperature"), .top_p = number_at(*config, "top_p"), .top_k = static_cast<int>(number_at(*config, "top_k")), .seed = std::nullopt};
   }
   if (const json::Value *power = root.get_object("power")) i.power = run_power_from(*power);
@@ -571,9 +579,9 @@ std::string render_run(const Run &run) {
   std::string out = "xenithium-bench run " + i.timestamp + "-" + i.name + "\n";
   out += std::string(kIndent) + "endpoint " + i.endpoint + ", model " + i.model + (i.context_tokens ? ", context " + with_thousands(i.context_tokens) + " tokens" : "") +
          (i.kv_pool_tokens ? ", KV pool " + with_thousands(i.kv_pool_tokens) + " tokens" : "") + "\n";
-  char line[480];
-  std::snprintf(line, sizeof(line), "suite %s, seed %llu, sampling T %.2f / top-p %.2f / top-k %d, thinking %.*s, replies %s, corpus %s v%d %s, %.0f s", i.suite.c_str(),
-                static_cast<unsigned long long>(i.seed), i.sampling.temperature, i.sampling.top_p, i.sampling.top_k,
+  char line[520];
+  std::snprintf(line, sizeof(line), "mode %s v%d, suite %s, seed %llu, sampling T %.2f / top-p %.2f / top-k %d, thinking %.*s, replies %s, corpus %s v%d %s, %.0f s", i.mode.c_str(),
+                i.mode_version, i.suite.c_str(), static_cast<unsigned long long>(i.seed), i.sampling.temperature, i.sampling.top_p, i.sampling.top_k,
                 static_cast<int>(thinking_or_default(i.thinking).size()), thinking_or_default(i.thinking).data(), i.reply_length.c_str(), i.corpus.c_str(), i.corpus_version, i.corpus_hash.c_str(),
                 i.seconds);
   out += std::string(kIndent) + line + "\n";
@@ -592,6 +600,9 @@ std::string render_compare(const Run &base, const Run &other) {
   if (base.info.corpus_hash != other.info.corpus_hash || base.info.corpus_version != other.info.corpus_version)
     out += "WARNING: the runs used different corpora or prompt sets (" + base.info.corpus + " version " + std::to_string(base.info.corpus_version) + " against " +
            other.info.corpus + " version " + std::to_string(other.info.corpus_version) + "): their prompts differ.\n";
+  if (base.info.mode != other.info.mode || base.info.mode_version != other.info.mode_version)
+    out += "WARNING: the runs measured in different modes (" + base.info.mode + " v" + std::to_string(base.info.mode_version) + " against " + other.info.mode + " v" +
+           std::to_string(other.info.mode_version) + "): their prompts and method differ, so their numbers do not compare.\n";
   if (base.info.model != other.info.model) out += "note: the runs are of different models.\n";
   if (base.info.reply_length != other.info.reply_length)
     out += "WARNING: the replies were of " + base.info.reply_length + " length against " + other.info.reply_length +

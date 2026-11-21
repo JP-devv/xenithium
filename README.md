@@ -31,7 +31,7 @@ For the fastest Qwen3.8-27B setup run both drafters: DSpine b16 — DFlash 2 wit
 
 ## Performance(Xenithium-Bench)
 
-`xenithium-bench` (`docs/bench.md`) against a live server started from each preset, on one machine: 2x Arc Pro B70 for
+`xenithium-bench` ([guide](docs/bench-guide.md), [reference](docs/bench.md); its strict `hard` mode) against a live server started from each preset, on one machine: 2x Arc Pro B70 for
 the two-card and one-card rows, 4x B70 for the four-card one. **The GPUs are power-capped to 220 W per card** (every
 report's power section records the cap). "Decode" is the agent mix of the sampled scenarios
 (harmonic mean over chat, code, reasoning, maths, prose, JSON, edit and summary), `xenithium-bench`'s headline.
@@ -248,7 +248,7 @@ Chat templates: by default the checkpoint's own `chat_template.jinja` is rendere
 | `tools/bench/` | `xenithium-bench`: the benchmark suites against any OpenAI-compatible endpoint (`docs/bench.md`) |
 | `tests/`, `tests/data/` | gates (ctest labels `host` / `gpu`) and goldens |
 | `cmake/Xenithium.cmake` | the target helpers every `CMakeLists.txt` uses |
-| `docs/server-env.md`, `docs/launcher.md`, `docs/bench.md` | settings reference, launcher guide, benchmark guide |
+| `docs/server-env.md`, `docs/launcher.md`, `docs/bench-guide.md`, `docs/bench.md` | settings reference, launcher guide, benchmarking guide, benchmark reference |
 | `docs/benchmark/` | the HTML reports behind the README's performance table, one run per preset and card count |
 | `docker/Dockerfile`, `compose.yaml`, `scripts/docker.sh` | the image (build + runtime stages), the Compose services `server`, `launch`, `tools`, and the compose wrapper |
 | `scripts/install-deps.sh` | system packages (apt: compiler, oneDNN, Level Zero, GPU driver), for the host and the image |

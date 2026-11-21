@@ -21,8 +21,8 @@ namespace {
 using svg::duration_text;
 
 // The report page leaves the machine, and results.json / report.txt stay local: so the page masks the two identities
-// a value can carry (the owner, after the first published reports: "it leaks username and folders - better to write
-// there $HOME"). A home-directory prefix becomes $HOME wherever it appears; a login name standing as its own word
+// a value can carry: the login name and the home directory's path. A home-directory prefix becomes $HOME wherever it
+// appears; a login name standing as its own word
 // (the host name of a machine named for its user) becomes $USER. The strings written are escaped as before.
 std::string escaped(std::string_view text) {
   std::string out(text);
@@ -372,7 +372,7 @@ std::string setup_html(const RunInfo &i) {
   html += term("endpoint", i.endpoint) + term("model", i.model);
   html += term("context", i.context_tokens > 0 ? with_thousands(i.context_tokens) + " tokens per request" : "not reported by the endpoint");
   if (i.kv_pool_tokens > 0) html += term("KV pool", with_thousands(i.kv_pool_tokens) + " tokens shared by all requests");
-  html += term("suite", i.suite) + term("sampling", sampling) + term("thinking", i.thinking.empty() ? "default" : i.thinking) + term("replies", replies_text(i));
+  html += term("mode", i.mode + ", version " + std::to_string(i.mode_version)) + term("suite", i.suite) + term("sampling", sampling) + term("thinking", i.thinking.empty() ? "default" : i.thinking) + term("replies", replies_text(i));
   html += term("corpus", (i.corpus.empty() ? std::string() : i.corpus + ", ") + "version " + std::to_string(i.corpus_version) + ", hash " + i.corpus_hash);
   html += term("extensions", extensions);
   if (i.power) {
@@ -402,7 +402,8 @@ std::string nav_html(const Run &run, bool with_anatomy) {
 std::string header_html(const Run &run) {
   const RunInfo &i = run.info;
   const int failed = failed_requests(run);
-  std::string chips = "<li>" + escaped(timestamp_text(i.timestamp)) + "</li><li>suite <b>" + escaped(i.suite) + "</b></li><li><b>" + duration_text(i.seconds) + "</b></li>";
+  std::string chips = "<li>" + escaped(timestamp_text(i.timestamp)) + "</li><li>mode <b>" + escaped(i.mode) + "</b></li><li>suite <b>" + escaped(i.suite) + "</b></li><li><b>" +
+                      duration_text(i.seconds) + "</b></li>";
   chips += "<li><b>" + with_thousands(all_requests(run)) + "</b> requests</li>";
   if (failed) chips += "<li class=\"bad\"><b>" + std::to_string(failed) + "</b> failed</li>";
   chips += "<li>replies <b>" + escaped(i.reply_length) + "</b></li><li>" + escaped(i.endpoint) + "</li>";

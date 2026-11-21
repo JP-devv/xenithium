@@ -103,15 +103,17 @@ double exponential_gap_s(double per_second, std::mt19937_64 &rng) {
   return -std::log1p(-uniform) / per_second;
 }
 
-MixRate mix_rate(std::span<const std::pair<std::string, double>> weights, const std::map<std::string, double, std::less<>> &tps) {
-  double covered = 0, seconds_per_token = 0;
+MixRate mix_rate(std::span<const std::pair<std::string, double>> weights, const std::map<std::string, double, std::less<>> &tps, MixAverage average) {
+  double covered = 0, seconds_per_token = 0, weighted_tps = 0;
   for (const auto &[kind, weight] : weights) {
     const auto it = tps.find(kind);
     if (weight <= 0 || it == tps.end() || it->second <= 0) continue;
     covered += weight;
     seconds_per_token += weight / it->second;
+    weighted_tps += weight * it->second;
   }
-  return seconds_per_token > 0 ? MixRate{covered / seconds_per_token, covered} : MixRate{};
+  if (covered <= 0) return {};
+  return {average == MixAverage::harmonic ? covered / seconds_per_token : weighted_tps / covered, covered};
 }
 
 }  // namespace xenithium:bench

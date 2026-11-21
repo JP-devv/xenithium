@@ -28,8 +28,10 @@ struct RunInfo {
   uint64_t seed = 0;
   Sampling sampling;
   std::string thinking;  // "default", "on" or "off"
+  std::string mode = "hard";  // the run's mode (mode.hpp): "easy", "medium" or "hard"
+  int mode_version = 1;
   std::string reply_length = "fixed";  // of the sampled scenarios' replies: "fixed" or "natural" (ReplyLength)
-  std::string corpus;  // the embedded set ("hard", "easy") or the directory the prompts were cut from
+  std::string corpus;  // the embedded set ("hard", "medium") or the directory the prompts were cut from
   int corpus_version = 0;
   std::string corpus_hash;
   Capabilities capabilities;

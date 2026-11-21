@@ -1,7 +1,8 @@
 // Scenario "decode": one request at a time over the short prompts of every category, sampled as chat clients sample
 // (the run's temperature / top-p / top-k, a seed per request). Decode speed depends on the kind of text - code drafts
 // well, prose does not - so it is reported per category and as one figure for a mix of the categories (weight_mixes):
-// the rate at which that mix of tokens comes out (mix_rate, a weighted harmonic mean).
+// the rate at which that mix of tokens comes out (mix_rate, a weighted harmonic mean), or for the easy mix the weighted
+// mean of the categories' rates. The prompts are the run's set (the mode's: Session::prompts).
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -18,20 +19,21 @@ constexpr ParamSpec kParams[] = {
     {"categories", "", "categories to run, comma separated; empty = all"},
     {"passes", "3", "times every prompt is sent"},
     {"warmup", "2", "requests sent first and not counted (the server's first-use costs)"},
-    {"weights", "agent", "the headline's mix of categories: agent (a coding agent's measured output), even, or category:share,... (shares of generated tokens)"},
+    {"weights", "agent", "the headline's mix of categories: agent (a coding agent's measured output), even, easy (code-led, a plain weighted mean; the easy mode's), or category:share,... (shares of generated tokens)"},
 };
 
 // A mix by its name, or "category:share..." (normalised to sum 1). Throws std:invalid_argument naming the problem.
 struct Mix {
   std::string name;  // the mix row's label: "agent mix", "even mix", "custom mix"
   std::vector<std::pair<std::string, double>> weights;
+  MixAverage average = MixAverage::harmonic;
 };
 
 Mix mix_of(const Params &params) {
   const std::string spec = params.text("weights");
   for (const WeightMix &mix : weight_mixes())
     if (mix.id == spec) {
-      Mix out{std::string(mix.id) + " mix", {}};
+      Mix out{std::string(mix.id) + " mix", {}, mix.average};
       for (const CategoryWeight &w : mix.weights) out.weights.emplace_back(std::string(w.category), w.weight);
       return out;
     }
@@ -44,7 +46,7 @@ Mix mix_of(const Params &params) {
     char *end = nullptr;
     const double share = colon == std::string::npos ? -1 : std::strtod(item.c_str() + colon + 1, &end);
     if (!known || colon == std::string::npos || end == item.c_str() + colon + 1 || *end != '\0' || !std::isfinite(share) || share < 0)
-      throw std::invalid_argument("decode.weights: \"" + item + "\" is not category:share with a known category and a share >= 0 (or a mix: agent, even)");
+      throw std::invalid_argument("decode.weights: \"" + item + "\" is not category:share with a known category and a share >= 0 (or a mix: agent, even, easy)");
     out.weights.emplace_back(category, share);
     sum += share;
   }
@@ -69,14 +71,15 @@ class Decode final : public Scenario {
     const std::vector<std::string> only = params.list("categories");
     const auto wanted = [&](std::string_view category) { return only.empty() || std::ranges::find(only, category) != only.end(); };
 
-    for (int64_t i = 0; i < params.integer("warmup"); ++i) (void)session.client().chat(session.sampled(std::string(short_prompts().front().text), short_prompts().front().max_tokens));
+    const auto prompts = session.prompts();
+    for (int64_t i = 0; i < params.integer("warmup"); ++i) (void)session.client().chat(session.sampled(prompts.front()));
 
     std::map<std::string, Row, std::less<>> by_category;
     const PowerSpan power(session);  // over every pass: one stream's power and tokens per joule
     for (int64_t pass = 0; pass < params.integer("passes"); ++pass) {
-      for (const ShortPrompt &prompt : short_prompts()) {
+      for (const ShortPrompt &prompt : prompts) {
         if (!wanted(prompt.category)) continue;
-        const Sample sample = session.client().chat(session.sampled(std::string(prompt.text), prompt.max_tokens));
+        const Sample sample = session.client().chat(session.sampled(prompt));
         if (!tally(result, sample)) continue;
         Row &row = by_category[std::string(prompt.category)];
         if (row.labels.empty()) row.labels = {{"category", std::string(prompt.category)}};
@@ -92,11 +95,12 @@ class Decode final : public Scenario {
         tps[it->first] = summarize(it->second.metric(std::string(metric::kDecode), "tok/s", Better::higher).samples).median;
         result.rows.push_back(std::move(it->second));
       }
-    if (const MixRate rate = mix_rate(mix.weights, tps); rate.tps > 0) {
+    if (const MixRate rate = mix_rate(mix.weights, tps, mix.average); rate.tps > 0) {
       Row all = Row::with_labels({{"category", mix.name}});
       all.metric(std::string(metric::kDecode), "tok/s", Better::higher).samples.push_back(rate.tps);
       power.add_to(all, result.completion_tokens);
       if (rate.covered < 1 - 1e-9) all.notes.push_back("the " + mix.name + " over the categories that ran: " + format_number(rate.covered * 100) + " % of its weight");
+      if (mix.average == MixAverage::arithmetic) all.notes.push_back("the " + mix.name + " is the weighted mean of the categories' median rates");
       result.rows.push_back(std::move(all));
     }
     result.charts = {

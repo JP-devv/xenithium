@@ -1,5 +1,8 @@
 # xenithium-bench
 
+New to the tool? Start with the [benchmarking guide](bench-guide.md): modes, suites, scenarios and how to bench another
+endpoint, step by step. This page is the full reference.
+
 The engine's benchmark. One host binary (`build/xenithium-bench`, C++, no GPU and no engine code) that talks to an
 OpenAI-compatible endpoint over `/v1/chat/completions` with streaming, so it measures this server, a server on
 another machine, or any other engine or hosted API the same way.
@@ -26,7 +29,7 @@ build/xenithium-bench html    RUN [FILE]                   # the run's HTML page
 
 `scripts/bench.sh [name]` wraps a run: with no `URL` it checks that the cards are free, starts this tree's server from
 `server.env`, records every effective server flag and the host as notes, samples board power, runs the benchmark and
-stops the server; with `URL=...` it only runs against that endpoint. The launcher's Bench tab (`4`, then `r`) runs the
+stops the server; with `URL=...` it only runs against that endpoint. The launcher's Benchmark tab (`3`, then `r`) runs the
 same binary against the server it started ([launcher.md](launcher.md)).
 
 ## Options of `run`
@@ -46,11 +49,12 @@ same binary against the server it started ([launcher.md](launcher.md)).
 | `--seed N` | `1` | Request k of the run samples with seed N + k, so two builds draw the same tokens where their logits agree. |
 | `--temperature` `--top-p` `--top-k` | `0.7` `0.95` `20` | Sampling of the sampled scenarios. `--temperature 0` makes every scenario greedy. |
 | `--thinking default\|on\|off` | `default` | The model's thinking switch (`chat_template_kwargs.enable_thinking`), where the endpoint has one. |
-| `--reply-length fixed\|natural` | `fixed` | The sampled scenarios' replies. `fixed` sends `ignore_eos`: every reply runs to its `max_tokens`, so two builds are timed over the same number of tokens. `natural` lets the model end its reply, as a chat client sees it (rates then cover only the tokens that came). Greedy checks stay fixed. Recorded in the run file; `compare` warns when two runs differ in it. Read below why the two give different decode rates. |
+| `--mode easy\|medium\|hard` | `hard` | How easy the measured text is for a draft model, and so how high a drafting engine's decode rate reads: `hard` gives the published numbers, `easy` measures the way the usual public benchmarks do. A mode sets the defaults of `--corpus`, `--reply-length` and some scenario parameters; those options still override it. Recorded in the run file; `compare` warns when two runs differ in it. See [Modes](#modes). |
+| `--reply-length fixed\|natural` | the mode's: `fixed` for hard and medium, `natural` for easy | The sampled scenarios' replies. `fixed` sends `ignore_eos`: every reply runs to its `max_tokens`, so two builds are timed over the same number of tokens. `natural` lets the model end its reply, as a chat client sees it (rates then cover only the tokens that came). Greedy checks stay fixed. Recorded in the run file; `compare` warns when two runs differ in it. Read below why the two give different decode rates. |
 | `--context TOKENS` | the endpoint's `max_model_len` | The longest prompt to send. Depths past it are skipped and named in the report. An endpoint that does not report its context needs this, or every depth is tried. |
 | `--kv-pool TOKENS` | the endpoint's `kv_pool_tokens` | Tokens of context the endpoint holds for all requests at once. `long-agents` sizes its documents from it; this server reports it in `/v1/models`. |
 | `--timeout SECONDS` | `1800` | Per request. |
-| `--corpus hard\|easy\|DIR` | `hard` | The text long prompts are cut from: `hard` = this engine's own code and documentation, `easy` = conventional template-made code and prose, `DIR` = another corpus (`DIR/<kind>/<files>`). The set, its version and hash are recorded; runs on different corpora do not compare. |
+| `--corpus hard\|medium\|DIR` | the mode's: `hard` for hard, `medium` for medium and easy | The text long prompts are cut from: `hard` = this engine's own code and documentation, `medium` = conventional template-made code and prose, `DIR` = another corpus (`DIR/<kind>/<files>`). The set, its version and hash are recorded; runs on different corpora do not compare. |
 | `--power auto\|on\|off` | `auto` | Sample the GPUs' board power and clock while the run goes (below). `auto` = on when the URL is this machine's loopback address; `on` for a server on this machine reached by another address. |
 | `--strict` | off | Send OpenAI fields only: no probing for the extensions below. |
 
@@ -129,6 +133,10 @@ mean of rates reads high: half the tokens at 300 tok/s and half at 100 come out 
 |---|---|---|---|---|---|---|---|---|
 | `agent` (default) | 4 % | 19 % | 63 % | 0 | 3 % | 3 % | 4 % | 4 % |
 | `even` | 12.5 % | 12.5 % | 12.5 % | 12.5 % | 12.5 % | 12.5 % | 12.5 % | 12.5 % |
+| `easy` (the easy mode's) | 0 | 30 % | 20 % | 0 | 15 % | 15 % | 10 % | 10 % |
+
+`easy` is the exception to the harmonic mean: its figure is the weighted arithmetic mean of the categories' median
+rates, the figure the usual public benchmarks quote, and its row in the report says so.
 
 Or your own shares: `--set decode.weights=code:1,reasoning:3` (normalised to sum 1; a category left out weighs 0; an
 unknown name, category or share is refused before anything is sent).
@@ -203,26 +211,54 @@ than this tool's default does, on the same server. The decode step is the same i
   than a story).
 - The headline is the agent mix (above) as a harmonic mean; a weighted arithmetic mean of the same rates reads higher.
   Compare per category.
+- `--mode easy` puts all of these on the common footing: natural replies, tasks whose replies repeat or reshape their
+  input, the `easy` mix as a weighted arithmetic mean. Its numbers are the ones to set beside other benchmarks'.
 - A run with failed requests has blank or partial rows (`errors` in the report): it is not a result.
 
 
+
+## Modes
+
+A drafting engine's decode rate depends on how well its draft guesses the text: the same build reads very differently
+on different prompts and with different ways of counting. `--mode` fixes one way, recorded in the run file with its
+version (`compare` warns across modes):
+
+| | `hard` (default) | `medium` | `easy` |
+|---|---|---|---|
+| long prompts | the `hard` corpus: this engine's own code and docs | the `medium` corpus: conventional template-made code and prose | the `medium` corpus |
+| short prompts (decode, concurrency, arrivals) | open tasks written from scratch, three per category | the same | tasks whose reply mostly repeats or reshapes the prompt's input (a diff, a whole edited file, JSON from given data, a fix of given code, a chat that goes on), four per category, shorter reply budgets |
+| replies | `fixed`: run to `max_tokens` | `fixed` | `natural`: end where the model ends them |
+| prefix cache on the short prompts | the same prompt is sent every pass | the same | every request starts with a new line: none is served from the cache |
+| decode samples per category | 9 (3 prompts x `passes` 3) | 9 | 20 (4 prompts x 5 passes, after 3 warm-up requests) |
+| decode headline | `agent` mix, harmonic mean | the same | `easy` mix, weighted arithmetic mean |
+
+`hard` gives the published numbers. `easy` measures the way the usual public benchmarks do, so its numbers are the ones
+to set beside theirs; it is not a measure of an agent's experience. `medium` sits between: the hard method over text
+a drafter guesses well, which moves the long-context scenarios more than the decode headline (prefill speed depends on
+the token count, not on the text).
+
+A mode only sets defaults. `--corpus`, `--reply-length` and `--set` override them (a suite's own parameter, such as
+`quick`'s single decode pass, stays as the suite sets it). The launcher's Benchmark tab picks the mode with `m`
+([launcher.md](launcher.md)), easy by default. Changing a prompt of the easy set changes the easy mode's numbers: bump
+its version in `tools/bench/mode.cpp` with it.
 
 ## The corpus
 
 Long prompts are cut from text embedded in the binary, two sets of `code` and `prose` in `tools/bench/corpus/<set>/`:
 
-- `hard` (the default, version 4): frozen snapshots of this engine's sources and of its documentation. Real text a
+- `hard` (the hard mode's, version 4): frozen snapshots of this engine's sources and of its documentation. Real text a
   drafter guesses least well: the strict measurement.
-- `easy` (version 1): conventional, template-made code and prose - entity classes, CRUD repositories and services,
-  their tests, API clients, UI components, SQL, manifests; a travel guide, product manuals, recipes, help-centre
-  articles, local news. Regular text of the kind most public benchmarks use, made to be guessed well by a drafter:
-  its long-document numbers do not compare with `hard` runs.
+- `medium` (the medium and easy modes', version 1): conventional, template-made code and prose - entity classes, CRUD
+  repositories and services, their tests, API clients, UI components, SQL, manifests; a travel guide, product manuals,
+  recipes, help-centre articles, local news. Regular text of the kind most public benchmarks use, made to be guessed
+  well by a drafter: its long-document numbers do not compare with `hard` runs. Runs made before the modes name this
+  set `easy`; the tool reads them as the medium mode.
 
-`--corpus easy` picks the set (the launcher's Benchmark tab: `m`, easy by default); the short decode prompts are the same
-for both. The sets are not kept in step with the tree, since two builds compare only on the same text. Changing a
-file of a set changes every prompt cut from it: bump its version (`kCorpusVersion` for hard, `kEasyCorpusVersion` for
-easy) and the hash pinned in `tests/test_bench.cpp` with it. A depth past the set's size repeats the text and the report
-says so (a repeated document is easier to process for some engines).
+The sets are not kept in step with the tree, since two builds compare only on the same text. Changing a file of a set
+changes every prompt cut from it: bump its version (`kCorpusVersion` for hard, `kMediumCorpusVersion` for medium) and
+the hash pinned in `tests/test_bench.cpp` with it. A depth past the set's size repeats the text and the report says so
+(a repeated document is easier to process for some engines).
+
 
 ## Adding a scenario
 
