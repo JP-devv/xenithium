@@ -45,7 +45,9 @@ class StepModelAdapter final : public core::StepModel {
   bool prefill_long_parts() const override { return true; }
   bool prompt_logprobs() const override { return true; }
   void prefill_rows(int slot, const int32_t *tokens, int n, int32_t next, const RowsFn &on_rows) override;
-  static constexpr int kDepth = 3;  // MTP-3: a 4-row verify (Model::kRows)
+  // MTP: one layer reused recursively, up to kMtpDepthMax drafts (a 7-row verify at depth 6).
+  // The default depth table stays MTP-3; set_mtp_depth / --mtp-depth raises it.
+  static constexpr int kDepth = Model::kMtpDepthMax;
   // DFlash's default depths (the most drafts per sequence: the adaptive depth picks below them by spec_cost and the
   // acceptance it sees): one or two sequences the whole block (7 drafts, an 8-row verify each), three 4 (3 x 5 rows),
   // four 3 (4 x 4), five to eight 1 (2 rows each, 10-16 rows), nine and more plain rows. With draft trees each segment
@@ -137,6 +139,17 @@ class StepModelAdapter final : public core::StepModel {
   }
   void set_depths(const int (&d)[kDepthSeqs]) {
     for (size_t i = 0; i < static_cast<size_t>(kDepthSeqs); ++i) depth_[i] = d[i];
+  }
+  // Cap every stream count at d (1..kDepth). draft_depth() still clamps to the step / segment / pass limit.
+  void set_mtp_depth(int d) {
+    d = std::clamp(d, 1, kDepth);
+    for (int i = 0; i < kDepthSeqs; ++i) depth_[i] = d;
+  }
+  // Like set_mtp_depth, but only for steps of `from` or more sequences (XEN_DRAFTER_MTP_FROM).
+  void set_mtp_depth_from(int d, int from) {
+    d = std::clamp(d, 1, kDepth);
+    const int i0 = std::max(0, from - 1);
+    for (int i = i0; i < kDepthSeqs; ++i) depth_[i] = d;
   }
   std::vector<int32_t> first_drafts(int slot, int32_t first, int depth, int sequences) override;
   // coupled drafts for sampled requests (MTP and DFlash)

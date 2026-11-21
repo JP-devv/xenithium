@@ -80,7 +80,7 @@ struct Model::Card {
 
 namespace {
 constexpr int kRecInts = k::kSegs16 * k::kSegRec;  // one step's segment records
-constexpr int kMtpPasses = 4;                       // pass 1 + up to 3 chained passes
+constexpr int kMtpPasses = Model::kMtpDepthMax + 1;  // pass 1 + up to kMtpDepthMax chained passes
 
 // slot s of a per-slot state / cache as a one-sequence view (prefill, the slices scaffold)
 k::GdnState gdn_view(const k::GdnState &st, int s) {
@@ -527,12 +527,14 @@ Model::Model(Fabric &fab, const std::string &dir, const ModelOptions &opt) : fab
     mo.kv_defer = opt.mtp_kv_defer;  // 
     mo.prefill_rows = opt.prefill_chunk;  // TP1: the fc's concatenated input rows
     mtp_ = std::make_unique<Mtp>(fab, dir, cfg_, cap_, rp, mo);
+    const size_t mtp_pos_bytes = static_cast<size_t>(kMtpPasses) * kRecInts * 4;
+    const size_t mtp_draft_bytes = static_cast<size_t>(kMtpPasses) * k::kStepRows32 * 4;
     for (int c = 0; c < C; ++c) {
-      auto *p = static_cast<int32_t *>(fab.alloc(static_cast<size_t>(c), 4096));
+      auto *p = static_cast<int32_t *>(fab.alloc(static_cast<size_t>(c), std::max<size_t>(mtp_pos_bytes, 4096)));
       cards_[static_cast<size_t>(c)]->mem.push_back(p);
       mtp_pos_.push_back(p);
     }
-    mtp_drafts_ = static_cast<int32_t *>(fab.alloc(0, 4096));
+    mtp_drafts_ = static_cast<int32_t *>(fab.alloc(0, std::max<size_t>(mtp_draft_bytes, 4096)));
     cards_[0]->mem.push_back(mtp_drafts_);
   }
   // arch flint: a step writes up to 8 rows of a sequence into a ring, a many-row prefill chunk prefill_chunk rows (its
