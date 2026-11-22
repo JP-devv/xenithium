@@ -400,12 +400,14 @@ struct A8State {
     const int8_t *q = nullptr;
     const float *s = nullptr;
     const float *s_rows = nullptr;  // the scales row-major [rows][k / 128] too (oneDNN's layout), or null
+    int read = 0;                   // (hin) rows its readers took so far
   };
   std::unordered_map<sycl::device, In> in;
   // The codes of GLU outputs h that the oneDNN GLU path quantised with the swiglu (glu_q8), at most kHin per
   // device (the split MLP fills h in row ranges); an entry dies when anything rewrites rows of its h (every
-  // w4a16_gemm_pf_swiglu call drops the entries its output overlaps first) or with w4a16_pf_a8_input_clear.
-  static constexpr int kHin = 4;
+  // w4a16_gemm_pf_swiglu call drops the entries its output overlaps first) or with w4a16_pf_a8_input_clear. A codes-only
+  // entry (hco) also stays past its reader until its rows are rewritten, so a few chunk sizes in a row can hold several.
+  static constexpr int kHin = 8;
   std::unordered_map<sycl::device, std::vector<In>> hin;
   // the h ranges the oneDNN GLU wrote as codes only (w4a16_pf_set_h_codes_only), kept past their codes' eviction:
   // a GEMM reading one without its codes throws instead of reading stale h
@@ -414,6 +416,7 @@ struct A8State {
     int8_t *q = nullptr;
     float *s = nullptr;
     size_t qcap = 0, scap = 0, qused = 0, sused = 0;
+    std::vector<std::pair<void *, sycl::event>> retired;  // replaced scratches, freed once their event completed
   };
   std::unordered_map<sycl::device, HScr> hscr;
 } g_a8;
@@ -935,16 +938,53 @@ sycl::event onednn_glu_q8(sycl::queue &q, const Args &A, const int8_t *aq, const
     store_h = !t_h_codes_only;
     auto &v = g_a8.hin[q.get_device()];
     A8State::HScr &hc = g_a8.hscr[q.get_device()];
-    if (2 * qb > hc.qcap || 2 * sb > hc.scap) {  // two calls' worth of the largest so far (the split MLP registers h in row ranges);
-      q.wait();  // the first served-size call (the warm-up) sizes it
-      if (hc.q) sycl::free(hc.q, q);
-      if (hc.s) sycl::free(hc.s, q);
-      hc.qcap = std::max(hc.qcap, 2 * qb), hc.scap = std::max(hc.scap, 2 * sb);
-      hc.q = static_cast<int8_t *>(sycl::aligned_alloc_device(4096, hc.qcap, q));
-      hc.s = static_cast<float *>(sycl::aligned_alloc_device(4096, hc.scap * 4, q));
-      v.clear(), hc.qused = hc.sused = 0;
+    std::erase_if(hc.retired, [&](const std::pair<void *, sycl::event> &r) {
+      if (r.second.get_info<sycl::info::event::command_execution_status>() != sycl::info::event_command_status::complete) return false;
+      sycl::free(r.first, q);
+      return true;
+    });
+    // An entry whose h was written as codes only (hco) must keep its codes until its rows are rewritten: the others are a
+    // shortcut (their reader re-quantises the bf16 h) and go first when the scratch or the entry count is short.
+    const auto &co = g_a8.hco[q.get_device()];
+    auto live = [&](const A8State::In &e) {
+      return std::any_of(co.begin(), co.end(), [&](const A8State::In &x) { return x.src == e.src && x.lda == e.lda && x.rows == e.rows; });
+    };
+    auto qb_of = [](const A8State::In &e) { return (static_cast<size_t>(e.rows) * e.k + 4095) / 4096 * 4096; };
+    auto sb_of = [](const A8State::In &e) { return (static_cast<size_t>(e.k / kG) * e.lds + 63) / 64 * 64; };
+    if (2 * qb > hc.qcap || 2 * sb > hc.scap || hc.qused + qb > hc.qcap || hc.sused + sb > hc.scap || static_cast<int>(v.size()) >= A8State::kHin) {
+      std::vector<A8State::In> keep;
+      size_t kq = 0, ks = 0;
+      for (const auto &e : v)
+        if (live(e)) keep.push_back(e), kq += qb_of(e), ks += sb_of(e);
+      if (static_cast<int>(keep.size()) >= A8State::kHin) throw std::logic_error("w4a16_gemm_pf: more live codes-only h ranges than A8State::kHin");
+      // two calls' worth of the largest so far (the split MLP registers h in row ranges; the first served-size call, the
+      // warm-up, sizes it), and room for the live entries + this one
+      const size_t qcap = std::max({hc.qcap, 2 * qb, kq + qb}), scap = std::max({hc.scap, 2 * sb, ks + sb});
+      if (keep.empty() && qcap == hc.qcap && scap == hc.scap) {
+        v.clear(), hc.qused = hc.sused = 0;
+      } else {  // the live entries move, packed, into a new scratch (rare: a size change while a range waits for its reader)
+        // in order on q, no host wait (the peer card's half of this layer may not be submitted yet): the copies follow
+        // the producers; the old scratch is freed once a barrier after them completed (a later registration checks)
+        int8_t *nq = static_cast<int8_t *>(sycl::aligned_alloc_device(4096, qcap, q));
+        float *ns = static_cast<float *>(sycl::aligned_alloc_device(4096, scap * 4, q));
+        size_t oq = 0, os = 0;
+        for (auto &e : keep) {
+          q.memcpy(nq + oq, e.q, qb_of(e));
+          q.memcpy(ns + os, e.s, sb_of(e) * 4);
+          e.q = nq + oq, e.s = ns + os;
+          oq += qb_of(e), os += sb_of(e);
+        }
+        if (hc.q) hc.retired.push_back({hc.q, sycl::event{}});
+        if (hc.s) hc.retired.push_back({hc.s, sycl::event{}});
+        if (!hc.retired.empty()) {
+          const sycl::event done = q.ext_oneapi_submit_barrier();  // everything that read the old scratch, and the copies
+          for (auto &r : hc.retired)
+            if (r.first == hc.q || r.first == hc.s) r.second = done;
+        }
+        hc.q = nq, hc.s = ns, hc.qcap = qcap, hc.scap = scap, hc.qused = oq, hc.sused = os;
+        v.swap(keep);
+      }
     }
-    if (hc.qused + qb > hc.qcap || hc.sused + sb > hc.scap || static_cast<int>(v.size()) >= A8State::kHin) v.clear(), hc.qused = hc.sused = 0;
     hq = hc.q + hc.qused, hs = hc.s + hc.sused;
     hc.qused += qb, hc.sused += sb;
     v.push_back(A8State::In{A.h, A.ldh, A.m, nh, hlds, hq, hs, nullptr});
@@ -978,6 +1018,15 @@ sycl::event w4a8_pf(sycl::queue &q, const Args &A, bool glu) {
     for (const auto &p : hin)
       if ((r0 = from(p)) >= 0) {
         pre = p;
+        // an h's codes are read once (down, in one call or in row ranges): an entry whose rows were all read leaves the
+        // registry, so its scratch is free for the next ranges (its codes-only mark stays until the rows are rewritten)
+        std::lock_guard<std::mutex> lk(g_a8.mu);
+        auto &v = g_a8.hin[q.get_device()];
+        for (auto e = v.begin(); e != v.end(); ++e)
+          if (e->src == p.src && e->lda == p.lda && e->rows == p.rows) {
+            if ((e->read += A.m) >= e->rows) v.erase(e);
+            break;
+          }
         break;
       }
   if (r0 >= 0) {  // the producer's codes
