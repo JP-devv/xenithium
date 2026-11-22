@@ -21,11 +21,11 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+#include "xenithium/arch/common/dflash_plan.hpp"
 #include "xenithium/arch/flint/arch.hpp"
 #include "xenithium/arch/llama/arch.hpp"
 #include "xenithium/arch/qwen35/arch.hpp"
 #include "xenithium/arch/qwen38/experts.hpp"
-#include "xenithium/arch/common/dflash_plan.hpp"
 #include "xenithium/arch/qwen38/mtp.hpp"
 #include "xenithium/kernels/pack.hpp"
 #include "xenithium/model/arch.hpp"
@@ -832,7 +832,7 @@ void dflash_gptq_dequant() {
   expect(bad == 0, "dflash gptq dequant: w4a16_ref matches the packed scale x (code - 8) sums (" + std::to_string(bad) + " off)");
 }
 
-// A 1-layer DFlash 2 catalog: Launch80-style (GPTQ fc / o / gate / up / down, bf16 elsewhere) and an all-bf16 drafter.
+// A 1-layer DFlash 2 catalog: a GPTQ bake (GPTQ fc / o / gate / up / down, bf16 elsewhere) and an all-bf16 drafter.
 void dflash_gptq_plan() {
   const char *tmp = std::getenv("TMPDIR");
   const fs::path dir = fs::path(tmp ? tmp : "/tmp") / ("xen-test-dflash-" + std::to_string(::getpid()));
@@ -934,18 +934,22 @@ void dflash_gptq_plan() {
   }
   fs::remove_all(dir);
 
-  const char *env = std::getenv("XEN_TEST_MODEL_DFLASH2");
+  const char *env = std::getenv("XEN_TEST_MODEL_DFLASH2_GPTQ");
   const char *home = std::getenv("HOME");
-  const std::string real = env ? env : std::string(home ? home : "") + "/models/qwen38-27b-dflash2";
+  const std::string real = env ? env : std::string(home ? home : "") + "/models/qwen38-27b-dflash2-int4-gptq";
   if (!fs::exists(real + "/config.json")) {
     std::printf("[SKIP] dflash gptq plan: %s not present\n", real.c_str());
     return;
   }
   const auto ck = m::Checkpoint::open(real);
+  if (!ck.find("fc.qweight")) {
+    std::printf("[SKIP] dflash gptq plan: %s is not a GPTQ bake (no fc.qweight)\n", real.c_str());
+    return;
+  }
   int layers = 0;
   for (const auto &t : ck.tensors())
     if (t.name.rfind("layers.", 0) == 0) layers = std::max(layers, std::stoi(t.name.substr(7)) + 1);
-  expect(layers > 0, "dflash plan: Launch80 catalog names layers.* (" + std::to_string(layers) + ")");
+  expect(layers > 0, "dflash plan: the GPTQ bake names layers.* (" + std::to_string(layers) + ")");
   const auto plan = xenithium::arch::dflash_dense_plan(ck, layers, 4);
   const auto *fc = by_key(plan, "fc.weight");
   const auto *o = by_key(plan, "layers.0.self_attn.o_proj.weight");
@@ -956,7 +960,7 @@ void dflash_gptq_plan() {
              o->name == "layers.0.self_attn.o_proj.qweight" && o->store == m::DenseSpec::Store::w4 && q && q->name == "layers.0.self_attn.q_proj.weight" &&
              q->store == m::DenseSpec::Store::w4r && gu && gu->append.size() == 1 && gu->append[0] == "layers.0.mlp.up_proj.qweight" && dn &&
              dn->name == "layers.0.mlp.down_proj.qweight" && dn->store == m::DenseSpec::Store::w4,
-         "dflash plan: Launch80 GPTQ bake (5 layers, dense_bytes 4): fc w4d, o / gate|up / down w4 gptq, q RTN from .weight");
+         "dflash plan: the GPTQ bake (5 layers, dense_bytes 4): fc w4d, o / gate|up / down w4 gptq, q RTN from .weight");
   bool threw = false;
   try {
     (void)xenithium::arch::dflash_dense_plan(ck, layers + 1, 4);

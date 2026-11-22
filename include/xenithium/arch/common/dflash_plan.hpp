@@ -1,8 +1,9 @@
 // Xenithium · host-side placement of a DFlash 2 / DSpine drafter's tensors (no SYCL).
 // dflash_dense_plan is shared by the loader and the host tests: a bf16 `.weight` Linear keeps the
 // existing path (int8 / bf16, or RTN int4 for q / o / gate | up / down at dense_bytes 4); a GPTQ
-// int4 Linear (`.qweight` / `.scales` / `.qzeros`, the Launch80 bake) reuses the 27B body's layout
-// (kept int4 when the drafter would RTN, otherwise dequantised to the dense precision).
+// int4 Linear (`.qweight` / `.scales` / `.qzeros`, sym, group 128, no act order: DFlashConfig::load checks the
+// checkpoint's quantization_config) reuses the 27B body's layout (kept int4 where the drafter would RTN, otherwise
+// dequantised to the dense precision).
 #pragma once
 
 #include <vector>

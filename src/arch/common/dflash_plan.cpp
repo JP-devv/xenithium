@@ -1,3 +1,4 @@
+// Xenithium · a DFlash 2 / DSpine drafter's tensor placement (see dflash_plan.hpp).
 #include "xenithium/arch/common/dflash_plan.hpp"
 
 #include <stdexcept>

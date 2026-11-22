@@ -131,6 +131,14 @@ DFlashConfig DFlashConfig::load(const std::string &dir, int max_block) {
   need(c.block >= 2 && c.block <= k::kStepRows16, "block_size 2..16 (a verify segment's rows)");
   need(!c.target_layers.empty() && c.mask_id >= 0 && c.mask_id < c.vocab, "target_layer_ids / mask_token_id");
   need(c.window >= 2, "sliding_window");
+  // GPTQ int4 Linears (dflash_dense_plan): the loader reads scale x (code - 8) per 128-k group, in order
+  if (const json::Value *q = t.get("quantization_config"); q && !q->is_null()) {
+    need(ModelConfig::str_or(*q, "quant_method", "") == "gptq", "quantization_config: quant_method gptq");
+    need(ModelConfig::need_int(*q, "bits") == 4 && ModelConfig::need_int(*q, "group_size") == k::kW4Group, "quantization_config: bits 4, group_size 128");
+    const json::Value *sym = q->get("sym"), *act = q->get("desc_act");
+    need(sym && sym->is_bool() && sym->b, "quantization_config: sym true");
+    need(!act || !act->is_bool() || !act->b, "quantization_config: desc_act true (act order) is not implemented");
+  }
   return c;
 }
 

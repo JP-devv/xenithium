@@ -1,8 +1,8 @@
 // Xenithium · the DFlash 2 block drafter on the cards: an alternative to a target's MTP layer (ModelOptions::dflash_dir;
 // server XEN_DRAFTER_MODEL), `DFlash2DraftModel` checkpoints (for Qwen3.8-27B, arch qwen35, and Qwen3.8 Flash-Next,
-// arch qwen38; bf16, or a GPTQ int4 bake of fc / o / gate / up / down). Shared by the archs: the target hands over its sizes, embedding tables and lm_head rows
-// (DFlashTarget) and captures its own features (capture() copies a single-stream residual's columns; an arch with
-// several residual streams fills step_features / prefill_features with its own kernel).
+// arch qwen38; bf16, or GPTQ int4 Linears: dflash_dense_plan). Shared by the archs: the target hands over its sizes,
+// embedding tables and lm_head rows (DFlashTarget) and captures its own features (capture() copies a single-stream
+// residual's columns; an arch with several residual streams fills step_features / prefill_features with its own kernel).
 //
 // Semantics (config.json + the checkpoint):
 //   features  F_p = [h_p(l_0) | ... | h_p(l_4)]: the target's residual after decoder layers dflash_config.target_layer_ids
