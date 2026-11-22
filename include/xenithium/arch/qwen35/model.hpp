@@ -452,6 +452,10 @@ class Model {
   // draft_after_prefill).
   void prefill(const int32_t *ids, int n, const std::function<void(int64_t, int)> &on_rows = {}, int32_t next = -1);
   int prefill_chunk() const { return opt_.prefill_chunk_run > 0 ? opt_.prefill_chunk_run : opt_.prefill_chunk; }
+  // The prefix cache's alignment (StepModel::snap_align): 64 where a row's bits do not depend on its prefill call's size
+  // (no fa-body context splits, no library GEMM route); else the prefill chunk, so a cached continuation runs the very
+  // calls a cold read runs (the tail splits and the library-vs-own GEMM choice follow the call's rows).
+  int call_align() const;
   // One prefill call in parts (): prefill_begin(ids, n <= prefill_chunk, next) on the current
   // slot, then prefill_advance(layers) runs that many more layers (at least 1) and returns true once all ran (picks /
   // logits / draft_after_prefill then as after prefill()). Same bits as one call. Between parts steps of OTHER slots may

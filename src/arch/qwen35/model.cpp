@@ -2141,6 +2141,8 @@ bool Model::pf_codes_only(int m) const {
   return k::w4a16_pf_a8() && opt_.prefill_a8_keep.empty() && m / 2 > std::max(opt_.prefill_short, 0) + 4 && (cards() == 1 || (m / 2) % 4 == 0);
 }
 
+int Model::call_align() const { return k::gqa_attn_fa_tail() == 0 && k::w4a16_pf_onednn() == 0 ? 64 : prefill_chunk(); }
+
 void Model::pf_norm(int c, int m, const bf16 *add, const bf16 *w, uint32_t pend, const std::function<void(int, int)> &proj, bool codes_only, PfNorm mode) {
   Card &cd = *cards_[static_cast<size_t>(c)];
   auto &q = fab_.compute(static_cast<size_t>(c));
@@ -2223,7 +2225,7 @@ void Model::pf_start(const int32_t *ids, int m, bool head_all, const std::functi
   pf_.snap = -1;
   if (cap_arm_slot_ == slot_) {
     const int64_t a = cap_arm_pos_;
-    if (snap_inside() && a % 64 == 0 && a > pos_ && a < pos_ + m) pf_.snap = a;
+    if (snap_inside() && a % call_align() == 0 && a > pos_ && a < pos_ + m) pf_.snap = a;
     cap_arm_slot_ = -1;
     cap_arm_pos_ = -1;
   }

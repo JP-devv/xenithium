@@ -33,7 +33,8 @@
 // prompt's rest is prefilled in calls that keep a cold prefill's numerics (pf_call_rows), and a request's prefix_mark cuts
 // a call near there (pc_cut: its snapshot is where the conversation's next turn starts to differ). Parked sequences give
 // their pages up first (least recently used) when admission or a decode step needs them, before any running request is
-// preempted. Prompt-logprob requests start cold. Alone, every output is bit-identical to the cache off.
+// preempted. Prompt-logprob requests start cold. Alone, every output is bit-identical to the cache off where the model's
+// snap_align holds its promise (qwen35: Model::call_align; measured with the served kernels, round 101).
 // Greedy requests use the model's own picks (no logits leave the device); sampling,
 // penalties, logit_bias, logprobs and constraints read the step's logits on the host
 // (core:Sampler), one host thread per row.
