@@ -2134,36 +2134,58 @@ void Model::prefill(const int32_t *ids, int n, const std::function<void(int64_t,
   pf_prof_.total = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 }
 
-void Model::pf_norm(int c, int m, const bf16 *add, const bf16 *w, uint32_t pend, const std::function<void(int, int)> &proj) {
+// A norm whose xn feeds only W4A8 GEMMs may skip the bf16 xn: W4A8 on, every matrix on it (no keep list), every call
+// over the chunk's rows or a two-card half of them past the short-call rows (those read bf16 on the decode GEMMs), and
+// the halves' first row a multiple of 4 (a W4A8 call finds a producer's codes only from such a row).
+bool Model::pf_codes_only(int m) const {
+  return k::w4a16_pf_a8() && opt_.prefill_a8_keep.empty() && m / 2 > std::max(opt_.prefill_short, 0) + 4 && (cards() == 1 || (m / 2) % 4 == 0);
+}
+
+void Model::pf_norm(int c, int m, const bf16 *add, const bf16 *w, uint32_t pend, const std::function<void(int, int)> &proj, bool codes_only, PfNorm mode) {
   Card &cd = *cards_[static_cast<size_t>(c)];
   auto &q = fab_.compute(static_cast<size_t>(c));
   const int H = cfg_.hidden;
   const float eps = static_cast<float>(cfg_.rms_eps);
   // with W4A8 on, the norm also writes xn's codes and hands them to the W4A8 GEMMs that read xn
   const bool q8 = k::w4a16_pf_a8();
+  codes_only = codes_only && q8;
+  if (mode != PfNorm::both && (!pend || !add || cards() != 2 || (mode == PfNorm::owner && !codes_only)))
+    throw std::logic_error("qwen35 model: pf_norm on the owner's rows without a pending two-card sum, or owner without codes only");
   const size_t H_ = static_cast<size_t>(H);
   auto norm = [&](int r0, int r1, const bf16 *ad) {
     if (q8)
-      k::rms_norm_q8(q, r1 - r0, H, cd.pf_res + r0 * H_, ad ? ad + r0 * H_ : nullptr, nullptr, w, eps, cd.pf_xn + r0 * H_,
-                     k::RmsNormQ8{cd.pf_xq + r0 * H_, cd.pf_xs + r0, cd.pf_xq_ld, cd.pf_xs_rows + r0 * (H_ / 128)}, plain_norm());
-    else
-      k::rms_norm(q, r1 - r0, H, cd.pf_res + r0 * H_, ad ? ad + r0 * H_ : nullptr, nullptr, w, eps, cd.pf_xn + r0 * H_, plain_norm());
+      return k::rms_norm_q8(q, r1 - r0, H, cd.pf_res + r0 * H_, ad ? ad + r0 * H_ : nullptr, nullptr, w, eps, cd.pf_xn + r0 * H_,
+                            k::RmsNormQ8{cd.pf_xq + r0 * H_, cd.pf_xs + r0, cd.pf_xq_ld, cd.pf_xs_rows + r0 * (H_ / 128), codes_only}, plain_norm());
+    return k::rms_norm(q, r1 - r0, H, cd.pf_res + r0 * H_, ad ? ad + r0 * H_ : nullptr, nullptr, w, eps, cd.pf_xn + r0 * H_, plain_norm());
   };
-  if (q8) k::w4a16_pf_a8_input(q, cd.pf_xn, H, m, H, cd.pf_xq, cd.pf_xs, cd.pf_xq_ld, cd.pf_xs_rows);
+  if (q8) k::w4a16_pf_a8_input(q, cd.pf_xn, H, m, H, cd.pf_xq, cd.pf_xs, cd.pf_xq_ld, cd.pf_xs_rows, codes_only);
   else k::w4a16_pf_a8_input_clear(q);
   if (!pend || !add) {
     norm(0, m, add);
     return;
   }
-  // add's own rows are this card's sum (in order on q); the peer's arrive by its back copy (pair_split_wait)
+  // add's own rows are this card's sum (in order on q); the peer's arrive by its back copy (pair_split_wait), or with
+  // the sum kept by its owner (owner / restore) the peer shares its normed rows' codes or its residual rows
   int lo = 0, hi = 0;
   k::pair_split_owner_rows(c, m, &lo, &hi);
-  auto part = [&](int r0, int r1) {
-    if (r1 > r0) norm(r0, r1, add);
-  };
-  part(lo, hi);
+  sycl::event own;
+  if (hi > lo) own = norm(lo, hi, add);
+  if (mode != PfNorm::both) {
+    Card &c0 = *cards_[0], &c1 = *cards_[1];
+    void *const xq[2] = {c0.pf_xq, c1.pf_xq}, *const xs[2] = {c0.pf_xs_rows, c1.pf_xs_rows}, *const res[2] = {c0.pf_res, c1.pf_res};
+    const k::SplitShare codes[2] = {{xq, H_}, {xs, H_ / 128 * 4}}, rows[1] = {{res, H_ * 2}};
+    const std::span<const k::SplitShare> sets = mode == PfNorm::owner ? std::span<const k::SplitShare>(codes) : std::span<const k::SplitShare>(rows);
+    k::pair_split_share(q, cd.side ? &*cd.side : nullptr, c, m, sets, cd.pf_split, pend, hi > lo ? &own : nullptr);
+  }
   if (proj && hi > lo) proj(lo, hi);
   k::pair_split_wait(q, cd.pf_split, pend);
+  auto part = [&](int r0, int r1) {
+    if (r1 <= r0) return;
+    if (mode == PfNorm::owner)  // the peer's codes and row-major scales arrived; the group-major scales from them
+      k::rms_q8_scales_cols(q, r1 - r0, H / 128, cd.pf_xs_rows + r0 * (H_ / 128), cd.pf_xs + r0, cd.pf_xq_ld);
+    else
+      norm(r0, r1, mode == PfNorm::restore ? nullptr : add);  // restore: the peer's residual rows arrived with its add
+  };
   part(0, lo);
   part(hi, m);
   if (proj) {
@@ -2393,8 +2415,9 @@ bool Model::pf_step(int layers) {
   const bool defer = send && opt_.prefill_defer;
   double split_ms = 0;
   // the split two-card sum of a many-row producer's fp32 partials (both cards' partial on their queues); sent: the
-  // producers already sent the peer's rows (pair_split_send). With defer the sum's peer rows stay pending (pend_seq_).
-  auto split_sum = [&](auto part_of, bf16 *Card::*out, bool sent) {
+  // producers already sent the peer's rows (pair_split_send). With defer the sum's peer rows stay pending (pend_seq_);
+  // owner: its consumer norms each card's own rows (PfNorm owner / restore) and nothing is copied back.
+  auto split_sum = [&](auto part_of, bf16 *Card::*out, bool sent, bool owner = false) {
     sycl::queue *qq[2] = {&fab_.compute(0), &fab_.compute(1)};
     sycl::queue *side[2] = {&*cards_[0]->side, &*cards_[1]->side};
     const float *part[2] = {part_of(0), part_of(1)};
@@ -2405,7 +2428,7 @@ bool Model::pf_step(int layers) {
       for (size_t c = 0; c < C; ++c) fab_.compute(c).wait();  // the producers done: time the sum alone
     const auto t_split = std::chrono::steady_clock::now();
     if (sent) {
-      k::pair_split_finish(qq, side, m, H, part, o, sp, pf_seq_, nullptr, defer ? k::SplitRows::deferred : k::SplitRows::all);
+      k::pair_split_finish(qq, side, m, H, part, o, sp, pf_seq_, nullptr, owner ? k::SplitRows::owner : defer ? k::SplitRows::deferred : k::SplitRows::all);
       if (defer) pend_seq_ = pf_seq_;
     } else {
       k::pair_split_rows(qq, m, H, part, o, sp, pf_seq_);
@@ -2423,10 +2446,26 @@ bool Model::pf_step(int layers) {
     sends[c] = k::PairSplitSend{&*cards_[c]->side, &cards_[c]->pf_split, k::pair_split_next_seq(pf_seq_)};
     return &sends[c];
   };
+  // The norms on their owner's rows (PfNorm): a norm whose xn feeds only W4A8 GEMMs (attention and dense MLP inputs) runs
+  // on each card's own rows and the cards swap the codes (half the norm work, half the bytes of the bf16 sum's back
+  // copy); the residual's peer rows then go stale, and the next norm that needs them (a GDN input, a DFlash feature
+  // layer, the call's last norms) restores them from their owners. Not under profiling (its waits need the back copy).
+  const bool own_ok = defer && !pr && C == 2;
+  auto in_owner = [&](int l) {  // layer l's input norm on the owner's rows (l > 0: a pending MLP sum)
+    return own_ok && l > l0 && cfg_.full_attention[l] && rows_mode && !opt_.prefill_attn_slices && pf_codes_only(m) &&
+           !(dflash_ && feat_of_[static_cast<size_t>(l - 1)] >= 0);
+  };
+  auto post_owner = [&](int l) {  // layer l's MLP input norm on the owner's rows: the next layer's input norm in this call restores
+    return own_ok && rows_mode && (!cfg_.full_attention[l] || !opt_.prefill_attn_slices) && !(moe_ && moe_->has(l)) && mlp_ && pf_codes_only(m) && l + 1 < l1;
+  };
+  auto mode_of = [&](bool owner, bool stale) { return owner ? PfNorm::owner : stale ? PfNorm::restore : PfNorm::both; };
+  bool stale = false;  // the residual's peer rows are stale on each card (the last norm ran on the owner's rows only)
   for (int l = l0; l < l1; ++l) {
     const bool full = cfg_.full_attention[l];
     // with the last MLP sum pending, the mixer's first GEMM runs on the card's own rows before the wait
     const uint32_t pend_in = l > 0 ? pend_seq_ : 0;
+    const PfNorm in_mode = pend_in ? mode_of(in_owner(l), stale) : PfNorm::both;
+    if (!pend_in && stale) throw std::logic_error("qwen35 model: a stale residual without a pending sum to restore it");
     const bool pre_in = pend_in != 0 && rows_mode && (!full || !opt_.prefill_attn_slices);
     for (size_t c = 0; c < C; ++c) {
       Card &cd = *cards_[c];
@@ -2445,8 +2484,12 @@ bool Model::pf_step(int layers) {
                            w.qkvz.n, w.qkvz4.n, H);
         };
       }
-      pf_norm(static_cast<int>(c), m, l > 0 ? cd.pf_mlp : nullptr, cd.in_norm[l], pend_in, proj);
+      // an attention layer's xn feeds only its q|k|v GEMM (the GDN's a / b dots read the bf16 xn)
+      pf_norm(static_cast<int>(c), m, l > 0 ? cd.pf_mlp : nullptr, cd.in_norm[l], pend_in, proj, full && rows_mode && !opt_.prefill_attn_slices && pf_codes_only(m),
+              in_mode);
     }
+    stale = in_mode == PfNorm::owner;
+    const PfNorm post_mode = mode_of(post_owner(l), stale);
     pend_seq_ = 0;
     mark(pf_prof_.norms);
     // pf_res holds layer l - 1's output of every row: the DFlash features of the chunk
@@ -2489,7 +2532,7 @@ bool Model::pf_step(int layers) {
                                    k::GqaRowsSelect{.pages = opt_.prefill_select, .dense_last_block = ends_prompt});
         if (c == 0) ae = e;
       }
-      if (split) split_sum([&](int c) { return static_cast<const float *>(cards_[c]->pf_gqa.partial); }, &Card::pf_mix, send);
+      if (split) split_sum([&](int c) { return static_cast<const float *>(cards_[c]->pf_gqa.partial); }, &Card::pf_mix, send, post_mode != PfNorm::both);
       if (pr) {  // after both cards submitted: the reduce waits on the peer
         for (size_t c = 0; c < C; ++c) fab_.compute(c).wait();
         const sycl::event ev[5] = {ae.qkv, ae.prep, ae.attn, ae.o, ae.reduce};
@@ -2570,7 +2613,7 @@ bool Model::pf_step(int layers) {
         const auto e = k::gdn_rows(fab_.compute(c), gdn_.shape_of(static_cast<int>(c)), m, cd.pf_xn, gdn_.w[c][l], rs, sc, C > 1 ? &pw : nullptr, pf_parity_, cd.pf_mix);
         if (c == 0) ge = e;
       }
-      if (split) split_sum([&](int c) { return static_cast<const float *>(cards_[c]->pf_gdn.partial); }, &Card::pf_mix, send);
+      if (split) split_sum([&](int c) { return static_cast<const float *>(cards_[c]->pf_gdn.partial); }, &Card::pf_mix, send, post_mode != PfNorm::both);
       if (pr) {
         for (size_t c = 0; c < C; ++c) fab_.compute(c).wait();
         const sycl::event ev[3] = {ge.qkvz, ge.out, ge.reduce};
@@ -2587,8 +2630,14 @@ bool Model::pf_step(int layers) {
       if (!moe_l) mw[c] = mlp_->weights(*dense_, static_cast<int>(c), l);
       std::function<void(int, int)> proj;
       if (pre_mid) proj = [&, c](int lo, int hi) { mlp_->gate_up_rows(static_cast<int>(c), lo, hi - lo, cards_[c]->pf_xn, mw[c]); };
-      pf_norm(static_cast<int>(c), m, cards_[c]->pf_mix, cards_[c]->post_norm[l], pend_mid, proj);
+      // the dense MLP's xn feeds only its gate|up GEMM
+      pf_norm(static_cast<int>(c), m, cards_[c]->pf_mix, cards_[c]->post_norm[l], pend_mid, proj, !moe_l && mlp_ && !opt_.prefill_slices && pf_codes_only(m),
+              pend_mid ? post_mode : PfNorm::both);
     }
+    if (!pend_mid && post_mode != PfNorm::both) throw std::logic_error("qwen35 model: an owner's-rows norm without its pending sum");
+    stale = post_mode == PfNorm::owner;
+    // the next layer's input norm (this call) takes the MLP sum on the owner's rows when it runs there or restores
+    const bool next_own = l + 1 < l1 && (stale || in_owner(l + 1));
     pend_seq_ = 0;
     mark(pf_prof_.norms);
     if (!opt_.prefill_slices && moe_l) {  // arch flint: the many-row MoE block
@@ -2610,7 +2659,7 @@ bool Model::pf_step(int layers) {
         for (int i = 0; i < 5; ++i) pf_prof_.moe_parts[i] += ev_us(ev[i]) / 1e3;
       }
       pf_parity_ ^= 1;
-      if (split) split_sum([&](int c) { return moe_->rows_part(c); }, &Card::pf_mlp, send);
+      if (split) split_sum([&](int c) { return moe_->rows_part(c); }, &Card::pf_mlp, send, next_own);
     } else if (!opt_.prefill_slices) {
       std::vector<bf16 *> outs(C);
       for (size_t c = 0; c < C; ++c) xs[c] = cards_[c]->pf_xn, outs[c] = cards_[c]->pf_mlp;
@@ -2626,7 +2675,7 @@ bool Model::pf_step(int layers) {
         for (int i = 0; i < (split ? 3 : 4); ++i) pf_prof_.mlp_parts[i] += ev_us(ev[i]) / 1e3;
         if (opt_.prefill_fused_swiglu) pf_prof_.mlp_parts[1] = 0;  // gate|up carries it
       }
-      if (split) split_sum([&](int c) { return mlp_->rows_part(c); }, &Card::pf_mlp, send);
+      if (split) split_sum([&](int c) { return mlp_->rows_part(c); }, &Card::pf_mlp, send, next_own);
     } else {
       for (int s = 0; s < S; ++s) {
         for (size_t c = 0; c < C; ++c) xs[c] = cards_[c]->pf_xn + s * sl;

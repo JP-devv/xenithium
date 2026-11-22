@@ -407,6 +407,9 @@ struct A8State {
   // w4a16_gemm_pf_swiglu call drops the entries its output overlaps first) or with w4a16_pf_a8_input_clear.
   static constexpr int kHin = 4;
   std::unordered_map<sycl::device, std::vector<In>> hin;
+  // the h ranges the oneDNN GLU wrote as codes only (w4a16_pf_set_h_codes_only), kept past their codes' eviction:
+  // a GEMM reading one without its codes throws instead of reading stale h
+  std::unordered_map<sycl::device, std::vector<In>> hco;
   struct HScr {
     int8_t *q = nullptr;
     float *s = nullptr;
@@ -414,6 +417,7 @@ struct A8State {
   };
   std::unordered_map<sycl::device, HScr> hscr;
 } g_a8;
+thread_local bool t_h_codes_only = false;  // w4a16_pf_set_h_codes_only (the calling thread's GLU calls)
 inline int a8_ld(int m) { return (m + 31) / 32 * 32; }
 
 class W4A8Quant;
@@ -810,8 +814,9 @@ inline void quant_2d16(const bf16 *src, int lda, int m, int k, int8_t *dst, floa
 // expressions (s = amax / 127, rne, +-127) into codes [m][nh] + scales group-major [nh / 128][lds]: down then reads them
 // (A8State:hin) instead of re-reading h in its own quantiser launch. The same bits as swiglu_bf16 + quant_2d16. Item = 16
 // rows x one 128-k group (rows past m: no h / code stores; their scales land in the padded scale rows).
+// store_h false: the codes only (w4a16_pf_set_h_codes_only), h is not written.
 class W4A8GluQ8;
-sycl::event glu_q8(sycl::queue &q, int m, int nh, const bf16 *gu, const float *tab, bf16 *h, int ldh, int8_t *hq, float *hs, int lds) {
+sycl::event glu_q8(sycl::queue &q, int m, int nh, const bf16 *gu, const float *tab, bf16 *h, int ldh, int8_t *hq, float *hs, int lds, bool store_h) {
   const int gpr = nh / kG;
   const size_t items = static_cast<size_t>((m + 15) / 16) * gpr;
   return q.parallel_for<W4A8GluQ8>(sycl::nd_range<1>((items + 15) / 16 * 16, 16), [=](sycl::nd_item<1> it) SYCL_ESIMD_KERNEL {
@@ -834,7 +839,7 @@ sycl::event glu_q8(sycl::queue &q, int m, int nh, const bf16 *gu, const float *t
         const esimd::simd<float, 32> hv = t * esimd::simd<float, 32>(uv);
         hb.template select<32, 1>(c * 32) = esimd::simd<bf16, 32>(hv);
       }
-      esimd::block_store<bf16, kG>(h + static_cast<size_t>(r) * ldh + static_cast<size_t>(g) * kG, hb);
+      if (store_h) esimd::block_store<bf16, kG>(h + static_cast<size_t>(r) * ldh + static_cast<size_t>(g) * kG, hb);
       const esimd::simd<float, kG> v = hb;
       const float amax = esimd::hmax<float>(esimd::abs(v));
       esimd::simd<int8_t, kG> qv(0);
@@ -850,14 +855,28 @@ sycl::event glu_q8(sycl::queue &q, int m, int nh, const bf16 *gu, const float *t
   });
 }
 
+// A (a, pitch lda, k columns) inside an h range written as codes only: the hin entries' match (h's pitch and width),
+// so another stage's buffer at the same address (the shared chunk arena) does not count
+bool codes_only_h(const sycl::device &dev, const bf16 *a, int lda, int k) {
+  std::lock_guard<std::mutex> lk(g_a8.mu);
+  const auto ic = g_a8.hco.find(dev);
+  if (ic == g_a8.hco.end()) return false;
+  for (const auto &x : ic->second)
+    if (lda == x.lda && k == x.k && a >= x.src && a < x.src + static_cast<size_t>(x.rows) * x.lda) return true;
+  return false;
+}
+
 // drop the hin entries whose h rows overlap [h, h + rows x ldh)
 void hin_drop(const sycl::device &dev, const bf16 *h, int rows, int ldh) {
   std::lock_guard<std::mutex> lk(g_a8.mu);
+  const bf16 *e = h + static_cast<size_t>(rows) * ldh;
+  auto overlaps = [&](const A8State::In &x) { return x.src < e && h < x.src + static_cast<size_t>(x.rows) * x.lda; };
+  const auto ic = g_a8.hco.find(dev);
+  if (ic != g_a8.hco.end()) ic->second.erase(std::remove_if(ic->second.begin(), ic->second.end(), overlaps), ic->second.end());
   const auto it = g_a8.hin.find(dev);
   if (it == g_a8.hin.end()) return;
   auto &v = it->second;
-  const bf16 *e = h + static_cast<size_t>(rows) * ldh;
-  v.erase(std::remove_if(v.begin(), v.end(), [&](const A8State::In &x) { return x.src < e && h < x.src + static_cast<size_t>(x.rows) * x.lda; }), v.end());
+  v.erase(std::remove_if(v.begin(), v.end(), overlaps), v.end());
   if (v.empty()) g_a8.hscr[dev].qused = g_a8.hscr[dev].sused = 0;
 }
 
@@ -910,11 +929,13 @@ sycl::event onednn_glu_q8(sycl::queue &q, const Args &A, const int8_t *aq, const
   const size_t qb = (static_cast<size_t>(A.m) * nh + 4095) / 4096 * 4096, sb = (static_cast<size_t>(nh / kG) * hlds + 63) / 64 * 64;
   int8_t *hq = nullptr;
   float *hs = nullptr;
+  bool store_h = true;
   {
     std::lock_guard<std::mutex> lk(g_a8.mu);
+    store_h = !t_h_codes_only;
     auto &v = g_a8.hin[q.get_device()];
     A8State::HScr &hc = g_a8.hscr[q.get_device()];
-    if (qb > hc.qcap || sb > hc.scap) {  // two calls' worth of the largest so far (the split MLP registers h in row ranges);
+    if (2 * qb > hc.qcap || 2 * sb > hc.scap) {  // two calls' worth of the largest so far (the split MLP registers h in row ranges);
       q.wait();  // the first served-size call (the warm-up) sizes it
       if (hc.q) sycl::free(hc.q, q);
       if (hc.s) sycl::free(hc.s, q);
@@ -927,8 +948,9 @@ sycl::event onednn_glu_q8(sycl::queue &q, const Args &A, const int8_t *aq, const
     hq = hc.q + hc.qused, hs = hc.s + hc.sused;
     hc.qused += qb, hc.sused += sb;
     v.push_back(A8State::In{A.h, A.ldh, A.m, nh, hlds, hq, hs, nullptr});
+    if (!store_h) g_a8.hco[q.get_device()].push_back(A8State::In{A.h, A.ldh, A.m, nh, 0, nullptr, nullptr, nullptr});
   }
-  return glu_q8(q, A.m, nh, gu, tab, A.h, A.ldh, hq, hs, hlds);
+  return glu_q8(q, A.m, nh, gu, tab, A.h, A.ldh, hq, hs, hlds, store_h);
 }
 
 sycl::event w4a8_pf(sycl::queue &q, const Args &A, bool glu) {
@@ -969,6 +991,8 @@ sycl::event w4a8_pf(sycl::queue &q, const Args &A, bool glu) {
     }
     return a8_shape(q, A, pq, pre.s + r0, pre.lds, glu, shape);
   }
+  if (codes_only_h(q.get_device(), A.a, A.lda, A.k))
+    throw std::logic_error("w4a16_gemm_pf: an input written as codes only (w4a16_pf_set_h_codes_only / w4a16_pf_a8_input) read without its codes");
   if (A.m > sc.max_m || A.k > sc.max_k) throw std::invalid_argument("w4a16_gemm_pf: W4A8 call larger than the reserved scratch");
   const int lds = a8_ld(A.m), gpr = A.k / kG;
   const size_t items = static_cast<size_t>((A.m + 15) / 16) * gpr;
@@ -999,17 +1023,24 @@ void w4a16_pf_set_a8_body(int body) { g_a8_body = body; }
 int w4a16_pf_a8_body() { return g_a8_body; }
 void w4a16_pf_a8_keep_clear() { g_a8.keep.clear(); }
 void w4a16_pf_a8_keep(const uint8_t *w_packed) { g_a8.keep.insert(w_packed); }
-void w4a16_pf_a8_input(sycl::queue &q, const bf16 *src, int lda, int rows, int k, const int8_t *codes, const float *scales, int lds, const float *scales_rows) {
+void w4a16_pf_a8_input(sycl::queue &q, const bf16 *src, int lda, int rows, int k, const int8_t *codes, const float *scales, int lds, const float *scales_rows,
+                       bool codes_only) {
   if (!src || !codes || !scales || rows < 1 || k % kG || lda < k || lds < rows || lds % 4) throw std::invalid_argument("w4a16_pf_a8_input");
   std::lock_guard<std::mutex> lk(g_a8.mu);
   g_a8.in[q.get_device()] = A8State::In{src, lda, rows, k, lds, codes, scales, scales_rows};
+  auto &v = g_a8.hco[q.get_device()];  // src's rows are rewritten: an earlier codes-only mark over them dies
+  const bf16 *e = src + static_cast<size_t>(rows) * lda;
+  v.erase(std::remove_if(v.begin(), v.end(), [&](const A8State::In &x) { return x.src < e && src < x.src + static_cast<size_t>(x.rows) * x.lda; }), v.end());
+  if (codes_only) v.push_back(A8State::In{src, lda, rows, k, 0, nullptr, nullptr, nullptr});
 }
 void w4a16_pf_a8_input_clear(sycl::queue &q) {
   std::lock_guard<std::mutex> lk(g_a8.mu);
   g_a8.in.erase(q.get_device());
   g_a8.hin.erase(q.get_device());
+  g_a8.hco.erase(q.get_device());
   g_a8.hscr[q.get_device()].qused = g_a8.hscr[q.get_device()].sused = 0;
 }
+void w4a16_pf_set_h_codes_only(bool on) { t_h_codes_only = on; }
 void w4a16_pf_a8_reserve(sycl::queue &q, int max_m, int max_k) {
   std::lock_guard<std::mutex> lk(g_a8.mu);
   A8Scr &sc = g_a8.scr[q.get_device()];
@@ -1203,10 +1234,15 @@ sycl::event w4a16_gemm_pf(sycl::queue &q, int m, const bf16 *a, int lda, const u
   if (const uint16_t *bs = w4_affine(w_packed)) return w4aff_gemm_pf(q, m, a, lda, w_packed, reinterpret_cast<const uint16_t *>(scales), bs, c, ldc, n, k, shape);
   if (m < 1 || n % kW || k % kG || lda < k || ldc < n || (lda * 2) % 16 || lda * 2 < 64)
     throw std::invalid_argument("w4a16_gemm_pf: shape (n % 16, k % 128, lda >= k with a 16-byte pitch of >= 64 bytes)");
+  Args A{a, lda, m, n, k, w_packed, scales, c, ldc};
+  if (codes_only_h(q.get_device(), a, lda, k)) {  // an input without bf16 values: only W4A8 with its codes reads it
+    if (!g_a8.on || g_a8.keep.count(w_packed) || w4_zero_points(w_packed))
+      throw std::logic_error("w4a16_gemm_pf: an input written as codes only (w4a16_pf_set_h_codes_only / w4a16_pf_a8_input) read off the W4A8 path");
+    return w4a8_pf(q, A, false);
+  }
   // a short call on the decode GEMM (W4A16 numerics, decode's k split; the call's A8 codes unused)
   if (g_short_gemm && m <= g_short_rows.load(std::memory_order_relaxed) && lda == k && ldc == n && !w4_zero_points(w_packed))
     return g_short_gemm(q, m, a, w_packed, scales, c, n, k, 0);
-  Args A{a, lda, m, n, k, w_packed, scales, c, ldc};
   if (const uint8_t *z = w4_zero_points(w_packed)) {  // int4 g32 + zero points: the dequantised mode always
     A.z = z;
     return launch_dq<false, true>(q, A, shape >= 12 && shape <= 15 ? shape : -1);
@@ -1230,6 +1266,14 @@ sycl::event w4a16_gemm_pf_swiglu(sycl::queue &q, int m, const bf16 *a, int lda, 
   if (h && m > 0) hin_drop(q.get_device(), h, m, ldh);  // h's rows are rewritten; codes registered for them die
   if (m < 1 || n_half % kW || k % kG || lda < k || ldh < n_half || (lda * 2) % 16 || lda * 2 < 64)
     throw std::invalid_argument("w4a16_gemm_pf_swiglu: shape (n_half % 16, k % 128, lda >= k with a 16-byte pitch of >= 64 bytes)");
+  if (codes_only_h(q.get_device(), a, lda, k)) {  // an input without bf16 values: only W4A8 with its codes reads it
+    if (!g_a8.on || g_a8.keep.count(w_packed) || w4_zero_points(w_packed) || w4_affine(w_packed))
+      throw std::logic_error("w4a16_gemm_pf_swiglu: an input written as codes only (w4a16_pf_a8_input) read off the W4A8 path");
+    Args A{a, lda, m, 2 * n_half, k, w_packed, scales, nullptr, 0};
+    A.h = h;
+    A.ldh = ldh;
+    return w4a8_pf(q, A, true);
+  }
   if (const uint16_t *bs = w4_affine(w_packed))
     return w4aff_gemm_pf_swiglu(q, m, a, lda, w_packed, reinterpret_cast<const uint16_t *>(scales), bs, h, ldh, n_half, k, shape);
   if (g_short_glu && m <= g_short_rows.load(std::memory_order_relaxed) && lda == k && ldh == n_half && !w4_zero_points(w_packed))

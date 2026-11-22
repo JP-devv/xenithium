@@ -100,9 +100,11 @@ void Mlp::reserve_rows(int rows_max, const std::vector<bf16 *> &h, const std::ve
 void Mlp::gate_up_rows(int c, int lo, int rows, const bf16 *x, const MlpWeights &w) {
   if (lo < 0 || rows < 1 || lo + rows > rows_max_) throw std::invalid_argument("qwen35 mlp: gate_up_rows past reserve_rows");
   Rows &r = rows_[static_cast<size_t>(c)];
+  kernels::w4a16_pf_set_h_codes_only(true);  // h's only reader is down (run_rows); on W4A8 it takes the codes
   ev_[static_cast<size_t>(c)].gu = ev_[static_cast<size_t>(c)].silu =
       kernels::w4a16_gemm_pf_swiglu(fab_.compute(static_cast<size_t>(c)), rows, x + static_cast<size_t>(lo) * hidden_, hidden_, w.gate_up.w, w.gate_up.scales,
                                     r.h + static_cast<size_t>(lo) * ipc_, ipc_, ipc_, hidden_);
+  kernels::w4a16_pf_set_h_codes_only(false);
 }
 
 void Mlp::run_rows(int m, const std::vector<const bf16 *> &x, const std::vector<MlpWeights> &w, const std::vector<bf16 *> &out, bool reduce, bool fused,
@@ -121,7 +123,12 @@ void Mlp::run_rows(int m, const std::vector<const bf16 *> &x, const std::vector<
     if (gu_ready) {
       // h filled by gate_up_rows
     } else if (fused) {
+      // h's only reader is down below; on W4A8 it takes the codes (a split down starts at row m / 2: codes are found
+      // from a row that is a multiple of 4)
+      const bool codes_only = !send || (m / 2) % 4 == 0;
+      kernels::w4a16_pf_set_h_codes_only(codes_only);
       ev_[c].gu = ev_[c].silu = kernels::w4a16_gemm_pf_swiglu(q, m, x[c], hidden_, w[c].gate_up.w, w[c].gate_up.scales, r.h, ipc_, ipc_, hidden_);
+      kernels::w4a16_pf_set_h_codes_only(false);
     } else {
       ev_[c].gu = kernels::w4a16_gemm_pf(q, m, x[c], hidden_, w[c].gate_up.w, w[c].gate_up.scales, r.gu, 2 * ipc_, 2 * ipc_, hidden_);
       ev_[c].silu = kernels::swiglu(q, m, ipc_, r.gu, r.h);

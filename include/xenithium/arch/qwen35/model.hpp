@@ -667,7 +667,14 @@ class Model {
   // rms_norm over the chunk's rows on card c: with a pending split sum (pend) the card's own rows of `add` first, then
   // proj(lo, hi) of them (the consumer's first GEMM in row parts), the wait for the peer's rows, then the rest likewise
   //. Without pend proj is not called (the consumer projects every row itself).
-  void pf_norm(int c, int m, const bf16 *add, const bf16 *w, uint32_t pend, const std::function<void(int, int)> &proj = {});
+  // codes_only: xn's only readers are W4A8 GEMMs (the norm writes its codes, not its bf16 values; pf_codes_only)
+  // mode (with pend; the sum finished as SplitRows::owner, nothing copied back): owner = the card norms its own rows only
+  // and shares their codes (the peer's arrive the same way; needs codes_only), so the residual's peer rows go stale on
+  // this card; restore = the card norms its own rows, shares their residual, then norms the peer's rows from theirs.
+  enum class PfNorm : uint8_t { both, owner, restore };
+  void pf_norm(int c, int m, const bf16 *add, const bf16 *w, uint32_t pend, const std::function<void(int, int)> &proj = {}, bool codes_only = false,
+               PfNorm mode = PfNorm::both);
+  bool pf_codes_only(int m) const;
   void pf_wait_pending();  // both cards wait for a pending split sum's peer rows
 
   Fabric &fab_;
