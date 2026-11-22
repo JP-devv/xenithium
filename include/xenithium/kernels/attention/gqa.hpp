@@ -198,6 +198,14 @@ struct GqaStep {
   // its ancestors attends to, bit for bit (gqa_seg.hpp: the context tiles shared by the group, a side row's tiles from
   // p0 on gathered in path order). The group kernel only (exact numerics, int8 / bf16 KV, no selection, no window).
   bool tree = false;
+  // Opt-in eager K8V4 trained-QSA handoff (trained_qsa_pages.hpp). Device
+  // arrays from one plan for these segment records, kept live through merge.
+  // One selection per query row, shared slot record for a verification chain.
+  // Leave both null for an all-visible plan when the caller knows it.
+  struct {
+    const int32_t *entries = nullptr;  // [rows][kTrainedQsaPages]
+    const int32_t *counts = nullptr;   // [rows][local_kv_heads], 0 = dense row
+  } trained_qsa;
 };
 
 void gqa_set_prep(int esimd);  // the decode steps' ESIMD prep (D 128) on / off (tests)
@@ -230,6 +238,15 @@ sycl::event gqa_attn_seg_xl(sycl::queue &q, const GqaShape &s, int rows, const G
 // gqa_kv_move: the page's keys are final).
 sycl::event gqa_attn_seg_sel_xl(sycl::queue &q, const GqaShape &s, int rows, const GqaCache &c, const int32_t *rec, int stride, int seg_rows,
                                 const gqa_bf16 *qb, float *part, int ns, int rm, const int32_t *sel, const int32_t *sel_n, bool pf = false);
+sycl::event gqa_attn_seg_trained_xl(sycl::queue &q, const GqaShape &s, int rows, const GqaCache &c, const GqaStep &step,
+                                   const gqa_bf16 *qb, float *part, int ns);
+// Adapt native qsa_select's device buffers (ascending IDs [rows][512]) in the
+// same in-order queue. Unscored below-budget rows may have undefined IDs.
+// status[r] is the page count (0 dense), or -1 for invalid native selection.
+// The producer must guarantee valid inputs; do not use a malformed plan.
+sycl::event gqa_pack_trained_qsa(sycl::queue &q, int rows, int hkv, const GqaStep &step,
+                                const int32_t *sel, const int32_t *sel_n,
+                                int32_t *entries, int32_t *counts, int32_t *status);
 sycl::event gqa_bounds_page(sycl::queue &q, const GqaShape &s, const GqaCache *caches, int n_caches, int slot, int page);
 sycl::event gqa_bounds_range(sycl::queue &q, const GqaShape &s, const GqaCache &c, int pos0, int m);
 sycl::event gqa_select(sycl::queue &q, const GqaShape &s, int rows, const GqaCache &c, const int32_t *rec, int stride, int seg_rows, const gqa_bf16 *qb,

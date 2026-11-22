@@ -293,6 +293,8 @@ struct PfProfile {
   double split = 0;           // wall ms of the split two-card sums (pair_split_rows), the producers synced first
 };
 
+namespace trained_qsa { class Device; }
+
 class Model {
  public:
   static constexpr int kRows = kernels::kGdnRows;  // rows per sequence in a step (a step: up to kStepRows32 in all)
@@ -428,6 +430,7 @@ class Model {
   static constexpr int k_page_tokens = model::KvPages::kPageTokens;
 
   void reset();                             // a fresh sequence at position 0
+  void note_prompt(int slot,int64_t total,int64_t restored);
   void step(const int32_t *ids, int rows);  // rows tokens at position(); waits for the cards
   void accept(int n);                       // keep the last step's first n rows (1..rows)
   // A step whose rows are a draft tree (the current slot; DFlash's 8-row verify): parent[r] = row r's parent row
@@ -705,7 +708,7 @@ class Model {
   std::vector<uint8_t> batch_tree_;  // per segment of the last step, its rows were a tree
   std::vector<std::vector<int>> draft_par_;  // per slot, draft_parents()
   void note_tree(int slot, size_t drafts, int seg = 0);  // the last DFlash pass's tree (its segment seg) for the slot's drafts
-  void accept_counts(const std::vector<int> &n);  // accept_batch's counts (no tree check)
+  void accept_counts(const std::vector<int> &n, const std::vector<const int *> *paths=nullptr);  // paths already validated
   void accept_paths(const std::vector<int> &n, const std::vector<const int *> &paths);  // accept_batch(n, paths) before close_pages
   // One card's KV caches of the attention layers (the accept's launches run over all of them), and the first of those
   // layers: they share attn_.shape_of(card, layer0).
@@ -724,6 +727,12 @@ class Model {
   uint32_t pend_seq_ = 0; // a split sum whose peer rows the consumer has not waited for yet (0: none)
   double load_s_ = 0;
   std::unique_ptr<load::DenseStore> dense_;
+  std::unique_ptr<trained_qsa::Device> trained_qsa3_;  // optional trained index bank
+  std::vector<int> trained_qsa_layer_;  // model layer -> bank index; -1 is stock dispatch
+  static constexpr int kTrainedQsaShort=8192;
+  std::vector<int64_t> qsa_covered_;  // contiguous logical token count; -1 means disabled/incomplete
+  uint32_t qsa_stage_rows_=0;
+  bool qsa_step_sparse_=false;
   std::unique_ptr<Head> head_;
   std::unique_ptr<HeadCands> cands_;  // the sampling candidates (logits_cands)
   std::unique_ptr<Mlp> mlp_;

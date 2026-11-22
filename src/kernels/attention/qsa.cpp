@@ -358,11 +358,15 @@ int qsa_select_chunk(int bound) {
 
 sycl::event qsa_select(sycl::queue &q, int rows, const uint32_t *score, int stride, const int32_t *nblk, int bound, const QsaScratch &sc,
                        sycl::event *merge, int chunk) {
+  if (rows<1 || bound<1 || bound>kQsaMaxBlocks || stride<bound || !score || !nblk || !sc.sel || !sc.sel_n)
+    throw std::invalid_argument("qsa_select: invalid rows, score bounds or output buffers");
   if (chunk <= 0) chunk = qsa_select_chunk(bound);
   if (chunk < kQsaMinChunk || chunk > kQsaPfChunk) throw std::invalid_argument("qsa_select: chunk out of range");
   const int nch = std::max(1, (bound + chunk - 1) / chunk);
   if (nch > kQsaMaxBlocks / kQsaChunk) throw std::invalid_argument("qsa_select: more blocks than the kernel supports");
   const bool direct = nch == 1;
+  if (!direct && (!sc.cand_id || !sc.cand_key || !sc.cand_n))
+    throw std::invalid_argument("qsa_select: missing multi-chunk candidate buffers");
   int32_t *sel = sc.sel, *sel_n = sc.sel_n, *cid = sc.cand_id, *cn = sc.cand_n;
   uint32_t *ckey = sc.cand_key;
   constexpr int K = kQsaTopBlocks, kCh = kQsaMaxBlocks / kQsaChunk;

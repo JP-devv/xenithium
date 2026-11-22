@@ -24,6 +24,9 @@ In the tables below, a **Gives:** line names what a value improves and a **Takes
 the KV pool, host RAM, exactness of the output). Speeds depend on the machine and the traffic: measure yours with
 `xenithium-bench` ([bench.md](bench.md)).
 
+For the separate, default-off trained Swift indexer environment variables and compatibility rules, see
+[trained K8V4 QSA](trained-k8v4-qsa.md).
+
 ## Per-model settings files
 
 Each served checkpoint keeps its own settings in a file named `<id>.env`. A file names its checkpoint with `XEN_MODEL`.

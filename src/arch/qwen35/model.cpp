@@ -1,4 +1,5 @@
 #include "xenithium/arch/qwen35/model.hpp"
+#include "xenithium/arch/qwen35/trained_qsa_device.hpp"
 
 #include "xenithium/arch/common/vision.hpp"
 
@@ -28,6 +29,7 @@
 #include "xenithium/kernels/linear_attention/gdn_scan.hpp"
 #include "xenithium/kernels/head/head.hpp"
 #include "xenithium/kernels/attention/kv_copy.hpp"
+#include "xenithium/kernels/attention/trained_qsa_pages.hpp"
 #include "xenithium/kernels/drafter/dflash.hpp"  // df_rows_gather
 #include "xenithium/kernels/head/logprob.hpp"
 #include "xenithium/kernels/pack.hpp"
@@ -187,6 +189,25 @@ Model::Model(Fabric &fab, const std::string &dir, const ModelOptions &opt) : fab
   if (opt.prefill_short < 0 || opt.prefill_short > k::kStepRows32) throw std::invalid_argument("qwen35 model: prefill_short 0..32 rows");
   rows_cap_ = std::max(pass_rows(), opt.prefill_short);  // the step buffers' rows
   const size_t NS = static_cast<size_t>(opt.slots);
+  std::vector<trained_qsa::Layer> qsa_bank;
+  std::string qsa_layers;
+  const char *trained_dir=std::getenv("XEN_TRAINED_QSA_DELTA_DIR");
+  if(trained_dir && *trained_dir) {
+    if (llama || flint || opt_.kv!=k::QsaKv::i8v4 || opt_.attn_select!=0 || opt_.prefill_select!=0 ||
+        opt_.kv_pool_tokens<=0 || opt_.dflash_dir.empty() || cap_<=2048 || cap_>trained_qsa::kMaxContext)
+      throw std::invalid_argument("trained QSA requires Swift, fixed-size shared int8-v4 pool, context 2049..262144, a drafter and no other selector");
+    const auto bank=model::Checkpoint::open(trained_dir,false);
+    trained_qsa_layer_.assign(cfg_.layers,-1);
+    for (int l=0;l<cfg_.layers;++l) {
+      const auto prefix=cfg_.prefix+"layers."+std::to_string(l)+".self_attn._qsa_indexer.";
+      if (std::none_of(bank.tensors().begin(),bank.tensors().end(),[&](const auto &t) { return t.name.starts_with(prefix); })) continue;
+      trained_qsa_layer_[l]=static_cast<int>(qsa_bank.size());
+      qsa_bank.push_back(trained_qsa::Layer::load(bank,cfg_,l,trained_qsa::NormStorage::delta));
+      qsa_layers+=(qsa_layers.empty()?"":",")+std::to_string(l);
+    }
+    if (qsa_bank.empty() || bank.tensors().size()!=5*qsa_bank.size())
+      throw std::invalid_argument("trained QSA: no matching bank or unexpected tensors in the bank");
+  }
   const model::Checkpoint ck = model::Checkpoint::open(dir);
   const bool head_only_int4 = !ck.find("lm_head.weight") && ck.find("lm_head.qweight");
   if (flint && (opt.head_w4 || opt.head_rescore > 0)) throw std::invalid_argument("qwen35 model: arch flint's lm_head is the checkpoint's MLX int4 (no lm_head switch)");
@@ -565,6 +586,25 @@ Model::Model(Fabric &fab, const std::string &dir, const ModelOptions &opt) : fab
         throw std::runtime_error(m);
       }
     }
+    if (!qsa_bank.empty()) {
+      const size_t qsa_bytes=trained_qsa::Device::bytes_per_rank(qsa_bank.size(),cfg_.hidden,opt_.slots,static_cast<int>(cap_),opt_.prefill_chunk,step_rows_);
+      if (!opt_.loader) throw std::runtime_error("trained QSA: VRAM preflight unavailable");
+      if (opt_.loader) for (int c=0;c<C;++c) {
+        const auto v=l0::vram_state(opt_.loader->info(fab_.rank_index(c)));
+        const size_t kv_bytes=static_cast<size_t>(std::min<int64_t>(pool,static_cast<int64_t>(slot_pages)*opt_.slots))*kv_page_bytes(c)+ring_bytes_of(c);
+        constexpr size_t startup_margin=1610612736;  // same 1.5 GiB first-use VRAM as the stock pool guard
+        // Cache-safe QSA uses direct host snapshots plus one in-call capture
+        // buffer; budget that buffer instead of silently spending the reserve.
+        const size_t snap=opt.snap_gib>0 && !opt_.prefill_slices?
+          std::max<size_t>(snap_bytes(c),4096)+std::max<size_t>(2*size_t(slot_pages)*4,4096):0;
+        std::fprintf(stderr,"trained QSA budget: rank=%d free=%llu kv_bytes=%zu selector_bytes=%zu snapshot_device_bytes=%zu runtime_margin=%zu layers=%s\n",
+                     c,static_cast<unsigned long long>(v.free),kv_bytes,qsa_bytes,snap,startup_margin,qsa_layers.c_str());
+        if (!v.ok || v.free<kv_bytes+qsa_bytes+snap+startup_margin)
+          throw std::runtime_error("trained QSA: refusing allocation; rank="+std::to_string(c)+" selector_bytes="+std::to_string(qsa_bytes)+" kv_bytes="+std::to_string(kv_bytes));
+      }
+      trained_qsa3_=std::make_unique<trained_qsa::Device>(fab_,std::span<const trained_qsa::Layer>(qsa_bank),opt_.slots,static_cast<int>(cap_),opt_.prefill_chunk,step_rows_);
+      qsa_covered_.assign(opt_.slots,-1);
+    }
     kv_alloc(pool);
   }
   rec_host_ = static_cast<int32_t *>(fab.alloc_host((1 + kMtpPasses) * kRecInts * 4));
@@ -580,7 +620,7 @@ Model::Model(Fabric &fab, const std::string &dir, const ModelOptions &opt) : fab
       cards_[static_cast<size_t>(c)]->mem.push_back(p);
       fork_pages_.push_back(p);
       std::array<void *, 2> st{};
-      for (auto &b : st) {
+      if(!trained_qsa3_) for (auto &b : st) {
         b = fab.alloc(static_cast<size_t>(c), std::max<size_t>(snap_bytes(c), 4096));
         cards_[static_cast<size_t>(c)]->mem.push_back(b);
       }
@@ -722,6 +762,7 @@ void Model::self_measure(const std::vector<SeqRows> &segs, std::span<const int64
 }
 
 void Model::reset_slot(int s) {
+  if(trained_qsa3_) qsa_covered_[s]=-1;
   for (size_t c = 0; c < cards_.size(); ++c) {
     auto &q = fab_.compute(c);
     const auto gs = gdn_.shape_of(static_cast<int>(c));
@@ -941,6 +982,7 @@ Model::LendStats Model::lend_stats() {
 
 void Model::kv_release(int slot) {
   if (slot < 0 || slot >= slots()) throw std::invalid_argument("qwen35 model: no such slot");
+  if(trained_qsa3_) qsa_covered_[slot]=-1;
   if (mtp_) mtp_->drop(slot);  // 
   kvp_.release(slot);
 }
@@ -1172,6 +1214,28 @@ sycl::event Model::ring_snap_copy(int c, sycl::queue &q, int slot, int64_t pos, 
 void Model::snap_copy(int slot, SnapRec &r, bool save) {
   // a save reads the slot's whole context, a restore replaces it
   if (dflash_) dflash_->settle(slot, save ? std::numeric_limits<int64_t>::max() : 0);
+  if(trained_qsa3_) {
+    // One scheduler thread; in-order device copies preserve the exact snapshot
+    // layout without two full-sized device staging buffers. A host snapshot
+    // can be reused only after its last reader AND writer have completed.
+    r.saved.resize(cards_.size()); r.read.resize(cards_.size());
+    for(size_t c=0;c<cards_.size();++c) {
+      auto &q=fab_.compute(c);
+      q.ext_oneapi_submit_barrier({r.saved[c],r.read[c]});
+      auto *host=static_cast<char *>(r.host[c]);
+      for(int l:gdn_.layers) {
+        const auto &st=cards_[c]->gdn[l]; const auto g=gdn_view(st,slot);
+        const size_t sb=st.slot_S*4,wb=st.slot_win*2;
+        if(save) { q.memcpy(host,g.S,sb); q.memcpy(host+sb,g.win[r.parity],wb); }
+        else { q.memcpy(g.S,host,sb); q.memcpy(g.win[r.parity],host+sb,wb); }
+        host+=sb+wb;
+      }
+      if(dflash_) dflash_->ring_copy(static_cast<int>(c),q,slot,host,save);
+      if(save) r.saved[c]=q.ext_oneapi_submit_barrier();
+      else r.read[c]=q.ext_oneapi_submit_barrier();
+    }
+    return;  // trained QSA already excludes Flint's ring-cache variant
+  }
   const size_t k = static_cast<size_t>(snap_stage_next_);
   snap_stage_next_ ^= 1;
   r.saved.resize(cards_.size());
@@ -1258,6 +1322,7 @@ int Model::snap_prepin(int n) {
 }
 
 void Model::snap_sync() {
+  if(trained_qsa3_) for(size_t c=0;c<cards_.size();++c) fab_.compute(c).wait_and_throw();
   for (auto &q : snap_q_)
     if (q) q->wait_and_throw();
 }
@@ -1276,6 +1341,7 @@ void Model::snap_restore(int slot, int id) {
     throw std::logic_error("qwen35 model: the slot holds no pages for the snapshot's positions");
   save_seq();
   snap_copy(slot, r, false);
+  if(trained_qsa3_) qsa_covered_[slot]=-1;  // restored KV never implies selector history
   if (mtp_) mtp_->drop(slot);  // deferred drafter KV rows are of positions the restore replaces
   Seq &sq = seqs_[static_cast<size_t>(slot)];
   sq = Seq{};
@@ -1378,6 +1444,7 @@ void Model::kv_trim(int slot, int64_t tokens) {
   if (slot < 0 || slot >= slots()) throw std::invalid_argument("qwen35 model: no such slot");
   if (mtp_) mtp_->settle(*head_, slot, tokens);  // deferred drafter KV rows below the kept pages, the rest dropped
   kvp_.trim(slot, tokens);
+  if(trained_qsa3_) qsa_covered_[slot]=-1;
   kv_upload();
 }
 
@@ -1386,6 +1453,14 @@ void Model::reset() {
   batch_slots_.erase(std::remove(batch_slots_.begin(), batch_slots_.end(), slot_), batch_slots_.end());
   load_seq();
   if (opt_.rope_tier_reset >= 0 && tier_limit_.size() > 1) set_rope_tier(std::min(opt_.rope_tier_reset, rope_tiers() - 1));
+}
+
+void Model::note_prompt(int slot,int64_t total,int64_t restored) {
+  if(!trained_qsa3_) return;
+  // A fresh long prompt starts the index at token 0. A resumed/restored
+  // request has no proof of coverage, even if it reuses the same slot ID.
+  const bool fresh=restored==0 && position(slot)==0 && total>kTrainedQsaShort;
+  qsa_covered_.at(slot)=fresh?0:-1;
 }
 
 void Model::set_rope_tier(int t) {
@@ -1573,6 +1648,8 @@ void Model::submit_layers(int rows, int seg_rows, int pb, StepEvents *sev) {
         gs.tree = tree_attn_;
         k::GqaShape ash = attn_.shape_of(static_cast<int>(c), l);
         ash.dec_qk = sopt_.attn_qk, ash.dec_p_lo = sopt_.attn_p_lo;  // the decode attention numerics
+        if (trained_qsa3_ && trained_qsa_layer_[l]>=0 && qsa_stage_rows_)
+          trained_qsa3_->stage(static_cast<int>(c),x,rows,ash.hkv(),gs,trained_qsa_layer_[l],l,qsa_stage_rows_,qsa_step_sparse_);
         auto ev = k::gqa_decode(q, ash, rows, x, attn_.w[c][l], cd.kv[l], cd.rope, gs, asc, wire, mix_parity_, cd.mix);
         if (pc) sev->aev.push_back(ev);
         if (q_hook) q_ready[c] = ev.attn;
@@ -1677,7 +1754,7 @@ void Model::accept_paths(const std::vector<int> &n, const std::vector<const int 
   // a tree segment accepted without its path: only its root (row 0 is the chain's row 0 either way)
   for (size_t i = 0; i < ns; ++i)
     if (!paths[i] && i < batch_tree_.size() && batch_tree_[i] && n[i] > 1) throw std::logic_error("qwen35 model: accept_tree() after step_tree()");
-  accept_counts(n);  // position() += n (pending_accept = n: the next step's GDN replays n rows, along the path)
+  accept_counts(n, &paths);  // position() += n (pending_accept = n: the next step's GDN replays n rows, along the path)
   last_tree_ = false;
   save_seq();
   bool any = false;
@@ -1777,9 +1854,18 @@ void Model::verify_batch(const std::vector<SeqRows> &segs) {
   int amax = 0;
   tree_attn_ = tree_gdn_ = false;
   last_tree_ = false;
+  qsa_stage_rows_=0;
+  qsa_step_sparse_=false;
+  bool qsa_ready=trained_qsa3_!=nullptr;
   for (int i = 0, r0 = 0; i < ns; r0 += segs[static_cast<size_t>(i)].rows, ++i) {
     const auto &g = segs[static_cast<size_t>(i)];
     Seq &sq = seqs_[static_cast<size_t>(g.slot)];
+    if(trained_qsa3_) {
+      auto &covered=qsa_covered_[g.slot];
+      if(covered!=sq.pos || sq.rope_delta!=0) covered=-1;
+      if(covered>=0) for(int r=r0;r<r0+g.rows;++r) qsa_stage_rows_|=uint32_t(1)<<r;
+      qsa_ready&=covered>=kTrainedQsaShort;
+    }
     for (int r = 0; r < g.rows; ++r) tokens[r0 + r] = g.tokens[r];
     const int a = sq.pf_committed ? 0 : (sq.last_rows > 0 ? sq.pending_accept : 0);
     if (sq.last_rows > 0) sq.parity ^= 1;  // the GDN's pending log of the previous step is the other parity
@@ -1823,6 +1909,9 @@ void Model::verify_batch(const std::vector<SeqRows> &segs) {
     throw std::invalid_argument("qwen35 model: a tree step attends densely; this step passes the page budget of the selected attention");
   const int sel_pages = tree_attn_ ? 0 : attn_select();  // (submit_layers' rule: a tree step attends densely)
   self_sync(sel_pages);
+  // Conservative batch-wide dense fallback: no unsafe row enters the
+  // trained kernel and the normal arbiter still chooses the same batch.
+  qsa_step_sparse_=qsa_ready && !tree_attn_;
   run_layers(rows, code, static_cast<int>(pos_bound));
   if (sel_pages > 0 && selects_pages(pos_bound)) self_measure(segs, pos_before, sel_pages);
   gdn_accept_max_ = rows_max_;
@@ -1949,15 +2038,26 @@ void Model::close_pages(std::span<const int64_t> pos_before) {
   }
 }
 
-void Model::accept_counts(const std::vector<int> &n) {
+void Model::accept_counts(const std::vector<int> &n, const std::vector<const int *> *paths) {
   if (batch_slots_.empty() || n.size() != batch_slots_.size()) throw std::logic_error("qwen35 model: accept_batch takes one count per segment of the last step");
   save_seq();
   for (size_t i = 0; i < n.size(); ++i) {
     const Seq &sq = seqs_[static_cast<size_t>(batch_slots_[i])];
     if (sq.pending_accept != 0 || n[i] < 1 || n[i] > sq.last_rows) throw std::logic_error("qwen35 model: accept 1..rows once per step");
   }
+  int trained_row0=0;
   for (size_t i = 0; i < n.size(); ++i) {
     Seq &sq = seqs_[static_cast<size_t>(batch_slots_[i])];
+    if (trained_qsa3_) {
+      auto &covered=qsa_covered_[batch_slots_[i]];
+      if(covered==sq.pos && (qsa_stage_rows_&(uint32_t(1)<<trained_row0))) {
+        const int *path=paths?(*paths)[i]:nullptr;
+        trained_qsa3_->accept(batch_slots_[i],static_cast<int>(sq.pos),trained_row0,n[i],last_tree_,
+                              path?k::tree_path_word(path,n[i]):0);
+        covered+=n[i];
+      } else covered=-1;
+    }
+    trained_row0+=sq.last_rows;
     sq.pending_accept = n[i];
     sq.pos += n[i];
   }
@@ -2219,6 +2319,7 @@ void Model::pf_rope_rows(const int32_t *ids, int m) {
 }
 
 void Model::set_vision(VisionStore *store) {
+  if (trained_qsa3_ && store) throw std::invalid_argument("trained QSA layer3 is text-only");
   if (!store) return;
   if (rope_host_.empty()) throw std::invalid_argument("qwen35 model: image input needs the interleaved M-RoPE config (mrope_section)");
   if (opt_.prefill_slices || opt_.prefill_attn_slices) throw std::invalid_argument("qwen35 model: image input runs the many-row prefill only");
@@ -2276,7 +2377,7 @@ int Model::snap_take() {
   r.read.resize(cards_.size());
   for (size_t c = 0; c < cards_.size(); ++c) {
     // the capture's writes ran on the compute queue, drained at the call's end; a restore of this id may still read
-    r.saved[c] = snap_q_[c]->memcpy(r.host[c], cap_buf_[c], snap_bytes(static_cast<int>(c)), {r.read[c]});
+    r.saved[c] = snap_q_[c]->memcpy(r.host[c], cap_buf_[c], snap_bytes(static_cast<int>(c)), {r.read[c],r.saved[c]});
     cap_ev_[c] = r.saved[c];
   }
   capt_.ready = false;
@@ -2311,6 +2412,11 @@ bool Model::pf_step(int layers) {
     par[s] = p;
   }
   const bool multi = !pf_.segs.empty();
+  if(trained_qsa3_) {
+    if(multi) {
+      for(const auto &sg:pf_.segs) if(sg.rope || qsa_covered_[sg.slot]!=sg.pos) qsa_covered_[sg.slot]=-1;
+    } else if(pf_.rope_rows || qsa_covered_[slot_]!=pos_) qsa_covered_[slot_]=-1;
+  }
   if (multi) {  // every segment's slices; the padding rows between segments are 4-row slices at position 0
     std::fill(rows.begin(), rows.end(), 4);
     std::fill(pos.begin(), pos.end(), 0);
@@ -2427,6 +2533,13 @@ bool Model::pf_step(int layers) {
         };
       }
       pf_norm(static_cast<int>(c), m, l > 0 ? cd.pf_mlp : nullptr, cd.in_norm[l], pend_in, proj);
+      if (trained_qsa3_ && trained_qsa_layer_[l]>=0) {
+        if(multi) {
+          for(const auto &sg:pf_.segs) if(qsa_covered_[sg.slot]>=0)
+            trained_qsa3_->prefill(static_cast<int>(c),cd.pf_xn+size_t(sg.row0)*H,sg.m,sg.slot,static_cast<int>(sg.pos),trained_qsa_layer_[l]);
+        } else if(qsa_covered_[slot_]>=0)
+          trained_qsa3_->prefill(static_cast<int>(c),cd.pf_xn,m,slot_,static_cast<int>(pos_),trained_qsa_layer_[l]);
+      }
     }
     pend_seq_ = 0;
     mark(pf_prof_.norms);
@@ -2712,6 +2825,7 @@ bool Model::pf_step(int layers) {
     }
   }
   if (snap >= 0) capt_ = Capture{true, slot_, gp, snap}, capt_rope_ = pf_.snap_rope;  // snap_take() makes it a snapshot (the parity of this call)
+  if(trained_qsa3_ && qsa_covered_[slot_]>=0) qsa_covered_[slot_]+=m;
   pos_ += m;
   if (rows_mode) {  // the GDN committed every row: the next step replays none, parity gp ^ 1
     parity_ = gp;
@@ -2911,6 +3025,7 @@ void Model::pf_tail_many(double split_ms) {
   for (int i = 0; i < K; ++i) {  // the GDN committed every row: the next step replays none
     const auto &sg = pf_.segs[static_cast<size_t>(i)];
     use_slot(sg.slot);
+    if(trained_qsa3_ && qsa_covered_[slot_]>=0) qsa_covered_[slot_]+=sg.m;
     pos_ += sg.m;
     parity_ = sg.gp;
     last_rows_ = 4;
@@ -2925,6 +3040,10 @@ bool Model::prefill_advance(int layers) { return pf_step(layers); }
 
 void Model::prefill_abort() {
   if (!pf_.active) return;
+  if(trained_qsa3_) {
+    qsa_covered_[pf_.slot]=-1;
+    for(const auto &sg:pf_.segs) qsa_covered_[sg.slot]=-1;
+  }
   pf_wait_pending();
   for (size_t c = 0; c < cards_.size(); ++c) {
     fab_.compute(c).wait();

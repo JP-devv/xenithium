@@ -501,9 +501,10 @@ sycl::event attn(sycl::queue &q, const GqaShape &s, int rows, const GqaCache &c,
 // split order (fp32, from split 0).
 template <int D, bool Gate>
 class GqaMergeK;
+class GqaTrainedMergeK;
 // sel_n = the page selection's counts per (segment, kv head) (gqa_select): a segment with a count
 // cut its splits by it; 0 / null = by the row's position. D: head_dim (part rows D + 16 floats); Gate: the sigmoid gate (llama: none).
-template <int D, bool Gate>
+template <int D, bool Gate, bool Trained = false>
 sycl::event merge_d(sycl::queue &q, const GqaShape &s, int rows, int ldy, const SegW &sw, const GqaScratch &sc, const int32_t *sel_n) {
   constexpr int kMI = 16, kMD = D / kMI, kL = 32, kPartStride = D + 16;  // items, dims per item, gather lanes
   static_assert(kGqaSplits == 2 * kL, "two 32-lane gathers cover the splits");
@@ -514,11 +515,12 @@ sycl::event merge_d(sycl::queue &q, const GqaShape &s, int rows, int ldy, const 
   bf16 *out = sc.attn;
   const int win = s.window;
   const bf16 *sinks = sw.sinks;
-  return q.parallel_for<GqaMergeK<D, Gate>>(sycl::nd_range<1>(static_cast<size_t>(rows) * hq * kMI, kMI), [=](sycl::nd_item<1> it) SYCL_ESIMD_KERNEL {
+  using Kernel = std::conditional_t<Trained, GqaTrainedMergeK, GqaMergeK<D, Gate>>;
+  return q.parallel_for<Kernel>(sycl::nd_range<1>(static_cast<size_t>(rows) * hq * kMI, kMI), [=](sycl::nd_item<1> it) SYCL_ESIMD_KERNEL {
     const int g = static_cast<int>(it.get_group(0)), i = static_cast<int>(it.get_local_id(0));
     const int r = g / hq, h = g % hq, kvh = h / G, hh = h % G;
     const SegRow sr = seg_row(rec, rstride, seg_rows, r);
-    const int nsel = sel_n ? sel_n[sr.seg * hkv + kvh] : 0;
+    const int nsel = sel_n ? sel_n[(Trained ? r : sr.seg) * hkv + kvh] : 0;
     const int ntok = seg_vpos(rec, rstride, sr) + 1, ntiles = nsel > 0 ? nsel : (ntok + kTile - 1) / kTile;  // a tree row's splits by its depth
     // windowed: the row's tiles lo .. its last, tile t in split t % kGqaWinSplits (in tile order)
     const int wlo = win > 0 ? (ntok > win ? ntok - win : 0) / kTile : 0;
@@ -818,6 +820,26 @@ int gqa_splits(int p) {
   return cut_nsp(ntiles, cut_tps(ntiles));
 }
 
+sycl::event gqa_pack_trained_qsa(sycl::queue &q, int rows, int hkv, const GqaStep &step,
+                                const int32_t *sel, const int32_t *sel_n,
+                                int32_t *entries, int32_t *counts, int32_t *status) {
+  if (!q.is_in_order() || rows < 1 || rows > kMaxRows || hkv < 1 || hkv > 4 || !step.pos || step.stride < kSegRec ||
+      step.tree || !seg_rows_ok(rows, step.seg_rows, step.stride) || !sel || !sel_n || !entries || !counts || !status)
+    throw std::invalid_argument("gqa_pack_trained_qsa: expected valid chain records, in-order queue and selection buffers");
+  const int32_t *rec = step.pos;
+  const int stride = step.stride, seg_rows = step.seg_rows;
+  return q.parallel_for(sycl::range<1>(rows), [=](sycl::id<1> at) {
+    const int r = static_cast<int>(at[0]), pos = seg_row(rec, stride, seg_rows, r).pos;
+    int packed = -1;
+    if (pos >= 0 && pos < kQsaMaxTokens) {
+      if ((pos + 1) / kQsaCompress <= kTrainedQsaTopBlocks) packed = 0;
+      else packed = trained_qsa_pack_row(pos, sel + r * kTrainedQsaTopBlocks, sel_n[r], entries + r * kTrainedQsaPages);
+    }
+    status[r] = packed;
+    for (int h = 0; h < hkv; ++h) counts[r * hkv + h] = packed < 0 ? 0 : packed;
+  });
+}
+
 GqaEvents gqa_decode(sycl::queue &q, const GqaShape &s, int rows, const bf16 *x, const GqaWeights &w, const GqaCache &c, const bf16 *rope,
                      const GqaStep &step, const GqaScratch &sc, const PairWire *wire, int wire_parity, bf16 *out, int qkv_ks, int o_ks) {
   if (rows < 1 || rows > kMaxRows) throw std::invalid_argument("gqa_decode: rows 1..32");
@@ -832,6 +854,12 @@ GqaEvents gqa_decode(sycl::queue &q, const GqaShape &s, int rows, const bf16 *x,
   if (!seg_rows_ok(rows, step.seg_rows, step.stride) || (step.seg_rows > 0 && step.stride < kSegRec))
     throw std::invalid_argument("gqa_decode: segments need records (stride >= kSegRec) and 1..rows rows each (or a seg_het layout)");
   const SegW sw{step.pos, step.stride, step.seg_rows, w.sinks};
+  const bool trained = step.trained_qsa.entries != nullptr;
+  if (trained != (step.trained_qsa.counts != nullptr) ||
+      (trained && (s.kv != QsaKv::i8v4 || s.grp() != 6 || s.head_dim != 256 || !s.gate || s.split_merge ||
+                   s.window || c.ring_pages || !c.pages || c.slot_pages < c.max_tokens / kPage || !step.pos ||
+                   step.stride < kSegRec || step.tree || step.kv_only || step.select || step.select_slots || step.attn_rows < 0)))
+    throw std::invalid_argument("gqa_decode: trained QSA needs gated K8V4, explicit pooled slot records, no tree/window/other selection");
   if (c.ring_pages > 0 && (s.window <= 0 || c.ring_pages < (s.window + rows - 2) / kTile + 2))
     throw std::invalid_argument("gqa_decode: a KV ring needs a window and ring_pages >= (window + rows - 2) / 64 + 2");
   if (s.window > 0 && (step.select > 0 || step.attn_rows < 0)) throw std::invalid_argument("gqa_decode: a window runs on the group kernel without selection");
@@ -867,12 +895,14 @@ GqaEvents gqa_decode(sycl::queue &q, const GqaShape &s, int rows, const bf16 *x,
     if (step.attn_rows != 0) gg.rows = step.attn_rows;
     if (step.attn_grf > 0) gg.grf = step.attn_grf;
     if (step.attn_pf >= 0) gg.pf = step.attn_pf != 0;
-    if (sel) e.attn = attn_sel(q, s, rows, c, sw, sc, ns, gg);
+    if (trained) e.attn = gqa_attn_seg_trained_xl(q, s, rows, c, step, sc.q, sc.part, ns);
+    else if (sel) e.attn = attn_sel(q, s, rows, c, sw, sc, ns, gg);
     else if (gg.rows < 0) e.attn = attn_kv(q, s, rows, c, sw, sc, ns);
     else if (gg.grf == 128) e.attn = attn_seg128(q, s, rows, c, sw, sc, ns, gg.rows, gg.pf);
     else e.attn = gqa_attn_seg_xl(q, s, rows, c, step.pos, step.stride, step.seg_rows, sc.q, sc.part, ns, gg.rows, gg.pf, step.tree);
   }
-  e.merge = merge(q, s, rows, w.qkv_n(), sw, sc, sel ? sc.sel_n : nullptr);
+  e.merge = trained ? merge_d<256, true, true>(q, s, rows, w.qkv_n(), sw, sc, step.trained_qsa.counts)
+                    : merge(q, s, rows, w.qkv_n(), sw, sc, sel ? sc.sel_n : nullptr);
   e.o = w.dense() ? dense_gemm(q, rows, sc.attn, w.o_d, sc.partial, o_ks) : w4a16_gemm_rows(q, rows, sc.attn, w.o.w, w.o.scales, sc.partial, w.o.n, w.o.k, o_ks);
   e.reduce = pair_reduce(q, rows, s.hidden, sc.partial, wire, wire_parity, out);
   return e;

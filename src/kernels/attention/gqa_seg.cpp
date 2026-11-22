@@ -116,4 +116,23 @@ sycl::event gqa_attn_seg_sel_xl(sycl::queue &q, const GqaShape &s, int rows, con
   throw std::invalid_argument("gqa_attn_seg_sel_xl: page selection is built for 6 q heads per kv head, groups of 1 / 2 / 4 / 8 rows");
 }
 
+// The same grouped attention body and K8V4 operands as the dense path.
+// Only the logical-page walk and four-token mask differ; use the requested
+// native QK / P numerics, not a separate attention implementation.
+sycl::event gqa_attn_seg_trained_xl(sycl::queue &q, const GqaShape &s, int rows, const GqaCache &c, const GqaStep &step,
+                                   const gqa_bf16 *qb, float *part, int ns) {
+  using gqa_detail::attn_seg;
+#define XEN_TRAINED(QK, LO) \
+  return attn_seg<QsaKv::i8v4, 6, 1, 1, true, 256, QK, LO, 0, true>(q, s, rows, c, step.pos, step.stride, step.seg_rows, \
+    qb, part, ns, step.trained_qsa.entries, step.trained_qsa.counts)
+  if (s.dec_qk == 2) { XEN_TRAINED(2, false); }
+  if (s.dec_qk == 1) {
+    if (s.dec_p_lo) { XEN_TRAINED(1, true); }
+    XEN_TRAINED(1, false);
+  }
+  if (s.dec_p_lo) { XEN_TRAINED(0, true); }
+  XEN_TRAINED(0, false);
+#undef XEN_TRAINED
+}
+
 }  // namespace xenithium::kernels

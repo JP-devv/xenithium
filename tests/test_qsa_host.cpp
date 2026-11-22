@@ -3,12 +3,14 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <numeric>
 #include <random>
 #include <string>
 #include <vector>
 
 #include "xenithium/kernels/pack.hpp"
 #include "xenithium/kernels/attention/qsa_ref.hpp"
+#include "xenithium/kernels/attention/trained_qsa_pages.hpp"
 
 namespace {
 namespace k = xenithium::kernels;
@@ -117,10 +119,40 @@ void test_host() {
   }
 }
 
+void test_trained_pages() {
+  std::vector<int32_t> ids(k::kTrainedQsaTopBlocks);
+  std::iota(ids.begin(), ids.end(), 0);
+  int32_t entries[k::kTrainedQsaPages]{};
+  expect(k::trained_qsa_pack_row(2047, ids.data(), 512, entries) == 0 &&
+         k::trained_qsa_pack_row(2048, ids.data(), 512, entries) == 0,
+         "trained page pack: all-visible prefix and first partial block stay dense");
+
+  // 512 selected blocks end on page 31; the current block on page 33 is
+  // mandatory even though the intermediate page wasn't selected.
+  const int pos = 33 * k::kQsaPage + 4;
+  const int n = k::trained_qsa_pack_row(pos, ids.data(), 512, entries);
+  const uint32_t last = k::trained_qsa_mask(entries[32]);
+  expect(n == 33 && k::trained_qsa_page(entries[31]) == 31 && k::trained_qsa_mask(entries[31]) == 0xffffu &&
+         k::trained_qsa_page(entries[32]) == 33 && last == 2 &&
+         !k::trained_qsa_keeps(last, 3) && k::trained_qsa_keeps(last, 4) && !k::trained_qsa_keeps(last, 8),
+         "trained page pack: ordered logical pages include the current block without adding skipped blocks");
+
+  int32_t physical[34]{};
+  physical[33] = 7;
+  expect(k::trained_qsa_page_base(physical, k::trained_qsa_page(entries[32]), 3, 1) == (7 * 3 + 1) * k::kQsaPage,
+         "trained page walk uses the slot's nonidentity physical page table");
+  ids.back() = (pos + 1) / k::kQsaCompress;
+  const bool rejects_future = k::trained_qsa_pack_row(pos, ids.data(), 512, entries) == -1;
+  ids.back() = ids[510];
+  expect(rejects_future && k::trained_qsa_pack_row(pos, ids.data(), 512, entries) == -1,
+         "trained page pack rejects future and duplicate blocks");
+}
+
 }  // namespace
 
 int main() {
   test_host();
+  test_trained_pages();
   if (g_failures) {
     std::printf("FAILED: %d failure(s)\n", g_failures);
     return 1;
