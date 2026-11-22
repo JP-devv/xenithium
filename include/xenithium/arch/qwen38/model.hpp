@@ -95,6 +95,11 @@ inline constexpr int kDecEveryBound = 2048;
 
 struct ModelOptions {
   int64_t context = 8192;             // KV capacity of each sequence slot (rounded up to 64)
+  // YaRN per request past the trained positions (as qwen35's): the rope table holds one sub-table per tier (trained x
+  // 2^k positions at that length's factor; the last tier = the whole context at its factor, from row 0) and a sequence's
+  // segment records carry its tier's first table row (kSegRope, set_rope_tier), so a short request on a 1M server gets
+  // the bits of a server at the trained context. false = one factor for every request.
+  bool yarn_tiers = true;
   // Sequence slots: each has its own KV, GDN state, PLE ring and host context, allocated
   // before the placement (the experts get what is left). A step may run up to 4 of them at once
   // (step_batch); the drafter keeps a KV per slot.
@@ -339,6 +344,13 @@ class Model {
   int64_t capacity() const { return cap_; }  // one request's most tokens (XEN_CONTEXT)
   // the static YaRN factor of the rotary table (1 = none: the context fits the trained positions; qsa_yarn_for)
   double yarn_factor() const { return yarn_factor_; }
+  // YaRN tiers (ModelOptions::yarn_tiers). rope_tiers() = 1: one factor (yarn_factor). Tier t holds positions
+  // < rope_tier_limit(t) at rope_tier_factor(t), ascending; the last = capacity() at yarn_factor(). set_rope_tier: the
+  // slot's fresh sequence (position 0, before its first prefill) runs in tier t; snapshots keep it.
+  int rope_tiers() const { return static_cast<int>(tier_limit_.size()); }
+  int64_t rope_tier_limit(int t) const { return tier_limit_.at(static_cast<size_t>(t)); }
+  double rope_tier_factor(int t) const { return tier_factor_.at(static_cast<size_t>(t)); }
+  void set_rope_tier(int slot, int t);
   int slots() const { return static_cast<int>(seqs_.size()); }
   int cards() const { return nc_; }  // 1 = TP1, 2 = TP2, 4 = TP4
   // The slot the single-sequence calls below act on (begin_sequence, step, verify, commit,
@@ -863,6 +875,8 @@ class Model {
   std::unique_ptr<PfRun> pf_run_;   // the pending prefill call
   int64_t cap_ = 0;
   double yarn_factor_ = 1.0;
+  std::vector<int64_t> tier_limit_, tier_base_;  // per tier its positions and first row in the rope table
+  std::vector<double> tier_factor_;
   // The KV page table (host) and its device copy per card (read by every QSA layer and the drafter).
   model::KvPages kvp_;
   int32_t *kv_table_[kMaxCards] = {};
@@ -894,6 +908,7 @@ class Model {
   // page pairs per card.
   struct SnapRec {
     int64_t pos = 0;
+    int64_t rope_delta = 0;  // the sequence's YaRN tier (Seq::rope_delta)
     int gdn_par = 0;
     kernels::PleContext ple;
     bool used = false;
@@ -909,6 +924,7 @@ class Model {
   // One sequence slot's host state.
   struct Seq {
     int64_t pos = 0;
+    int64_t rope_delta = 0;           // its YaRN tier's first rope table row (records' kSegRope; 0 = the last tier)
     int last_rows = 0;                // rows committed by its previous step (the GDN accept count)
     int gdn_par = 0;                  // its GDN parity (window / pending log); flips per step and chunk
     kernels::PleContext ple_ctx;      // its n-gram context (advances at commit)

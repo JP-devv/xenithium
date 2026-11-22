@@ -227,7 +227,23 @@ Model::Model(const l0::Loader &loader, Fabric &fab, const std::string &dir, cons
   // give the tables of the integer rule (ceil(context / trained)) bit for bit
   const k::QsaYarn yarn = k::qsa_yarn_for(cap_, cfg_.max_positions);
   yarn_factor_ = yarn.factor;
-  const auto rope_h = k::qsa_rope_table(cap_, k::kQsaRot, cfg_.rope_theta, yarn);
+  auto rope_h = k::qsa_rope_table(cap_, k::kQsaRot, cfg_.rope_theta, yarn);
+  // YaRN tiers (ModelOptions::yarn_tiers): the tiers below the context's factor follow its table (the last tier starts
+  // at row 0: a sequence there has the bits of one factor for all); a sequence's rows read row P + its tier's first row
+  if (opt.yarn_tiers && yarn.factor > 1.0 && cfg_.max_positions > 0) {
+    for (int64_t Lt = cfg_.max_positions; Lt < cap_; Lt *= 2) {
+      const k::QsaYarn yt = k::qsa_yarn_for(Lt, cfg_.max_positions);
+      const auto t = k::qsa_rope_table(Lt, k::kQsaRot, cfg_.rope_theta, yt);
+      tier_base_.push_back(static_cast<int64_t>(rope_h.size() / k::kQsaRopeRow));
+      tier_limit_.push_back(Lt);
+      tier_factor_.push_back(yt.factor);
+      rope_h.insert(rope_h.end(), t.begin(), t.end());
+    }
+    if (static_cast<int64_t>(rope_h.size() / k::kQsaRopeRow) > int64_t{2147483647}) throw std::invalid_argument("qwen38 model: YaRN tiers past int32 rows");
+  }
+  tier_base_.push_back(0);
+  tier_limit_.push_back(cap_);
+  tier_factor_.push_back(yarn.factor);
   for (int c = 0; c < nc_; ++c) {
     auto card = std::make_unique<Card>();
     Card &K = *card;
@@ -874,6 +890,14 @@ void Model::use_slot(int slot) {
   slot_ = slot;
 }
 
+void Model::set_rope_tier(int slot, int t) {
+  if (slot < 0 || slot >= slots()) throw std::invalid_argument("qwen38 model: no such slot");
+  if (t < 0 || t >= rope_tiers()) throw std::invalid_argument("qwen38 model: no YaRN tier " + std::to_string(t));
+  Seq &sq = seqs_[static_cast<size_t>(slot)];
+  if (sq.pos != 0) throw std::logic_error("qwen38 model: a sequence's YaRN tier is set at position 0");
+  sq.rope_delta = tier_base_[static_cast<size_t>(t)];
+}
+
 void Model::begin_sequence() {
   Seq &sq = seqs_[static_cast<size_t>(slot_)];
   if (sq.pending) throw std::logic_error("qwen38 model: begin_sequence while a verify waits for its commit");
@@ -1354,6 +1378,7 @@ void Model::verify_batch(const std::vector<SeqRows> &segs) {
     const Seq &sq = seqs_[static_cast<size_t>(segs[static_cast<size_t>(i)].slot)];
     int32_t *w = seg_words_ + i * k::kSegRec;
     w[k::kSegPos] = static_cast<int32_t>(sq.pos);
+    w[k::kSegRope] = static_cast<int32_t>(sq.rope_delta);  // its YaRN tier's table rows (qsa.hpp)
     w[k::kSegAccept] = sq.last_rows;
     amax = std::max(amax, sq.last_rows);
     w[k::kSegParity] = sq.gdn_par;

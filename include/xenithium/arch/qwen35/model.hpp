@@ -129,8 +129,9 @@ struct ModelOptions {
   bool prefill_wire_bf16 = false;
   // YaRN per request. Past the trained positions the rope table holds one sub-table per tier (trained x 2^k positions
   // at that length's factor: 1, 2, ...; the last tier = the whole context at its factor), and a sequence starts at its
-  // tier's first row through the M-RoPE delta (set_rope_tier), so a short request on a 1M server gets factor 1, the bits
-  // of a server at the trained context. false = one factor for every request.
+  // tier's first row through the rope delta (set_rope_tier: the M-RoPE delta word, plain rope too), so a short request
+  // on a 1M server gets factor 1, the bits of a server at the trained context. false = one factor for every request.
+  // Arch flint never scales (yarn_factor 1).
   bool yarn_tiers = true;
   int rope_tier_reset = -1;  // the tier reset() starts a sequence in (-1 = the last: the whole context's factor)
   bool prefill_split = true;  // the many-row two-card sums split over the cards (pair_split_rows) from 64 rows; false = the mailbox
@@ -688,6 +689,7 @@ class Model {
   double yarn_factor_ = 1.0;
   std::vector<int64_t> tier_limit_, tier_base_;  // per tier its positions and first row in the rope table
   std::vector<double> tier_factor_;
+  bool mrope_cfg_ = false;  // the checkpoint's interleaved M-RoPE (image input); the tiers use the delta without it
   int last_rows_ = 0, pending_accept_ = 0, parity_ = 0, mix_parity_ = 0, pf_parity_ = 0;
   int gdn_accept_max_ = 4;      // the step's largest accept word (GdnState:accept_max)
   bool gdn_commit_ = false;     // this step's GDN rows are final (GdnState:commit)

@@ -412,16 +412,11 @@ class Backend final : public serve::Backend {
                  what, m.load_seconds(), tp_desc.c_str(), m.slots(), static_cast<long long>(m.capacity()), o_.kv.c_str(), m.prefill_chunk(), o_.prefill_attn.c_str(),
                  o_.prefill_w4.c_str(), head_desc.c_str(), o_.w4_items, drafter.c_str());
     serve::log_rope(m.capacity(), m.config().max_positions, m.yarn_factor(),
-                    arch_ == "flint" ? "its rotary layers attend within a window, its full-attention layers have no rotary" : nullptr);
+                    arch_ == "flint" ? "its rotary layers attend within a window, its full-attention layers have no rotary" : nullptr, m.rope_tiers() > 1);
     if (m.rope_tiers() > 1) {
-      std::string t;
-      for (int i = 0; i < m.rope_tiers(); ++i) {
-        char b[96];
-        std::snprintf(b, sizeof b, "%s%lld at %.2f", i ? ", " : "", static_cast<long long>(m.rope_tier_limit(i)), m.rope_tier_factor(i));
-        t += b;
-      }
-      std::fprintf(stderr, "server: YaRN per request (--yarn-tiers on): a request runs at the factor of the smallest tier holding its prompt and "
-                           "room to grow (tokens up to: %s); one growing past its tier re-reads its tokens in the next\n", t.c_str());
+      std::vector<std::pair<int64_t, double>> tiers;
+      for (int i = 0; i < m.rope_tiers(); ++i) tiers.emplace_back(m.rope_tier_limit(i), m.rope_tier_factor(i));
+      serve::log_rope_tiers(tiers);
     }
     if (o_.decode_attn != "exact")
       std::fprintf(stderr, "server: decode attention numerics %s (%s)\n", o_.decode_attn.c_str(),

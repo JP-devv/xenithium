@@ -141,14 +141,27 @@ void log_ranking(const model::RouteRecord *rec, const std::string &file) {
                rec->loaded() ? "the hot set placed from it" : "none yet (the default placement this run)");
 }
 
-void log_rope(int64_t context, int64_t trained, double yarn_factor, const char *why_none) {
+void log_rope(int64_t context, int64_t trained, double yarn_factor, const char *why_none, bool tiers) {
   if (trained <= 0 || context <= trained) return;
   if (yarn_factor > 1.0)
-    std::fprintf(stderr, "server: max context %lld tokens past the %lld trained positions: static YaRN factor %.2f (attention factor %.4f) on every request\n",
-                 static_cast<long long>(context), static_cast<long long>(trained), yarn_factor, 1.0 + 0.1 * std::log(yarn_factor));
+    std::fprintf(stderr, "server: max context %lld tokens past the %lld trained positions: static YaRN factor %.2f (attention factor %.4f) %s\n",
+                 static_cast<long long>(context), static_cast<long long>(trained), yarn_factor, 1.0 + 0.1 * std::log(yarn_factor),
+                 tiers ? "for the requests of the last tier" : "on every request");
   else
     std::fprintf(stderr, "server: max context %lld tokens past the %lld trained positions: no YaRN%s%s%s\n", static_cast<long long>(context),
                  static_cast<long long>(trained), why_none ? " (" : "", why_none ? why_none : "", why_none ? ")" : "");
+}
+
+void log_rope_tiers(const std::vector<std::pair<int64_t, double>> &tiers) {
+  if (tiers.size() < 2) return;
+  std::string t;
+  for (size_t i = 0; i < tiers.size(); ++i) {
+    char b[96];
+    std::snprintf(b, sizeof b, "%s%lld at %.2f", i ? ", " : "", static_cast<long long>(tiers[i].first), tiers[i].second);
+    t += b;
+  }
+  std::fprintf(stderr, "server: YaRN per request (--yarn-tiers on): a request runs at the factor of the smallest tier holding its prompt and "
+                       "room to grow (tokens up to: %s); one growing past its tier re-reads its tokens in the next\n", t.c_str());
 }
 
 namespace {

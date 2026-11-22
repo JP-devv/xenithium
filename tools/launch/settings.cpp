@@ -136,8 +136,7 @@ const char *brief_of(std::string_view key) {
        "A limit, not a reservation: all slots share the KV pool, and a request takes KV only as it grows.\n"
        "\n"
        "Past the trained length (262,144 on qwen35 / qwen38, 524,288 on Nanbeige) the engine turns on YaRN by itself, with the smallest factor that reaches the limit: 524,288 on a 262,144 model = factor 2.00.\n"
-       "- qwen35: each request gets its own factor (`XEN_YARN_TIERS`), so short requests keep the trained numerics.\n"
-       "- Other models: YaRN changes every request, short ones too. Stay at or under the trained length unless you need more.\n"
+       "- qwen35, qwen38 and Nanbeige: each request gets its own factor (`XEN_YARN_TIERS`), so short requests keep the trained numerics.\n"
        "- flint needs no YaRN.\n"
        "\n"
        "Limits: up to 1,048,576 tokens. The load refuses a limit whose KV for one request does not fit the cards, and names the largest that does."},
@@ -501,9 +500,9 @@ const char *brief_of(std::string_view key) {
        "Gives (bf16): + prompt reading speed.\n"
        "Takes (bf16): - exactness: a small numerics change."},
       {"XEN_YARN_TIERS",
-       "qwen35, for a max context past the trained 262,144 tokens: YaRN per request.\n"
+       "qwen35, qwen38 and Nanbeige, for a max context past the trained length (262,144 tokens; Nanbeige 524,288): YaRN per request. flint needs no YaRN.\n"
        "\n"
-       "`on`  a request gets the factor of the smallest tier that holds its prompt plus room to grow. Tiers: 262,144 at 1.00, 524,288 at 2.00, then the max context.\n"
+       "`on`  a request gets the factor of the smallest tier that holds its prompt plus room to grow. Tiers: the trained length at 1.00, twice it at 2.00 (and so on, doubling), then the max context.\n"
        "`off`  one factor for every request: the max context's\n"
        "\n"
        "Gives (on): + quality for chat-sized requests: they keep the trained model's numerics, and long ones still reach the max context.\n"
@@ -1297,8 +1296,7 @@ std::vector<Spec> schema() {
     s.choices = {"auto", "bf16", "fp32"};
   }
   {
-    auto &s = add("XEN_YARN_TIERS", "YaRN per request", num, Kind::Choice);
-    s.scope = Scope::Qwen35;
+    auto &s = add("XEN_YARN_TIERS", "YaRN per request", num, Kind::Choice);  // every arch but flint (flint_skips)
     s.choices = {"on", "off"};
   }
   {
@@ -1996,7 +1994,7 @@ bool llama_skips(std::string_view key) {
 // whole lm_head, no MTP layer) and the settings it reads.
 bool flint_skips(std::string_view key) {
   if (key == "XEN_PREFILL_W4") return false;
-  if (key == "XEN_LM_HEAD") return true;
+  if (key == "XEN_LM_HEAD" || key == "XEN_YARN_TIERS") return true;  // (no YaRN: rotary only inside its windows)
   for (const char *k : {"XEN_DRAFTER", "XEN_DRAFTER_MODEL", "XEN_DRAFTER_DEFER", "XEN_DRAFTER_CUT", "XEN_DRAFT_DEPTHS", "XEN_ADAPTIVE_DEPTH"})
     if (key == k) return false;
   return llama_skips(key);

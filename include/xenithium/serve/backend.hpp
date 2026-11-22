@@ -139,8 +139,11 @@ inline int64_t shared_pool_auto(int slots, int64_t context, int64_t trained = 0)
 }
 
 // One load line when the max context passes the checkpoint's trained positions: the YaRN factor the load applied
-// (factor 1 = none; `why_none` says why the arch needs none). Silent at or below the trained positions.
-void log_rope(int64_t context, int64_t trained, double yarn_factor, const char *why_none = nullptr);
+// (factor 1 = none; `why_none` says why the arch needs none; tiers: YaRN per request, the factor is the last tier's).
+// Silent at or below the trained positions.
+void log_rope(int64_t context, int64_t trained, double yarn_factor, const char *why_none = nullptr, bool tiers = false);
+// With YaRN per request (--yarn-tiers on, more than one tier): the tiers, (positions, factor) ascending. Silent with one.
+void log_rope_tiers(const std::vector<std::pair<int64_t, double>> &tiers);
 // The MoE servers' recorded hot-expert ranking: where it came from and where it is saved (--hot-rank FILE;
 // rec null = not recorded: no file given, or a file of another model).
 void log_ranking(const model::RouteRecord *rec, const std::string &file);

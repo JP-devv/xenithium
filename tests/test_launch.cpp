@@ -394,8 +394,8 @@ void test_catalog(const std::string &root) {
     }
     const Spec *yt = cat.find("XEN_YARN_TIERS");
     expect(yt && yt->def == "on" && yt->flag == "--yarn-tiers" && yt->choices.size() == 2 && unused_reason(*yt, "qwen35", dv).empty() &&
-               !unused_reason(*yt, "qwen38", dv).empty(),
-           "YaRN per request: a qwen35 choice on / off, default on, flag from the docs");
+               unused_reason(*yt, "qwen38", dv).empty() && unused_reason(*yt, "llama", dv).empty() && !unused_reason(*yt, "flint", dv).empty(),
+           "YaRN per request: a choice on / off for qwen35, qwen38 and llama (not flint), default on, flag from the docs");
     // qwen38 keeps its own pair: XEN_TP=1 for qwen35 leaves qwen38's TP alone
     const Spec *t8 = cat.find("XEN_Q38_TP"), *c8 = cat.find("XEN_Q38_CARD");
     Values one8 = dv;

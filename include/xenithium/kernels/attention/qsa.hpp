@@ -6,7 +6,9 @@
 //   [q_h | gate_h] (per q head), k, v = bf16(x . W^T)                         head_dim 256
 //   q, k      = bf16(rope(bf16(gemma_rmsnorm(.))))   gemma: x rsqrt(mean x^2 + eps) (1 + w), fp32
 //   rope      NeoX halves over the first 64 dims, cos | sin from the host table (bf16 values,
-//             fp32 math, one bf16 rounding); text positions: M-RoPE sections collapse to 1-D
+//             fp32 math, one bf16 rounding); text positions: M-RoPE sections collapse to 1-D. A position p
+//             reads table row p + delta: delta = the segment record's word kSegRope (rows.hpp; a YaRN
+//             tier's first row), 0 with a bare position word
 //   index     [iq_0..3 | ik] = bf16(x . Widx^T)                               dim 128
 //             iq = bf16(rope(bf16(gemma_rmsnorm(iq))))  (q_layernorm), position p
 //             every 4th token (p % 4 == 3) closes block b = p / 4:
@@ -192,7 +194,7 @@ struct QsaEvents {
 
 // x bf16 [shape][hidden] (row_shape(rows) rows readable, rows.hpp); out bf16 [shape][hidden] (rows < `rows`
 // written). Rows 1..8, in segments of any size.
-// rope: device bf16 [>= cache.max_tokens][64]. wire: null with one card. Several sequences
+// rope: device bf16 [>= cache.max_tokens + the largest kSegRope delta][64]. wire: null with one card. Several sequences
 // (step.stride, step.seg_rows): row r reads its segment's position and slot; every row computes
 // what a step of its own sequence alone computes for it, bit for bit.
 QsaEvents qsa_decode(sycl::queue &q, const QsaShape &s, int rows, const qsa_bf16 *x, const QsaWeights &w, const QsaCache &c,

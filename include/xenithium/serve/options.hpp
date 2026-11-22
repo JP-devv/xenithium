@@ -32,7 +32,7 @@ struct Options {
   int tp = 2, card = 0;  // cards (TP1 / TP2); TP1's card
   std::string emu_card = "off";  // off | b60 | b65: run as that card (XEN_EMU_CARD, util/cards.hpp, rt/card.hpp)
   std::string wire = "bf16";
-  std::string yarn_tiers = "on";  // qwen35: YaRN per request past the trained positions, or one factor
+  std::string yarn_tiers = "on";  // qwen35 / qwen38 / llama: YaRN per request past the trained positions, or one factor
   std::string prefill_wire = "auto";  // the prefill two-card sums: bf16 partials or fp32; auto = qwen35 bf16, qwen38 fp32
   int threads = 16;
   bool graphs = true;

@@ -255,9 +255,10 @@ Model::Model(Fabric &fab, const std::string &dir, const ModelOptions &opt) : fab
   yarn_factor_ = yarn.factor;
   auto rope = k::qsa_rope_table(cap_, attn_.shape.rot, cfg_.rope_theta, yarn);
   // the tiers below the context's factor follow its table (the last tier starts at row 0: a sequence there has the bits
-  // of one factor for all); a sequence's rows read row P + delta, the delta from its tier
+  // of one factor for all); a sequence's rows read row P + delta, the delta from its tier (the M-RoPE delta word: with
+  // plain rope too, arch llama; a text row's composed row is the table's row P + delta)
   const bool mrope_cfg = cfg_.mrope_section.size() == 3 && cfg_.mrope_interleaved;
-  if (opt_.yarn_tiers && yarn.factor > 1.0 && mrope_cfg && !opt_.prefill_slices && !opt_.prefill_attn_slices && cfg_.max_positions > 0) {
+  if (opt_.yarn_tiers && yarn.factor > 1.0 && !opt_.prefill_slices && !opt_.prefill_attn_slices && cfg_.max_positions > 0) {
     for (int64_t Lt = cfg_.max_positions; Lt < cap_; Lt *= 2) {
       const k::QsaYarn yt = k::qsa_yarn_for(Lt, cfg_.max_positions);
       const auto t = k::qsa_rope_table(Lt, attn_.shape.rot, cfg_.rope_theta, yt);
@@ -271,7 +272,8 @@ Model::Model(Fabric &fab, const std::string &dir, const ModelOptions &opt) : fab
   tier_base_.push_back(0);
   tier_limit_.push_back(cap_);
   tier_factor_.push_back(yarn.factor);
-  if (mrope_cfg) rope_host_ = rope;  // M-RoPE rows (set_vision) and the tiers' rows
+  if (mrope_cfg || tier_limit_.size() > 1) rope_host_ = rope;  // M-RoPE rows (set_vision) and the tiers' rows
+  mrope_cfg_ = mrope_cfg;
   for (int c = 0; c < C; ++c) {
     auto cd = std::make_unique<Card>();
     auto &q = fab.compute(static_cast<size_t>(c));
@@ -2263,7 +2265,7 @@ void Model::pf_rope_rows(const int32_t *ids, int m) {
 
 void Model::set_vision(VisionStore *store) {
   if (!store) return;
-  if (rope_host_.empty()) throw std::invalid_argument("qwen35 model: image input needs the interleaved M-RoPE config (mrope_section)");
+  if (!mrope_cfg_) throw std::invalid_argument("qwen35 model: image input needs the interleaved M-RoPE config (mrope_section)");
   if (opt_.prefill_slices || opt_.prefill_attn_slices) throw std::invalid_argument("qwen35 model: image input runs the many-row prefill only");
   if (store->vocab() != cfg_.vocab) throw std::invalid_argument("qwen35 model: the image store's vocabulary differs");
   if (store->cards() < static_cast<int>(cards_.size()))

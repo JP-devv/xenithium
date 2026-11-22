@@ -174,6 +174,9 @@ class StepModelAdapter final : public core::StepModel {
   // Prefill calls that start and end at multiples of 64 with 64+ rows compute every row as a cold prefill does (gated
   // by probe prefix part 0); a call under 64 rows does not.
   int snap_align() const override { return 64; }
+  int rope_tiers() const override { return m_.rope_tiers(); }  // ModelOptions::yarn_tiers
+  int64_t rope_tier_limit(int t) const override { return m_.rope_tier_limit(t); }
+  void set_rope_tier(int slot, int t) override { m_.set_rope_tier(slot, t); }
 
  private:
   Model &m_;
