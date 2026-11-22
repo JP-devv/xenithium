@@ -349,6 +349,68 @@ class QsaSelMergeK;
 class QsaSelNK;
 }  // namespace
 
+// The same native BF16 DPAS instruction as QsaScoreK, but transpose the
+// operands: A is 8 prompt queries for one head, B is 16 adjacent pooled
+// keys. Keep B for all four heads, then apply the trained scorer's ReLU
+// and head sum (no scale). One K pack per prompt chunk, Q pack per tile.
+template<class T> static sycl::event trained_xmx_pack_k(sycl::queue &q,const T *pool,int nkeys,bf16 *packed) {
+  constexpr int K=16,D=128,panel=K*D;
+  return q.parallel_for(sycl::range<1>(size_t((nkeys+K-1)/K)*panel),[=](sycl::id<1> id) {
+    const size_t i=id[0]; const int elem=i%panel, col=(elem/2)%K, dim=(elem/(2*K))*2+elem%2;
+    const int b=(i/panel)*K+col;
+    packed[i]=b<nkeys?bf16(static_cast<float>(pool[size_t(b)*D+dim])):bf16(0.f);
+  });
+}
+sycl::event qsa_trained_xmx_pack_k(sycl::queue &q,const float *pool,int nkeys,bf16 *packed) {
+  return trained_xmx_pack_k(q,pool,nkeys,packed);
+}
+sycl::event qsa_trained_xmx_pack_k(sycl::queue &q,const sycl::half *pool,int nkeys,bf16 *packed) {
+  return trained_xmx_pack_k(q,pool,nkeys,packed);
+}
+sycl::event qsa_trained_xmx_pack_q(sycl::queue &q,const float *query,int rows,bf16 *packed) {
+  constexpr int R=8,H=4,D=128,S=16,panel=R*H*D;
+  return q.parallel_for(sycl::range<1>(size_t((rows+R-1)/R)*panel),[=](sycl::id<1> id) {
+    const size_t i=id[0]; const int e=i%panel, r=(i/panel)*R+(e/S)%R, h=(e/(R*S))%H, d=(e/(R*H*S))*S+e%S;
+    packed[i]=r<rows?bf16(query[(size_t(r)*H+h)*D+d]):bf16(0.f);
+  });
+}
+class QsaTrainedPrefillXmxK;
+sycl::event qsa_trained_xmx_score(sycl::queue &q,const bf16 *query,const bf16 *keys,int rows,int pos,int nkeys,
+                                 uint32_t *score,int pitch,int32_t *eligible) {
+  constexpr int R=8,K=16,H=4,D=128,S=16,W=16;
+  return q.parallel_for<QsaTrainedPrefillXmxK>(sycl::nd_range<2>({size_t((rows+R-1)/R),size_t((nkeys+K*W-1)/(K*W))*W},{1,W}),
+      [=](sycl::nd_item<2> it) SYCL_ESIMD_KERNEL {
+        const int t=it.get_group(0),r0=t*R,n=(rows-r0<R?rows-r0:R);
+        const int kb=it.get_global_id(1),b0=kb*K;
+        if (b0==0)
+#pragma unroll
+          for(int r=0;r<R;++r) if(r<n) eligible[r0+r]=(pos+r0+r+1)/4;
+        if(b0>=(pos+r0+n)/4) return;
+        const bf16 *A=query+size_t(t)*R*D*H, *B=keys+size_t(kb)*K*D;
+        esimd::simd<float,R*K> c0(0.f), c1(0.f), c2(0.f), c3(0.f);
+#pragma unroll
+        for(int d=0;d<D/S;++d) {
+          const auto b=esimd::block_load<bf16,K*S>(B+d*K*S);
+          const bf16 *a=A+d*H*R*S;
+          c0=xmx::dpas<8,8,float,float,bf16,bf16>(c0,b,esimd::block_load<bf16,R*S>(a+0*R*S));
+          c1=xmx::dpas<8,8,float,float,bf16,bf16>(c1,b,esimd::block_load<bf16,R*S>(a+1*R*S));
+          c2=xmx::dpas<8,8,float,float,bf16,bf16>(c2,b,esimd::block_load<bf16,R*S>(a+2*R*S));
+          c3=xmx::dpas<8,8,float,float,bf16,bf16>(c3,b,esimd::block_load<bf16,R*S>(a+3*R*S));
+        }
+        esimd::simd<float,R*K> sums=((esimd::max(c0,0.f)+esimd::max(c1,0.f))+esimd::max(c2,0.f))+esimd::max(c3,0.f);
+        const esimd::simd<uint32_t,K> index(0,1);
+#pragma unroll
+        for(int r=0;r<R;++r) if(r<n) {
+          const int count=(pos+r0+r+1)/4-b0;
+          auto *dst=score+size_t(r0+r)*pitch+b0;
+          esimd::simd<float,K> fs=sums.template select<K,1>(r*K);
+          const esimd::simd<uint32_t,K> bits=fs.template bit_cast_view<uint32_t>();
+          if(count>=K) esimd::block_store<uint32_t,K>(dst,bits);
+          else if(count>0) esimd::scatter<uint32_t,K>(dst,index*4u,bits,index<uint32_t(count));
+        }
+      });
+}
+
 int qsa_select_chunk(int bound) {
   // Up to 16 chunk work-groups per row (one per 4,096 blocks at least), as wide as the cap
   // of 16 candidate lists allows.

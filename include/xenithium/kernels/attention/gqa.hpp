@@ -279,6 +279,13 @@ sycl::event gqa_kv_move(sycl::queue &q, const GqaShape &s, const GqaCache *cache
 // a page's score = the largest over the block's rows' q heads). The K / V of the call's rows, and every later layer's
 // input, are then built on the selected attention. A block whose context is `select` pages or fewer keeps them all,
 // and a call that ends under the budget runs the dense body, bit for bit.
+// Trained prefill: sorted union of logical pages per FA row group, with a
+// separate 16-bit block mask for every (query row, logical page).
+struct GqaTrainedPrefill {
+  const int32_t *pages = nullptr, *counts = nullptr;
+  const uint16_t *masks = nullptr;
+  int pitch = 0, rows_per_group = 0;
+};
 struct GqaRowsSelect {
   int pages = 0;  // pages per (row block, kv head) once the call's context passes that many; 0 = dense
   // The block holding the call's last row keeps every page. For the call that ends a prompt: its last rows produce the
@@ -341,7 +348,8 @@ struct GqaRowsScratch {
 inline constexpr int kGqaAttnBatch = 0, kGqaAttnBlock = 1, kGqaAttnStaged = 2, kGqaAttnFa = 3, kGqaAttnSdpa = 4;
 GqaEvents gqa_rows(sycl::queue &q, const GqaShape &s, int m, const gqa_bf16 *x, const GqaWeights &w, const GqaCache &c, const gqa_bf16 *rope,
                    const int32_t *pos4, int pos0, const GqaRowsScratch &sc, const PairRowsWire *wire, int wire_parity, gqa_bf16 *out,
-                   int attn = kGqaAttnFa, int rows_per_group = 0, bool p_lo = true, int qk = 0, const GqaRowsSelect &select = {});
+                   int attn = kGqaAttnFa, int rows_per_group = 0, bool p_lo = true, int qk = 0, const GqaRowsSelect &select = {},
+                   const GqaTrainedPrefill *trained = nullptr);
 // gqa_rows' last stage alone: the o projection of sc.attn's m rows into sc.partial and the
 // two-card sum (or, wire->split, the partial left for the caller). One prefill call that carries the rows of several
 // sequences runs gqa_rows per sequence with sc.o_later (its own cache and positions, its rows of y / attn at their
@@ -394,6 +402,8 @@ sycl::event gqa_attn_fa(sycl::queue &q, const GqaShape &s, int m, const GqaCache
                         const GqaPageSets *page_sets = nullptr);
 // The rows per work-group gqa_attn_fa runs for rows_per_group (0 = the shape's default): the row block that shares a page set.
 int gqa_attn_fa_rows(const GqaShape &s, int rows_per_group);
+sycl::event gqa_attn_fa_trained(sycl::queue &q, const GqaShape &s, int m, const GqaCache &c, const int32_t *pos_word,
+                               const float *y, int ldy, const gqa_bf16 *qb, gqa_bf16 *attn, const GqaTrainedPrefill &plan);
 // gqa_attn_sdpa (gqa_sdpa.cpp, oneDNN Graph): the prefill attention on oneDNN's fused GQA kernel
 // (`sdpa,ocl:micro`), one kv head per call: gather the head's context [0, pos0 + m) from the pages into contiguous f16
 // K | V (int8: f16(code x scale); bf16: f16(value)), q to f16, then softmax(q . K^T / 16) . V with oneDNN's bottom-right

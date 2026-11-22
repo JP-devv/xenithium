@@ -56,7 +56,7 @@ constexpr int kOp8 = 512;                    // bytes of one s8 B operand (32 di
 
 // D: head_dim (256: qwen35 with the sigmoid output gate; 128: arch llama, no gate, q.k scale 1 / sqrt(128)); the
 // per-D sizes below follow it (SLM 64 KB at D 256, 32 KB at 128; o accumulators D / 2 GRF)
-template <QsaKv KV, int G, int QB, bool LO, int QK, int D, bool FL, bool SEL>
+template <QsaKv KV, int G, int QB, bool LO, int QK, int D, bool FL, bool SEL, bool TRAINED = false>
 class GqaAttnFaK;
 
 // 16 tokens x 16 dims bf16 (row-major [tok][dim]) -> the q.k B operand (k = dims, n = tokens): dword pairs transposed
@@ -96,9 +96,11 @@ struct FaTail {
   float *buf = nullptr;  // [tail][split][NI][8 x D o + 8 m + 8 l] fp32
 };
 
-template <QsaKv KV, int G, int QB, bool LO, int QK = 0, int D = 256, bool FL = false, bool SEL = false>
+template <QsaKv KV, int G, int QB, bool LO, int QK = 0, int D = 256, bool FL = false, bool SEL = false, bool TRAINED = false>
 sycl::event attn_fa(sycl::queue &q, const GqaShape &s, int m, const GqaCache &c, const int32_t *pos_word, const float *y, int ldy, const bf16 *qb,
-                    bf16 *attn, const bf16 *sinks = nullptr, FaTail tp = {}, const GqaPageSets *sets = nullptr) {
+                    bf16 *attn, const bf16 *sinks = nullptr, FaTail tp = {}, const GqaPageSets *sets = nullptr,
+                    GqaTrainedPrefill trained = {}) {
+  static_assert(!TRAINED || (KV == QsaKv::i8v4 && !FL && !SEL && D == 256 && G == 6));
   static_assert(D == 256 || D == 128, "head_dim 256 (gated) or 128");
   static_assert(!SEL || (D == 256 && !FL), "page sets: head_dim 256, no window / ring");
   constexpr int kD = D;
@@ -134,7 +136,7 @@ sycl::event attn_fa(sycl::queue &q, const GqaShape &s, int m, const GqaCache &c,
   float *tbuf = tp.buf;
   const int32_t *sel_pages = SEL ? sets->pages : nullptr, *sel_counts = SEL ? sets->counts : nullptr;  // [block][kv head]..., as g below
   constexpr int kPart = 8 * kD + 16;  // floats per item's partial: o [dc][row][16], m [8], l [8]
-  return q.parallel_for<GqaAttnFaK<KV, G, QB, LO, QK, D, FL, SEL>>(
+  return q.parallel_for<GqaAttnFaK<KV, G, QB, LO, QK, D, FL, SEL, TRAINED>>(
       sycl::nd_range<1>(static_cast<size_t>(whole + tail * split) * NI, NI), [=](sycl::nd_item<1> it) SYCL_ESIMD_KERNEL {
         esimd::slm_init<kSlmQ>();
         const int gg = static_cast<int>(it.get_group(0)), i = static_cast<int>(it.get_local_id(0));
@@ -156,13 +158,18 @@ sycl::event attn_fa(sycl::queue &q, const GqaShape &s, int m, const GqaCache &c,
           const int count = sel_counts[g];
           if (count > 0) walk = sel_pages + static_cast<size_t>(g) * kGqaSelMax, ntiles = count;
         }
+        if constexpr (TRAINED) {
+          // Share physical K/V staging, never share a query's selected masks.
+          walk = trained.pages + static_cast<size_t>(blk) * trained.pitch;
+          ntiles = trained.counts[blk];
+        }
         if (part) {  // this unit's contiguous share of the block's walk
           const int nt_all = ntiles;
           tlo = nt_all * sp / split;
           ntiles = nt_all * (sp + 1) / split;
         }
         auto tile_at = [&](int w) SYCL_ESIMD_FUNCTION {
-          if constexpr (SEL) {
+          if constexpr (SEL || TRAINED) {
             if (walk) return static_cast<int>(walk[w]);
           }
           return w;
@@ -353,6 +360,13 @@ sycl::event attn_fa(sycl::queue &q, const GqaShape &s, int m, const GqaCache &c,
             if constexpr (I8) sv *= ks;
             const int rp = rpos[r];
             esimd::simd_mask<kTile> dead = (ti + t0 > rp) | (ti >= nt);
+            if constexpr (TRAINED) {
+              const int j = rg * 8 + r;
+              const size_t rr = r0 + (j < nrows ? j : 0);
+              const uint32_t bits = trained.masks[rr * trained.pitch + tile];
+              const esimd::simd<uint32_t, kTile> block = esimd::simd<uint32_t, kTile>(0, 1) >> 2;
+              dead |= ((esimd::simd<uint32_t, kTile>(bits) >> block) & 1u) == 0u;
+            }
             if constexpr (FL) {
               if (win > 0) dead |= ti + t0 <= rp - win;  // before the row's window
             }
@@ -360,13 +374,13 @@ sycl::event attn_fa(sycl::queue &q, const GqaShape &s, int m, const GqaCache &c,
             const float mt = esimd::hmax<float>(sv);
             const float mo = m_run[r];
             float mn = mo > mt ? mo : mt;
-            if constexpr (FL) mn = mn == -INFINITY ? 0.f : mn;  // no live token yet: the state stays (exp(-inf) = 0)
+            if constexpr (FL || TRAINED) mn = mn == -INFINITY ? 0.f : mn;  // no live token yet: the state stays (exp(-inf) = 0)
             else if (part) mn = mn == -INFINITY ? 0.f : mn;     // a tail unit's range may hold none of a row's tokens
             const esimd::simd<float, 1> al = esimd::exp(esimd::simd<float, 1>(mo - mn));  // 0 on the first tile
             esimd::simd<float, kTile> pe = esimd::exp(sv - mn);
             pe.merge(esimd::simd<float, kTile>(0.f), dead);
             l_run[r] = l_run[r] * static_cast<float>(al[0]) + esimd::reduce<float>(pe, std::plus<>());
-            if constexpr (FL) m_run[r] = mo > mt ? mo : mt;
+            if constexpr (FL || TRAINED) m_run[r] = mo > mt ? mo : mt;
             else m_run[r] = part ? (mo > mt ? mo : mt) : mn;
             if constexpr (I8 && !V4) {
               pe *= vs;
@@ -635,6 +649,25 @@ sycl::event fa_kv(sycl::queue &q, const GqaShape &s, int m, const GqaCache &c, c
 }
 
 }  // namespace
+
+sycl::event gqa_attn_fa_trained(sycl::queue &q, const GqaShape &s, int m, const GqaCache &c, const int32_t *pos_word,
+                               const float *y, int ldy, const gqa_bf16 *qb, gqa_bf16 *attn, const GqaTrainedPrefill &plan) {
+  if (s.kv != QsaKv::i8v4 || s.head_dim != 256 || s.grp() != 6 || !s.gate || s.window || s.rope_rows || c.slot_pages || c.ring_pages ||
+      !plan.pages || !plan.counts || !plan.masks || plan.pitch != c.max_tokens / kPage)
+    throw std::invalid_argument("gqa_attn_fa_trained: expected one text K8V4 slot and a valid per-row plan");
+  auto run = [&]<int QB>() {
+    const FaTail tp = fa_tail_plan<(QB / 8) * 6>(q, (m + QB - 1) / QB * s.hkv());
+    auto e = attn_fa<QsaKv::i8v4, 6, QB, false, 1, 256, false, false, true>(q, s, m, c, pos_word, y, ldy, qb, attn, nullptr, tp, nullptr, plan);
+    if (tp.tail) e = attn_fa_merge<6, QB, 256>(q, s, m, pos_word, y, ldy, attn, tp);
+    return e;
+  };
+  switch (plan.rows_per_group) {
+    case 16: return run.template operator()<16>();
+    case 32: return run.template operator()<32>();
+    case 40: return run.template operator()<40>();
+  }
+  throw std::invalid_argument("gqa_attn_fa_trained: expected 16, 32 or 40 rows per group");
+}
 
 void gqa_attn_fa_set_tail(int mode) { g_tail_on = std::clamp(mode, 0, 2); }
 int gqa_attn_fa_tail() { return g_tail_on; }

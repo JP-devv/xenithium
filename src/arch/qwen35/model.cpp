@@ -4,6 +4,7 @@
 #include "xenithium/arch/common/vision.hpp"
 
 #include <algorithm>
+#include <charconv>
 #include <cmath>
 #include <map>
 #include <tuple>
@@ -207,6 +208,22 @@ Model::Model(Fabric &fab, const std::string &dir, const ModelOptions &opt) : fab
     }
     if (qsa_bank.empty() || bank.tensors().size()!=5*qsa_bank.size())
       throw std::invalid_argument("trained QSA: no matching bank or unexpected tensors in the bank");
+  }
+  const char *pf_xmx=std::getenv("XEN_TRAINED_QSA_PREFILL_XMX");
+  const char *pf_min=std::getenv("XEN_TRAINED_QSA_PREFILL_MIN_POS");
+  if (pf_xmx && std::string_view(pf_xmx)!="0" && std::string_view(pf_xmx)!="1")
+    throw std::invalid_argument("XEN_TRAINED_QSA_PREFILL_XMX: expected 0 or 1");
+  if (pf_xmx && std::string_view(pf_xmx)=="1") {
+    const std::string_view min=pf_min ? pf_min : "32768";
+    const auto [end, ec]=std::from_chars(min.data(),min.data()+min.size(),trained_qsa_prefill_min_);
+    if (ec!=std::errc{} || end!=min.data()+min.size() || trained_qsa_prefill_min_<2112 ||
+        trained_qsa_prefill_min_>=cap_ || trained_qsa_prefill_min_%k::kQsaPage)
+      throw std::invalid_argument("XEN_TRAINED_QSA_PREFILL_MIN_POS: expected page-aligned position in [2112, context)");
+    if (qsa_bank.size()!=16 || opt_.slots!=1 || opt_.prefill_slices || opt_.prefill_attn_slices ||
+        opt_.prefill_attn!=k::kGqaAttnFa || opt_.prefill_attn_qk!=1 || opt_.prefill_attn_p_lo)
+      throw std::invalid_argument("trained XMX prefill requires one slot, the all-layer bank and native K8V4 int8-fast FA");
+  } else if (pf_min && *pf_min) {
+    throw std::invalid_argument("XEN_TRAINED_QSA_PREFILL_MIN_POS requires XEN_TRAINED_QSA_PREFILL_XMX=1");
   }
   const model::Checkpoint ck = model::Checkpoint::open(dir);
   const bool head_only_int4 = !ck.find("lm_head.weight") && ck.find("lm_head.qweight");
@@ -587,7 +604,7 @@ Model::Model(Fabric &fab, const std::string &dir, const ModelOptions &opt) : fab
       }
     }
     if (!qsa_bank.empty()) {
-      const size_t qsa_bytes=trained_qsa::Device::bytes_per_rank(qsa_bank.size(),cfg_.hidden,opt_.slots,static_cast<int>(cap_),opt_.prefill_chunk,step_rows_);
+      const size_t qsa_bytes=trained_qsa::Device::bytes_per_rank(qsa_bank.size(),cfg_.hidden,opt_.slots,static_cast<int>(cap_),opt_.prefill_chunk,step_rows_,trained_qsa_prefill_min_>0);
       if (!opt_.loader) throw std::runtime_error("trained QSA: VRAM preflight unavailable");
       if (opt_.loader) for (int c=0;c<C;++c) {
         const auto v=l0::vram_state(opt_.loader->info(fab_.rank_index(c)));
@@ -602,7 +619,7 @@ Model::Model(Fabric &fab, const std::string &dir, const ModelOptions &opt) : fab
         if (!v.ok || v.free<kv_bytes+qsa_bytes+snap+startup_margin)
           throw std::runtime_error("trained QSA: refusing allocation; rank="+std::to_string(c)+" selector_bytes="+std::to_string(qsa_bytes)+" kv_bytes="+std::to_string(kv_bytes));
       }
-      trained_qsa3_=std::make_unique<trained_qsa::Device>(fab_,std::span<const trained_qsa::Layer>(qsa_bank),opt_.slots,static_cast<int>(cap_),opt_.prefill_chunk,step_rows_);
+      trained_qsa3_=std::make_unique<trained_qsa::Device>(fab_,std::span<const trained_qsa::Layer>(qsa_bank),opt_.slots,static_cast<int>(cap_),opt_.prefill_chunk,step_rows_,trained_qsa_prefill_min_>0);
       qsa_covered_.assign(opt_.slots,-1);
     }
     kv_alloc(pool);
@@ -2510,8 +2527,12 @@ bool Model::pf_step(int layers) {
     sends[c] = k::PairSplitSend{&*cards_[c]->side, &cards_[c]->pf_split, k::pair_split_next_seq(pf_seq_)};
     return &sends[c];
   };
+  // A restored prefix or a hole in index history still runs dense prefill.
+  const bool sparse_pf=trained_qsa_prefill_min_ && rows_mode && !multi && !pf_.rope_rows &&
+                       pos_>=trained_qsa_prefill_min_ && qsa_covered_[slot_]==pos_;
   for (int l = l0; l < l1; ++l) {
     const bool full = cfg_.full_attention[l];
+    std::array<k::GqaTrainedPrefill,2> pf_plan{};
     // with the last MLP sum pending, the mixer's first GEMM runs on the card's own rows before the wait
     const uint32_t pend_in = l > 0 ? pend_seq_ : 0;
     const bool pre_in = pend_in != 0 && rows_mode && (!full || !opt_.prefill_attn_slices);
@@ -2537,8 +2558,11 @@ bool Model::pf_step(int layers) {
         if(multi) {
           for(const auto &sg:pf_.segs) if(qsa_covered_[sg.slot]>=0)
             trained_qsa3_->prefill(static_cast<int>(c),cd.pf_xn+size_t(sg.row0)*H,sg.m,sg.slot,static_cast<int>(sg.pos),trained_qsa_layer_[l]);
-        } else if(qsa_covered_[slot_]>=0)
-          trained_qsa3_->prefill(static_cast<int>(c),cd.pf_xn,m,slot_,static_cast<int>(pos_),trained_qsa_layer_[l]);
+        } else if(qsa_covered_[slot_]>=0) {
+          const int group=sparse_pf && full ? k::gqa_attn_fa_rows(attn_.shape_of(static_cast<int>(c),l),opt_.prefill_attn_rows):0;
+          pf_plan[c]=trained_qsa3_->prefill(static_cast<int>(c),cd.pf_xn,m,slot_,static_cast<int>(pos_),trained_qsa_layer_[l],group);
+        }
+
       }
     }
     pend_seq_ = 0;
@@ -2580,7 +2604,16 @@ bool Model::pf_step(int layers) {
         const auto e = k::gqa_rows(fab_.compute(c), ash, m, cd.pf_xn, attn_.w[c][l], kv_view(cd.kv[l], slot_), cd.rope, cd.pf_pos,
                                    static_cast<int>(pos_), sc, C > 1 ? &pw : nullptr, pf_parity_, cd.pf_mix, opt_.prefill_attn, opt_.prefill_attn_rows,
                                    opt_.prefill_attn_p_lo, opt_.prefill_attn_qk,
-                                   k::GqaRowsSelect{.pages = opt_.prefill_select, .dense_last_block = ends_prompt});
+                                   k::GqaRowsSelect{.pages = opt_.prefill_select, .dense_last_block = ends_prompt},
+                                   pf_plan[c].pages ? &pf_plan[c] : nullptr);
+        if (pf_plan[c].pages) {
+          const uint64_t bit=uint64_t(1)<<trained_qsa_layer_[l];
+          if (!(trained_prefill_reported_[c]&bit)) {
+            trained_prefill_reported_[c]|=bit;
+            std::fprintf(stderr,"trained QSA prefill submitted: rank=%zu layer=%d slot=%d pos=%lld rows=%d group=%d scorer=bf16-xmx8x16 fa=k8v4-i8-fast-masked-union\n",
+                         c,l,slot_,static_cast<long long>(pos_),m,pf_plan[c].rows_per_group);
+          }
+        }
         if (c == 0) ae = e;
       }
       if (split) split_sum([&](int c) { return static_cast<const float *>(cards_[c]->pf_gqa.partial); }, &Card::pf_mix, send);

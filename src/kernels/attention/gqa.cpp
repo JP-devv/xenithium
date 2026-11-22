@@ -1052,7 +1052,9 @@ sycl::event gqa_attn_sdpa(sycl::queue &q, const GqaShape &s, int m, int pos0, co
 
 GqaEvents gqa_rows(sycl::queue &q, const GqaShape &s, int m, const bf16 *x, const GqaWeights &w, const GqaCache &c, const bf16 *rope,
                    const int32_t *pos4, int pos0, const GqaRowsScratch &sc, const PairRowsWire *wire, int wire_parity, bf16 *out, int attn,
-                   int rows_per_group, bool p_lo, int qk, const GqaRowsSelect &select) {
+                   int rows_per_group, bool p_lo, int qk, const GqaRowsSelect &select, const GqaTrainedPrefill *trained) {
+  if (trained && (attn != kGqaAttnFa || select.pages || w.sinks || qk != 1 || p_lo || gqa_attn_fa_rows(s, rows_per_group) != trained->rows_per_group))
+    throw std::invalid_argument("gqa_rows: trained prefill requires the stock K8V4 int8-fast FA shape");
   if (attn < kGqaAttnBatch || attn > kGqaAttnSdpa) throw std::invalid_argument("gqa_rows: attention body 0..4");
   if (select.pages > 0 && attn != kGqaAttnFa) throw std::invalid_argument("gqa_rows: page selection runs the fa attention body (attention 3)");
   if (select.pages > 0 && (!c.kmin || !sc.sel.valid())) throw std::invalid_argument("gqa_rows: page selection needs the cache's key bounds and the page-set scratch");
@@ -1088,8 +1090,10 @@ GqaEvents gqa_rows(sycl::queue &q, const GqaShape &s, int m, const bf16 *x, cons
     page_sets = &sc.sel;
   }
   if (attn == kGqaAttnSdpa) e.attn = e.merge = gqa_attn_sdpa(q, s, m, pos0, c, sc.y, ldy, sc.q, sc.attn, sc);
-  else if (attn == kGqaAttnFa)
-    e.attn = e.merge = gqa_attn_fa(q, s, m, c, pos4, sc.y, ldy, sc.q, sc.attn, rows_per_group, p_lo, qk, fl ? w.sinks : nullptr, page_sets);
+  else if (attn == kGqaAttnFa) {
+    e.attn = e.merge = trained ? gqa_attn_fa_trained(q, s, m, c, pos4, sc.y, ldy, sc.q, sc.attn, *trained)
+                               : gqa_attn_fa(q, s, m, c, pos4, sc.y, ldy, sc.q, sc.attn, rows_per_group, p_lo, qk, fl ? w.sinks : nullptr, page_sets);
+  }
   else if (attn == kGqaAttnStaged) e.attn = e.merge = gqa_attn_staged(q, s, m, c, pos4, sc.y, ldy, sc.q, sc.attn, rows_per_group);
   else if (attn == kGqaAttnBlock) e.attn = e.merge = gqa_attn_rows(q, s, m, c, pos4, sc.y, ldy, sc.q, sc.attn);
   for (int b0 = 0; b0 < m && !block; b0 += kGqaRowsBatch) {

@@ -15,7 +15,7 @@
 namespace xenithium::arch::qwen35::trained_qsa {
 namespace k = kernels;
 namespace {
-constexpr int width=(heads+1)*dim, workers=32;
+constexpr int width=(heads+1)*dim, workers=32, pf_score_tile=64, pf_fa_min_rows=16;
 constexpr size_t allocation_bytes(size_t n) { return std::max(size_t(4096),n); }
 bool enabled(const char *name) { const char *p=std::getenv(name); return p && p[0]=='1' && !p[1]; }
 struct History {
@@ -27,14 +27,16 @@ struct History {
 // Position-indexed text rotary table (cos then sin), equivalent to broadcast
 // text MRoPE. We cannot use stock QSA's fused BF16 prep: the trained bank
 // rounds neither projected input nor normalized keys to BF16 and has a third norm.
+template<bool PfQuery=false>
 sycl::event norm_index(sycl::queue &q, const History &h, const std::array<float*,3> &x, float eps,
                        int rows, int slot, int pos, k::GqaStep step, bool draft,uint32_t track=~uint32_t(0)) {
   const auto *rec=step.pos;
   const int stride=step.stride, seg_rows=step.seg_rows;
   // A tree still stages the index keys, but does not score or use sparse attention.
   const bool queries=draft && !step.tree;
-  return q.parallel_for(sycl::nd_range<1>(size_t(rows)*(queries?heads+1:1)*workers,workers), [=](sycl::nd_item<1> it) {
-    const int w=it.get_group(0), lane=it.get_local_id(0), r=queries?w/(heads+1):w, head=queries?w%(heads+1):heads;
+  const int nhead=PfQuery?heads:queries?heads+1:1;
+  return q.parallel_for(sycl::nd_range<1>(size_t(rows)*nhead*workers,workers), [=](sycl::nd_item<1> it) {
+    const int w=it.get_group(0), lane=it.get_local_id(0), r=PfQuery?w/heads:queries?w/(heads+1):w, head=PfQuery?w%heads:queries?w%(heads+1):heads;
     if(draft && !(track&(uint32_t(1)<<r))) return;
     const auto sr=draft?k::seg_row(rec,stride,seg_rows,r):k::SegRow{0,r,pos+r,slot};
     const size_t at=size_t(r)*width+head*dim;
@@ -193,6 +195,13 @@ struct Device::Impl {
     size_t allocated=0;
     k::QsaScratch sc{};
     int32_t *entries=nullptr,*counts=nullptr,*status=nullptr;
+    struct Prefill {
+      k::QsaScratch sc{};
+      float *query=nullptr;
+      int32_t *pages=nullptr,*counts=nullptr,*entries=nullptr;
+      uint16_t *masks=nullptr;
+      k::gqa_bf16 *xmx_queries=nullptr,*xmx_keys=nullptr;
+    } pf;
   };
   Fabric &fab;
   std::vector<Card> cards;
@@ -215,7 +224,7 @@ struct Device::Impl {
     }
   }
 };
-size_t Device::bytes_per_rank(size_t layers,int hidden,int slots,int cap,int pf,int st) {
+size_t Device::bytes_per_rank(size_t layers,int hidden,int slots,int cap,int pf,int st,bool xmx_prefill) {
   if (!layers || layers>64 || hidden!=5120 || slots<1 || slots>k::kSegs16 || cap<64 || cap>kMaxContext || cap%k::kQsaPage ||
       pf<1 || pf>cap || st<1 || st>k::kStepRows32)
     throw std::invalid_argument("trained QSA: invalid layer, hidden, context, slot or row capacity");
@@ -230,11 +239,18 @@ size_t Device::bytes_per_rank(size_t layers,int hidden,int slots,int cap,int pf,
   const size_t cp=size_t(st)*k::kQsaMaxChunks;
   const size_t candidates=eligible>size_t(chunk)?b(cp)+2*b(cp*k::kQsaTopBlocks):0;
   const size_t scratch=3*b(size_t(std::max(pf,k::row_shape(st)))*width)+b(size_t(st)*eligible)+candidates;
-  return layers*layer+weights+scratch+b(size_t(cap)*64)+b(size_t(pf)*dim)+b(size_t(st)*heads*dim)+
+  const size_t pages=cap/k::kQsaPage, groups=(pf+pf_fa_min_rows-1)/pf_fa_min_rows;
+  const size_t pc=size_t(pf_score_tile)*k::kQsaMaxChunks;
+  const size_t prefill=xmx_prefill ?
+      b(size_t(pf_score_tile)*heads*dim)+b(groups*pages)+b(groups)+b(size_t(pf)*pages,2)+
+      b(size_t(pf_score_tile)*heads*dim,2)+b(eligible*dim,2)+
+      2*b(pf_score_tile)+b(size_t(pf_score_tile)*k::kTrainedQsaTopBlocks)+b(size_t(pf_score_tile)*eligible)+
+      b(size_t(pf_score_tile)*k::kTrainedQsaPages)+(eligible>size_t(chunk)?b(pc)+2*b(pc*k::kQsaTopBlocks):0):0;
+  return prefill+layers*layer+weights+scratch+b(size_t(cap)*64)+b(size_t(pf)*dim)+b(size_t(st)*heads*dim)+
       3*b(st)+b(size_t(st)*k::kTrainedQsaTopBlocks)+b(size_t(st)*k::kTrainedQsaPages)+b(size_t(st)*4);
 }
-Device::Device(Fabric &fab,std::span<const Layer> weights,int slots,int cap,int pf,int st) {
-  const size_t planned=bytes_per_rank(weights.size(),weights.empty()?0:weights.front().hidden(),slots,cap,pf,st);
+Device::Device(Fabric &fab,std::span<const Layer> weights,int slots,int cap,int pf,int st,bool xmx_prefill) {
+  const size_t planned=bytes_per_rank(weights.size(),weights.empty()?0:weights.front().hidden(),slots,cap,pf,st,xmx_prefill);
   for (const auto &w:weights) if(w.hidden()!=weights.front().hidden() || w.epsilon()!=weights.front().epsilon() || w.theta()!=weights.front().theta())
     throw std::invalid_argument("trained QSA: incompatible layer geometry");
   p_=std::make_unique<Impl>(fab,slots,cap,pf,st,weights.front().epsilon(),weights.size());
@@ -270,6 +286,25 @@ Device::Device(Fabric &fab,std::span<const Layer> weights,int slots,int cap,int 
     d.entries=p_->alloc<int32_t>(c,size_t(st)*k::kTrainedQsaPages);
     d.counts=p_->alloc<int32_t>(c,size_t(st)*4);
     d.status=p_->alloc<int32_t>(c,st);
+    if(xmx_prefill) {
+      auto &w=d.pf;
+      const size_t pages=cap/k::kQsaPage, groups=(pf+pf_fa_min_rows-1)/pf_fa_min_rows;
+      w.query=p_->alloc<float>(c,size_t(pf_score_tile)*heads*dim);
+      w.pages=p_->alloc<int32_t>(c,groups*pages); w.counts=p_->alloc<int32_t>(c,groups);
+      w.masks=p_->alloc<uint16_t>(c,size_t(pf)*pages);
+      w.xmx_queries=p_->alloc<k::gqa_bf16>(c,size_t(pf_score_tile)*heads*dim);
+      w.xmx_keys=p_->alloc<k::gqa_bf16>(c,size_t(eligible)*dim);
+      w.sc.nblk=p_->alloc<int32_t>(c,pf_score_tile); w.sc.sel_n=p_->alloc<int32_t>(c,pf_score_tile);
+      w.sc.sel=p_->alloc<int32_t>(c,size_t(pf_score_tile)*k::kTrainedQsaTopBlocks);
+      w.sc.score=p_->alloc<uint32_t>(c,size_t(pf_score_tile)*eligible);
+      w.entries=p_->alloc<int32_t>(c,size_t(pf_score_tile)*k::kTrainedQsaPages);
+      if(nch>1) {
+        const size_t pitch=size_t(pf_score_tile)*k::kQsaMaxChunks;
+        w.sc.cand_n=p_->alloc<int32_t>(c,pitch);
+        w.sc.cand_id=p_->alloc<int32_t>(c,pitch*k::kQsaTopBlocks);
+        w.sc.cand_key=p_->alloc<uint32_t>(c,pitch*k::kQsaTopBlocks);
+      }
+    }
   }
   for(size_t l=0;l<weights.size();++l) {
     const auto tiles=weights[l].device_tiles();
@@ -305,7 +340,7 @@ void publish_tail(sycl::queue &q,const History &h,int slot,int pos,int rows,cons
   if (n>0) q.memcpy(h.tail+(size_t(slot)*4+from%4)*dim,raw+size_t(from-pos)*dim,size_t(n)*dim*sizeof(float));
 }
 }
-void Device::prefill(int card,const k::gqa_bf16 *x,int rows,int slot,int pos,int bank_layer) {
+k::GqaTrainedPrefill Device::prefill(int card,const k::gqa_bf16 *x,int rows,int slot,int pos,int bank_layer,int fa_rows) {
   if(rows<1 || rows>p_->prefill_rows || slot<0 || slot>=p_->slots || pos<0 || pos>p_->cap-rows)
     throw std::invalid_argument("trained QSA layer3: invalid prefill slot/positions");
   auto &q=p_->fab.compute(card); auto &d=p_->cards.at(card);
@@ -317,6 +352,65 @@ void Device::prefill(int card,const k::gqa_bf16 *x,int rows,int slot,int pos,int
   norm_index(q,l.h,d.x,p_->eps,rows,slot,pos,{},false);
   index_blocks(q,l.h,p_->eps,rows,slot,pos,{},nullptr,false);
   publish_tail(q,l.h,slot,pos,rows,l.h.pf_raw);
+  if(!fa_rows) return {};  // the default still builds only the decode history
+  auto &w=d.pf;
+  if(!q.is_in_order() || !w.masks || (fa_rows!=16 && fa_rows!=32 && fa_rows!=40) || pos/4<=k::kTrainedQsaTopBlocks)
+    throw std::invalid_argument("trained XMX prefill: expected sparse workspace, supported FA geometry and long prefix");
+  const int pitch=p_->cap/k::kQsaPage, live_pages=(pos+rows+k::kQsaPage-1)/k::kQsaPage;
+  auto *masks=w.masks;
+  auto *pages=w.pages;
+  auto *counts=w.counts;
+  q.fill(masks,uint16_t(0),size_t(rows)*pitch);
+  const size_t origin=size_t(slot)*(p_->cap/4)*dim;
+  // Keep the existing FP16 or FP32 resident summaries. Convert to the upstream
+  // BF16 XMX operand layout only for this chunk; no changes to decode history.
+  if(l.h.pool16) k::qsa_trained_xmx_pack_k(q,l.h.pool16+origin,(pos+rows)/4,w.xmx_keys);
+  else k::qsa_trained_xmx_pack_k(q,l.h.pool+origin,(pos+rows)/4,w.xmx_keys);
+  History h=l.h;
+  h.query=w.query;
+  for(int q0=0;q0<rows;q0+=pf_score_tile) {
+    const int n=std::min(pf_score_tile,rows-q0), start=pos+q0, bound=(start+n)/4;
+    std::array<float*,3> projected=d.x;
+    for(auto &p:projected) p+=size_t(q0)*width;
+    norm_index<true>(q,h,projected,p_->eps,n,slot,start,{},false);
+    k::qsa_trained_xmx_pack_q(q,w.query,n,w.xmx_queries);
+    k::qsa_trained_xmx_score(q,w.xmx_queries,w.xmx_keys,n,start,bound,w.sc.score,p_->cap/4,w.sc.nblk);
+    k::qsa_select(q,n,w.sc.score,p_->cap/4,w.sc.nblk,bound,w.sc);
+    const auto *ids=w.sc.sel,*ns=w.sc.sel_n;
+    auto *entries=w.entries;
+    q.parallel_for(sycl::range<1>(n),[=](sycl::id<1> id) {
+      const int r=id[0], rp=start+r;
+      auto *row=masks+size_t(q0+r)*pitch;
+      auto *packed=entries+size_t(r)*k::kTrainedQsaPages;
+      const int count=k::trained_qsa_pack_row(rp,ids+size_t(r)*k::kTrainedQsaTopBlocks,ns[r],packed);
+      if (count<=0) {  // same safe fallback as trained decode; the FA causal mask still applies
+        for(int pg=0;pg<=rp/k::kQsaPage;++pg) row[pg]=0xffffu;
+      } else {
+        for(int j=0;j<count;++j) row[k::trained_qsa_page(packed[j])]=k::trained_qsa_mask(packed[j]);
+      }
+    });
+  }
+  // Compact the union in increasing logical page order. FA retains the row's
+  // mask, not the union mask; the latter decides what to stage exactly once.
+  constexpr int items=128;
+  const int blocks=(rows+fa_rows-1)/fa_rows;
+  q.parallel_for(sycl::nd_range<1>(size_t(blocks)*items,items),[=](sycl::nd_item<1> it) {
+    const int g=it.get_group(0),lane=it.get_local_id(0),r0=g*fa_rows;
+    const auto group=it.get_group();
+    const int rn=sycl::min(r0+fa_rows,rows), pn=(pos+rn+k::kQsaPage-1)/k::kQsaPage;
+    int base=0;
+    for(int p0=0;p0<pn;p0+=items) {
+      const int pg=p0+lane;
+      bool keep=false;
+      if (pg<pn && pg<live_pages)
+        for(int r=r0;r<rn && !keep;++r) keep=masks[size_t(r)*pitch+pg]!=0;
+      const int before=sycl::exclusive_scan_over_group(group,int(keep),sycl::plus<int>());
+      if (keep) pages[size_t(g)*pitch+base+before]=pg;
+      base+=sycl::group_broadcast(group,before+int(keep),items-1);
+    }
+    if (!lane) counts[g]=base;
+  });
+  return {pages,counts,masks,pitch,fa_rows};
 }
 void Device::stage(int card,const k::gqa_bf16 *x,int rows,int hkv,k::GqaStep &step,int bank_layer,int model_layer,uint32_t track,bool sparse) {
   if(rows<1 || rows>p_->step_rows || step.pos_bound<rows || step.pos_bound>p_->cap)

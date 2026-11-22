@@ -728,6 +728,8 @@ class Model {
   double load_s_ = 0;
   std::unique_ptr<load::DenseStore> dense_;
   std::unique_ptr<trained_qsa::Device> trained_qsa3_;  // optional trained index bank
+  int trained_qsa_prefill_min_ = 0;
+  std::array<uint64_t,2> trained_prefill_reported_{};
   std::vector<int> trained_qsa_layer_;  // model layer -> bank index; -1 is stock dispatch
   static constexpr int kTrainedQsaShort=8192;
   std::vector<int64_t> qsa_covered_;  // contiguous logical token count; -1 means disabled/incomplete
