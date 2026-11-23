@@ -28,6 +28,7 @@ struct Options {
   int64_t context = 32768;  // the max context: one request's most tokens (max_model_len); YaRN past the trained positions
   int64_t kv_pool_tokens = -1;  // -1 = auto, N = a pool of N tokens shared by the slots (the server refuses 0)
   std::string kv = "int8";  // int8 | bf16
+  std::string kv_split = "heads";  // qwen38 TP4: heads | tokens (the two cards of a kv head split its tokens)
   double reserve_gib = 0.25;
   int tp = 2, card = 0;  // cards (TP1 / TP2); TP1's card
   std::string emu_card = "off";  // off | b60 | b65: run as that card (XEN_EMU_CARD, util/cards.hpp, rt/card.hpp)

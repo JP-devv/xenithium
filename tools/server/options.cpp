@@ -21,6 +21,10 @@
 // --kv int8|bf16|int8-v4 [int8] the KV cache's precision. int8-v4 (qwen38 and the dense 27B): K int8, V int4 with a
 //   bf16 scale per 32 dims; on qwen38 it frees VRAM per card for hot experts at a 524,288-token pool. A numerics
 //   change; llama / flint refuse it.
+// --kv-split heads|tokens [heads] qwen38 on four cards: how the two cards of a kv head store its KV. heads = both hold
+//   all of its tokens; tokens = each holds every other token: a quarter of the KV per card (the pool's tokens per GiB
+//   about 1.75x at int8-v4), the partner's q heads computed on both, one exchange per attention layer; a numerics change.
+//   Other models and card counts refuse tokens.
 // --hot N [0] (MoE: the routed experts kept in VRAM, counted over ALL layers; each hot expert is split over the cards,
 //   so N cost N half-experts on each; 0 = as many as fit the VRAM left)
 // --plan print the load's memory plan as JSON (VRAM per card, the KV tokens the pool will hold, hot experts, pinned
@@ -219,6 +223,7 @@ std::vector<Flag> flags(serve::Options &o, std::string &kv_pool) {
       {"--context", "N", i64(o.context)},
       {"--kv-pool-tokens", "auto|N", str(kv_pool)},
       {"--kv", "int8|bf16|int8-v4", str(o.kv)},
+      {"--kv-split", "heads|tokens", str(o.kv_split)},
       {"--reserve", "GIB", f64(o.reserve_gib)},
       {"--tp", "1|2|4", i32(o.tp)},
       {"--card", "N", i32(o.card)},
@@ -346,8 +351,8 @@ int validate(const serve::Options &o) {
       o.prefill_chunk < 0 || o.prefill_chunk % 4 || o.draft_vocab < 0 || o.draft_vocab % 32 || !one_of(o.prefill_moe, {"w4a8", "w4a16"}) ||
       !one_of(o.prefill_dense, {"w8a8", "w8a8-row", "w8a16"}) || !one_of(o.decode_moe, {"w4a8", "w4a16", "auto"}) || !one_of(o.gdn_w4, {"int8", "int4", "int4-qkvz"}) ||
       !one_of(o.kv_lend, {"on", "off"}) || o.kv_lend_keep < 0 || o.kv_lend_park_s < 0 || o.kv_lend_grace_s < 0 ||
-      !one_of(o.kv_lend_pressure, {"kv", "lru", "idle"}))
-    return bad("--kv-lend on|off, --kv-lend-keep N >= 0, --kv-lend-park-s / --kv-lend-grace-s S >= 0, --kv-lend-pressure kv|lru|idle, --slots takes 1..16 (qwen38 on four cards 1..64, llama / flint 1..8), --kv int8|bf16|int8-v4 (int8-v4: qwen38 and the dense 27B), --wire bf16|fp32|int8, --prefill-wire auto|bf16|fp32, --w4-items 512|1024, --prefill-attn auto|exact|fast|int8|int8-fast|onednn (int8* need --kv int8 | int8-v4), --prefill-w4 exact|dequant|a8, --prefill-gemm onednn|onednn-all|esimd, --prefill-a8-body auto|slm|direct, --lm-head auto|int8|int4|int4-rescore, --lm-head-tiles 1..32, --draft-head auto|int8|int4, --prefill-chunk a multiple of 4 (0 = the arch's), --prefill-moe w4a8|w4a16, --decode-moe auto|w4a8|w4a16, --prefill-dense w8a8|w8a8-row|w8a16, --gdn-w4 int8|int4|int4-qkvz, --draft-vocab a multiple of 32");
+      !one_of(o.kv_lend_pressure, {"kv", "lru", "idle"}) || !one_of(o.kv_split, {"heads", "tokens"}))
+    return bad("--kv-split heads|tokens, --kv-lend on|off, --kv-lend-keep N >= 0, --kv-lend-park-s / --kv-lend-grace-s S >= 0, --kv-lend-pressure kv|lru|idle, --slots takes 1..16 (qwen38 on four cards 1..64, llama / flint 1..8), --kv int8|bf16|int8-v4 (int8-v4: qwen38 and the dense 27B), --wire bf16|fp32|int8, --prefill-wire auto|bf16|fp32, --w4-items 512|1024, --prefill-attn auto|exact|fast|int8|int8-fast|onednn (int8* need --kv int8 | int8-v4), --prefill-w4 exact|dequant|a8, --prefill-gemm onednn|onednn-all|esimd, --prefill-a8-body auto|slm|direct, --lm-head auto|int8|int4|int4-rescore, --lm-head-tiles 1..32, --draft-head auto|int8|int4, --prefill-chunk a multiple of 4 (0 = the arch's), --prefill-moe w4a8|w4a16, --decode-moe auto|w4a8|w4a16, --prefill-dense w8a8|w8a8-row|w8a16, --gdn-w4 int8|int4|int4-qkvz, --draft-vocab a multiple of 32");
   if (o.drafter_defer < 0 || (o.drafter_defer > 0 && o.drafter_defer < 8) || o.drafter_defer > 512 || !(o.drafter_cut >= 0 && o.drafter_cut < 1) ||
       o.drafter_mtp_from < 0 || o.drafter_mtp_from > 64 || o.drafter_tree < 0 || o.drafter_tree > 7 ||
       o.drafter_tree_seqs < 1 || o.drafter_tree_seqs > 8 || o.drafter_wide < 0 || o.drafter_wide > 15 || o.drafter_tree_wide < 1 || o.drafter_tree_wide > 15)

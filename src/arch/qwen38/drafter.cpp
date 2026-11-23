@@ -175,7 +175,7 @@ void Model::load_mtp(const std::string &dir) {
     }
   }
   M->dense = std::make_unique<load::DenseStore>(fab_);
-  auto plan = mtp_dense_plan(ck);
+  auto plan = mtp_dense_plan(ck, qs_.shape_of(0).kv_ways() > 1);
   for (auto &sp : plan)  // the calibration targets' BF16 drafter
     if (sp.store == model::DenseSpec::Store::i8)
       for (const auto &pat : opt_.mtp_bf16_tensors)
@@ -626,7 +626,8 @@ void Model::mtp_submit(int pass, int rows, const std::vector<const bf16 *> &hidd
     }
     k::QsaStep qst{X.seg + static_cast<size_t>(pass) * k::kMaxSegs * k::kSegRec, bound, k::kSegRec, seg_rows};
     qst.every = bound <= kDecEveryBound;  // the first bound bucket selects every block
-    k::qsa_decode(q, mtp_shape(qs_, opt_.mtp_kv, c), rows, K.xa, X.qw, X.qc, K.rope, qst, K.qsc, wire_of(K.pw), pair_parity_, K.ya);
+    k::qsa_decode(q, mtp_shape(qs_, opt_.mtp_kv, c), rows, K.xa, X.qw, X.qc, K.rope, qst, qsa_pair_region(K.qsc, static_cast<int>(qs_.layers.size())),
+                  wire_of(K.pw), pair_parity_, K.ya);
   }
   if (kv_only) return;
   pair_parity_ ^= 1;
@@ -685,10 +686,13 @@ void Model::mtp_prefill_rows(int m, int64_t pos0, std::vector<k::HcState> &cs, c
     k::mtp_front_add(q, H, S, m, K.pf.hc.part, K.pf.hc.gate, d.res[d.cur ^ 1]);
     d.cur ^= 1;
     k::hc_mixer_rows(q, hs_.shape, m, d, nullptr, X.attn, K.pf.hc, K.pf.xa);
-    k::qsa_rows(q, mtp_shape(qs_, opt_.mtp_kv, c), m, K.pf.xa, X.qw, X.qc, K.rope, K.pf.words, k::kSegRec, pos0, K.qsc, K.pf.qsa, wire_of(K.pf.pw), pf_pair_parity_,
+    k::QsaRowsScratch qrs = K.pf.qsa;
+    qrs.pair_parity = pf_kv_parity_;
+    k::qsa_rows(q, mtp_shape(qs_, opt_.mtp_kv, c), m, K.pf.xa, X.qw, X.qc, K.rope, K.pf.words, k::kSegRec, pos0, K.qsc, qrs, wire_of(K.pf.pw), pf_pair_parity_,
                 K.pf.ya);
   }
   pf_pair_parity_ ^= 1;
+  pf_kv_parity_ ^= 1;
   // calib_mtp's capture points (calib_layer_ == layers marks the drafter's layer)
   const bool cal = (calib_cap_ || calib_hook_) && calib_layer_ == cfg_.layers;
   // The rows before the last slice need only their KV (written by qsa_rows above); the MLP mixer + MoE run on the last

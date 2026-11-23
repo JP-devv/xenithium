@@ -1,7 +1,8 @@
 // Xenithium · qwen38 QSA (full attention) weights per (card, layer) for kernels::qsa_decode.
 //
 // Dense plan (heads split): q_proj (q | gate per head) with k_proj and v_proj appended (int8, one
-// GEMM: [12 heads x 512 | k 256 | v 256] per card), o_proj split along k (int8), the indexer
+// GEMM: [12 heads x 512 | k 256 | v 256] per card; TP4 with the KV split by tokens: [6 heads x 512 | the partner's 6 q
+// heads x 256 | k 256 | v 256]), o_proj split along k (int8), the indexer
 // projection replicated (bf16), q/k norms and the indexer norms replicated (raw bf16).
 #pragma once
 
@@ -22,7 +23,9 @@ struct QsaSet {
     s.card = card;
     return s;
   }
-  static QsaSet from(const load::DenseStore &dense, const Config &cfg, int cards, kernels::QsaKv kv);
+  // split: how a kv head's cards store its KV (kernels/attention/qsa.hpp; tokens = the partner's q rows in q_proj)
+  static QsaSet from(const load::DenseStore &dense, const Config &cfg, int cards, kernels::QsaKv kv,
+                     kernels::QsaKvSplit split = kernels::QsaKvSplit::heads);
 };
 
 }  // namespace xenithium::arch::qwen38

@@ -43,6 +43,10 @@ ModelOptions model_options(const serve::Options &o, const model::ModelConfig &cf
   mo.context = o.context;
   mo.yarn_tiers = o.yarn_tiers == "on";  // YaRN per request past the trained positions
   mo.kv = o.kv == "bf16" ? kernels::QsaKv::bf16 : o.kv == "int8-v4" ? kernels::QsaKv::i8v4 : kernels::QsaKv::i8;
+  if (o.kv_split == "tokens" && o.tp != 4)  // two cards per kv head: four cards (2 kv heads)
+    throw serve::OptionError("--kv-split tokens: the two cards of a kv head split its tokens, so it needs four cards (--tp 4); at --tp " +
+                             std::to_string(o.tp) + " each card holds whole kv heads");
+  mo.kv_split = o.kv_split == "tokens" ? kernels::QsaKvSplit::tokens : kernels::QsaKvSplit::heads;
   // The MTP layer's KV in the target's dtype; its KV per token as a target QSA layer's (bf16: 1,088 B per card).
   mo.mtp_kv = mo.kv;
   mo.hot = o.hot > 0 ? o.hot : -1;  // 0 = measured from the free VRAM
@@ -129,6 +133,7 @@ std::string plan(const serve::Options &o, const model::ModelConfig &cfg, std::st
   model::DeployParams p;
   const int cards = o.tp;  // TP1, TP2 or TP4
   p.cards = cards, p.context = o.context, p.seqs = o.slots, p.kv_bytes = o.kv == "bf16" ? 2 : 1, p.kv_v4 = o.kv == "int8-v4", p.drafter = !mo.mtp_dir.empty();
+  p.kv_shard = mo.kv_split == kernels::QsaKvSplit::tokens ? model::DeployParams::KvShard::tokens : model::DeployParams::KvShard::heads;
   const model::Budget b = arch->budget(ck, p);
   serve::MemPlan m;
   m.arch = "qwen38", m.exact = false, m.cards = cards, m.card_gib = p.vram_gib;

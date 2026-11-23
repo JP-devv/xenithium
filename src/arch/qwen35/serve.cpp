@@ -29,6 +29,8 @@ serve::Options resolve(serve::Options o, std::string_view arch_id) {
   const bool llama = arch_id == "llama", flint = arch_id == "flint";
   if (o.kv == "int8-v4" && (llama || flint))  // the 4-bit V cache: qwen38's QSA kernels + the 27B's
     throw serve::OptionError("--kv int8-v4: K int8 + V int4 is built for qwen38's and the dense 27B's attention; arch " + std::string(arch_id) + " takes int8|bf16");
+  if (o.kv_split != "heads")  // qwen38's QSA kernels on four cards
+    throw serve::OptionError("--kv-split tokens: the KV split by tokens is built for qwen38 on four cards; arch " + std::string(arch_id) + " takes heads");
   const bool kv8 = o.kv != "bf16";  // int8 K codes (int8 or int8-v4)
   if (o.kv == "int8-v4" && o.prefill_attn == "onednn")
     throw serve::OptionError("--kv int8-v4: oneDNN's attention (--prefill-attn onednn) takes int8|bf16 KV");

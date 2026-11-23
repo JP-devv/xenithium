@@ -221,18 +221,24 @@ k::DenseWeights i8_matrix(xenithium::Fabric &f, int c, const std::vector<float> 
 constexpr int kCap = 4096;  // tokens of the test cache
 
 // pool_mul: physical pages = pool_mul x logical; perm: random page table (else identity); cap: tokens per slot.
-Card make_card(xenithium::Fabric &f, int c, const Model &m, int cards, k::QsaKv kv, int pool_mul, bool perm, uint32_t seed, int cap = kCap) {
+// split: the KV split by tokens (four cards; qsa.hpp): the partner's q rows, half pages, the tree step area, the pair's
+// mailbox (link_cards wires the peers).
+Card make_card(xenithium::Fabric &f, int c, const Model &m, int cards, k::QsaKv kv, int pool_mul, bool perm, uint32_t seed, int cap = kCap,
+               bool split = false) {
   Card d;
   d.q = &f.compute(c);
   d.s = m.s;
   d.s.cards = cards;
   d.s.card = c;
   d.s.kv = kv;
+  d.s.split = split ? k::QsaKvSplit::tokens : k::QsaKvSplit::heads;
   const auto &s = d.s;
   const int H = s.hidden, D = 256, hq = s.hq(), hkv = s.hkv();
   std::vector<float> qkv;
   auto rows_of = [&](int r0, int n) { qkv.insert(qkv.end(), m.qkv.begin() + static_cast<size_t>(r0) * H, m.qkv.begin() + static_cast<size_t>(r0 + n) * H); };
   rows_of(c * hq * 2 * D, hq * 2 * D);
+  if (s.kv_ways() > 1)  // the partner's (card ^ 1) q heads, without their gates
+    for (int j = 0; j < hq; ++j) rows_of(((c ^ 1) * hq + j) * 2 * D, D);
   rows_of(m.s.q_n() + s.kv0() * D, hkv * D);  // this card's kv heads (TP4's pair of cards share one)
   rows_of(m.s.q_n() + m.s.kv_heads * D + s.kv0() * D, hkv * D);
   d.w.qkv = i8_matrix(f, c, qkv, s.qkv_n(), H, d.qkv_deq, d.mem);
@@ -261,10 +267,13 @@ Card make_card(xenithium::Fabric &f, int c, const Model &m, int cards, k::QsaKv 
     std::copy(all.begin(), all.begin() + lp, d.pages.begin());
   }
   const size_t P = d.pool_pages;
-  d.c.k = static_cast<uint8_t *>(d.dev(f, c, P * k::qsa_page_kv_bytes(s)));
-  d.c.v = static_cast<uint8_t *>(d.dev(f, c, P * k::qsa_page_v_bytes(s)));
-  d.c.ks = static_cast<float *>(d.dev(f, c, P * k::qsa_page_scale_floats(s) * 4));
-  d.c.vs = static_cast<float *>(d.dev(f, c, P * k::qsa_page_vscale_floats(s) * 4));
+  // the split's tree step area: rows past the pool's (the same arrays)
+  const size_t area = s.kv_ways() > 1 ? static_cast<size_t>(k::kQsaTreeAreaRows) * hkv : 0, prow = static_cast<size_t>(hkv) * s.page_tokens();
+  d.c.k = static_cast<uint8_t *>(d.dev(f, c, P * k::qsa_page_kv_bytes(s) + area * 256 * s.kv_elem()));
+  d.c.v = static_cast<uint8_t *>(d.dev(f, c, P * k::qsa_page_v_bytes(s) + area * s.v_row_bytes()));
+  d.c.ks = static_cast<float *>(d.dev(f, c, (P * k::qsa_page_scale_floats(s) + area) * 4));
+  d.c.vs = static_cast<float *>(d.dev(f, c, (P * k::qsa_page_vscale_floats(s) + area * s.v_scale_bytes() / 4) * 4));
+  if (area) d.c.tree_row0 = static_cast<int>(P * prow);
   d.c.kc = static_cast<bf16 *>(d.dev(f, c, P * k::qsa_page_kc_elems() * 2));
   d.c.ring = static_cast<bf16 *>(d.dev(f, c, k::kQsaRing * 128 * 2));
   d.c.pages = up(f, c, d.pages, d.mem);
@@ -279,7 +288,7 @@ Card make_card(xenithium::Fabric &f, int c, const Model &m, int cards, k::QsaKv 
   constexpr size_t kR = k::kStepRows32;  // the 32-row shape's rows
   sc.y = static_cast<float *>(d.dev(f, c, kR * d.w.qkv.n * 4));
   sc.yi = static_cast<float *>(d.dev(f, c, kR * d.w.idx.n * 4));
-  sc.q = static_cast<bf16 *>(d.dev(f, c, kR * hq * D * 2));
+  sc.q = static_cast<bf16 *>(d.dev(f, c, kR * s.attn_hq() * D * 2));
   sc.iq = static_cast<bf16 *>(d.dev(f, c, kR * 4 * 128 * 2));
   sc.nblk = static_cast<int32_t *>(d.dev(f, c, kR * 4));
   sc.score = static_cast<uint32_t *>(d.dev(f, c, k::qsa_score_words(cap, static_cast<int>(kR)) * 4));
@@ -305,7 +314,28 @@ Card make_card(xenithium::Fabric &f, int c, const Model &m, int cards, k::QsaKv 
     k::pair_wire_init(*d.q, H, d.wire.inbox, cards).wait();
     d.q->memset(d.wire.error, 0, 4).wait();
   }
+  if (s.kv_ways() > 1) {
+    sc.pend = static_cast<float *>(d.dev(f, c, k::qsa_pair_floats(static_cast<int>(kR), hq) * 4));
+    sc.pair.inbox = static_cast<uint32_t *>(f.alloc_mailbox(c, k::qsa_pair_words(static_cast<int>(kR), hq) * 4));
+    d.mem.push_back(sc.pair.inbox);
+    sc.pair.error = d.wire.error;
+    sc.pair.rows_max = static_cast<int>(kR);
+    k::qsa_pair_init(*d.q, sc.pair.inbox, static_cast<int>(kR), hq).wait();
+  }
   return d;
+}
+// The cards' wires: the two-card peer or the four-card quad, and the split's pair mailboxes (card ^ 1).
+void link_cards(std::vector<Card> &d) {
+  const int C = static_cast<int>(d.size());
+  for (int c = 0; c < C && C > 1; ++c) {
+    if (C == 2) {
+      d[c].wire.peer_inbox = d[1 - c].wire.inbox;
+    } else {
+      d[c].wire.quad.card = c;
+      for (int o = 0; o < C; ++o) d[c].wire.quad.inbox[o] = d[o].wire.inbox;
+    }
+    if (d[c].s.kv_ways() > 1) d[c].sc.pair.peer_inbox = d[c ^ 1].sc.pair.inbox;
+  }
 }
 void free_card(xenithium::Fabric &f, Card &d) {
   for (void *p : d.mem) f.release(p);
@@ -677,6 +707,106 @@ void test_cards(xenithium::Fabric &f, const Model &m, k::QsaKv kv, const char *t
   free_card(f, one);
 }
 
+// Four cards with the KV split by tokens (qsa.hpp): the same plan as test_cards. The two-level softmax merge rounds
+// differently from one card's, so attn is held to a bound; the rest is exact: every card's out identical, the
+// selection == one card's, and each card's half pages hold exactly one card's K / V / scales of its kv head at the
+// positions it owns (p % 2 == card % 2).
+void test_cards_split(xenithium::Fabric &f, const Model &m, k::QsaKv kv, const char *tag) {
+  const int C = static_cast<int>(f.size());
+  const std::string who = std::string(tag) + ", four cards, KV split by tokens";
+  const auto plan = make_plan(2300, 91);
+  Card one = make_card(f, 0, m, 1, kv, 1, false, 0);
+  std::vector<Card> d;
+  for (int c = 0; c < C; ++c) d.push_back(make_card(f, c, m, C, kv, 1, false, 0, kCap, true));
+  link_cards(d);
+  const int H = m.s.hidden, qks = k::dense_auto_ksplit(d[0].w.qkv.n, H);
+  const Trace t1 = run_plan(one, m, plan, 3000, qks, {}, nullptr, nullptr, nullptr, nullptr);
+  bool same = true, seq = true;
+  BoundCmp ca;
+  for (size_t i = 0; i < plan.size(); ++i) {
+    const auto &st = plan[i];
+    const auto xb = bits(make_x(H, 3000 + static_cast<uint32_t>(i)));
+    for (int c = 0; c < C; ++c) {
+      d[c].sc.pair_parity = static_cast<int>(i & 1);
+      run_step(d[c], st, xb, &d[c].wire, static_cast<int>(i & 1), qks);
+    }
+    for (int c = 0; c < C; ++c) d[c].q->wait_and_throw();
+    const int R = st.rows;
+    const auto a = rd16(*d[0].q, d[0].out, static_cast<size_t>(R) * H);
+    for (int c = 1; c < C; ++c) same &= rd16(*d[c].q, d[c].out, a.size()) == a;
+    for (int c = 0; c < C; ++c) {
+      const int ok_ = d[c].s.o_k(), o1 = one.s.o_k();
+      const auto at = rd16(*d[c].q, d[c].sc.attn, static_cast<size_t>(R) * ok_);
+      for (int r = 0; r < R; ++r) {
+        std::vector<float> ref(static_cast<size_t>(ok_));
+        for (int j = 0; j < ok_; ++j) ref[j] = k::bf16_value(t1.attn[i][static_cast<size_t>(r) * o1 + c * ok_ + j]);
+        ca.add_rowf(&at[static_cast<size_t>(r) * ok_], ref.data(), ok_);
+      }
+      const auto sl = rd(*d[c].q, d[c].sc.sel, 4ull * 512);
+      const auto sn = rd(*d[c].q, d[c].sc.sel_n, 4);
+      std::vector<int32_t> sv;
+      for (int r = 0; r < R; ++r) {
+        sv.push_back(sn[r]);
+        sv.insert(sv.end(), sl.begin() + r * 512, sl.begin() + r * 512 + sn[r]);
+      }
+      seq &= sv == t1.sel[i];
+    }
+  }
+  // K / V: card c's half pages hold its positions' rows of kv head c / 2 (every row of the pages written, none past
+  // them), byte for byte one card's: codes, scales (the projections' rows quantise per row, so the matrix the GEMM runs
+  // in does not move them)
+  bool covered = true, kv_eq = true;
+  const int last = plan.back().pos + plan.back().rows;  // positions [0, last) written (and kept)
+  int reach = 0;  // positions [0, reach) written at some step (speculative rows run past the kept ones)
+  for (const auto &st : plan) reach = std::max(reach, st.pos + st.rows);
+  const auto &s1 = one.s;
+  const int krow = 256 * s1.kv_elem(), vrow = s1.v_row_bytes(), vsb = s1.v_scale_bytes();
+  const size_t P1 = one.pool_pages;
+  const auto k1 = rd(*one.q, one.c.k, P1 * k::qsa_page_kv_bytes(s1)), v1 = rd(*one.q, one.c.v, P1 * k::qsa_page_v_bytes(s1));
+  const auto ks1 = rd(*one.q, reinterpret_cast<const uint8_t *>(one.c.ks), P1 * k::qsa_page_scale_floats(s1) * 4);
+  const auto vs1 = rd(*one.q, reinterpret_cast<const uint8_t *>(one.c.vs), P1 * k::qsa_page_vscale_floats(s1) * 4);
+  int pages_seen = 0;
+  for (int c = 0; c < C; ++c) {
+    const auto &s = d[c].s;
+    const size_t P = d[c].pool_pages;
+    const auto kc = rd(*d[c].q, d[c].c.k, P * k::qsa_page_kv_bytes(s)), vc = rd(*d[c].q, d[c].c.v, P * k::qsa_page_v_bytes(s));
+    const auto ksc = rd(*d[c].q, reinterpret_cast<const uint8_t *>(d[c].c.ks), P * k::qsa_page_scale_floats(s) * 4);
+    const auto vsc = rd(*d[c].q, reinterpret_cast<const uint8_t *>(d[c].c.vs), P * k::qsa_page_vscale_floats(s) * 4);
+    pages_seen += s.page_tokens() == 32 && k::qsa_page_kv_bytes(s) == 32ull * krow;  // one kv head, 32 tokens a page
+    const int kh = s.kv0();
+    for (int t = s.kv_side(); t < (reach + 63) / 64 * 64; t += 2) {
+      const size_t scl = static_cast<size_t>(d[c].pages[t / 64]) * 32 + t % 64 / 2;
+      const bool poison = std::all_of(kc.begin() + scl * krow, kc.begin() + (scl + 1) * krow, [](uint8_t b) { return b == 0xA5; });
+      covered &= t < reach ? !poison : poison;
+      if (t >= last) continue;
+      const size_t s1l = (static_cast<size_t>(one.pages[t / 64]) * s1.hkv() + kh) * 64 + t % 64;
+      kv_eq &= std::equal(kc.begin() + scl * krow, kc.begin() + (scl + 1) * krow, k1.begin() + s1l * krow);
+      kv_eq &= std::equal(vc.begin() + scl * vrow, vc.begin() + (scl + 1) * vrow, v1.begin() + s1l * vrow);
+      if (k::qsa_kv_scaled(kv)) {
+        kv_eq &= std::equal(ksc.begin() + scl * 4, ksc.begin() + (scl + 1) * 4, ks1.begin() + s1l * 4);
+        kv_eq &= std::equal(vsc.begin() + scl * vsb, vsc.begin() + (scl + 1) * vsb, vs1.begin() + s1l * vsb);
+      }
+    }
+  }
+  uint32_t err = 0;
+  for (int c = 0; c < C; ++c) {
+    uint32_t e = 0;
+    d[c].q->memcpy(&e, d[c].wire.error, 4).wait();
+    err |= e;
+  }
+  char what[640];
+  std::snprintf(what, sizeof what, "%s, %zu steps: every card's out bit-identical; selection == one card's; no mailbox timeout", who.c_str(), plan.size());
+  expect(same && seq && !err, what);
+  std::snprintf(what, sizeof what, "%s: each card's attn vs the one-card attn of its heads: %s", who.c_str(), ca.text().c_str());
+  expect(ca.ok(1.0 / 64, 0.02), what);
+  std::snprintf(what, sizeof what,
+                "%s: half pages, each card's rows = its positions (written up to the end, none past); K / V / scales == one card's of its kv head, byte "
+                "for byte", who.c_str());
+  expect(covered && kv_eq && pages_seen == C, what);
+  for (auto &x : d) free_card(f, x);
+  free_card(f, one);
+}
+
 // Four cards, the 4-row steps by owner rows (each card scores and selects its row,
 // owner_share sends its sel row to the other cards) against every card selecting every row (test_cards' run): every
 // card's selection, attn and out bit for bit, on the same plan past 2,048 tokens (selects from step ~512 blocks).
@@ -934,7 +1064,9 @@ void test_rows(xenithium::Fabric &f, const Model &m, k::QsaKv kv, int p0, int M,
 // against one card's qsa_rows on the same rows: each card's o_proj input == the one-card rows of its heads bit for bit
 // (the decode's tiling and the 8-tile prefill attention), every card's out identical, the two cards of a kv head the
 // same K / V pools. Integer data (make_int_model): the projections are exact on any split.
-void test_rows_cards(xenithium::Fabric &f, k::QsaKv kv, int p0, int M) {
+// split: the KV split by tokens (the two-level merge: attn held to a bound; each card's half pages == one card's rows at
+// the positions it owns).
+void test_rows_cards(xenithium::Fabric &f, k::QsaKv kv, int p0, int M, bool split = false) {
   const Model m = make_int_model(2560, 29);
   const int C = static_cast<int>(f.size()), H = m.s.hidden, B = k::kQsaRowsBatch, R4 = M + 4;
   std::mt19937 rng(7300u + p0 + M);
@@ -950,7 +1082,7 @@ void test_rows_cards(xenithium::Fabric &f, k::QsaKv kv, int p0, int M) {
   };
   auto setup = [&](int c, int cards) {
     Run r;
-    r.d = make_card(f, c, m, cards, kv, 1, false, 0);
+    r.d = make_card(f, c, m, cards, kv, 1, false, 0, kCap, split && cards > 1);
     const auto &s = r.d.s;
     auto dev = [&](size_t bytes) { return r.d.dev(f, c, bytes); };
     auto &rs = r.rs;
@@ -958,7 +1090,7 @@ void test_rows_cards(xenithium::Fabric &f, k::QsaKv kv, int p0, int M) {
     rs.yi = static_cast<float *>(dev(static_cast<size_t>(R4) * r.d.w.idx.n * 4));
     rs.attn = static_cast<bf16 *>(dev(static_cast<size_t>(R4) * s.o_k() * 2));
     rs.partial = static_cast<float *>(dev(static_cast<size_t>(M) * H * 4));
-    rs.q = static_cast<bf16 *>(dev(static_cast<size_t>(R4) * s.hq() * 256 * 2));
+    rs.q = static_cast<bf16 *>(dev(static_cast<size_t>(R4) * s.attn_hq() * 256 * 2));
     rs.iq = static_cast<bf16 *>(dev(static_cast<size_t>(R4) * 4 * 128 * 2));
     rs.nblk = static_cast<int32_t *>(dev(static_cast<size_t>(R4) * 4));
     rs.sel = static_cast<int32_t *>(dev(static_cast<size_t>(R4) * 512 * 4));
@@ -981,6 +1113,14 @@ void test_rows_cards(xenithium::Fabric &f, k::QsaKv kv, int p0, int M) {
       r.wire.error = r.d.wire.error;
       r.wire.rows_max = M, r.wire.n_max = H;
     }
+    if (s.kv_ways() > 1) {
+      rs.pend = static_cast<float *>(dev(k::qsa_pair_floats(M, s.hq()) * 4));
+      rs.pair.inbox = static_cast<uint32_t *>(f.alloc_mailbox(c, k::qsa_pair_words(M, s.hq()) * 4));
+      r.d.mem.push_back(rs.pair.inbox);
+      rs.pair.error = r.d.wire.error;
+      rs.pair.rows_max = M;
+      k::qsa_pair_init(*r.d.q, rs.pair.inbox, M, s.hq()).wait();
+    }
     return r;
   };
   Run one = setup(0, 1);
@@ -989,6 +1129,10 @@ void test_rows_cards(xenithium::Fabric &f, k::QsaKv kv, int p0, int M) {
   for (int c = 0; c < C; ++c) {
     d[c].wire.quad.card = c;
     for (int o = 0; o < C; ++o) d[c].wire.quad.inbox[o] = d[o].wire.quad.inbox[o];
+    if (split) {
+      d[c].d.sc.pair.peer_inbox = d[c ^ 1].d.sc.pair.inbox;
+      d[c].rs.pair.peer_inbox = d[c ^ 1].rs.pair.inbox;
+    }
   }
   auto history = [&](Run &r, const k::PairWire *w, int &par) {
     for (int p = 0; p < p0; p += 4) {
@@ -1006,6 +1150,7 @@ void test_rows_cards(xenithium::Fabric &f, k::QsaKv kv, int p0, int M) {
     const std::vector<uint16_t> xr(X.begin() + static_cast<size_t>(p0) * H, X.begin() + static_cast<size_t>(p0 + M) * H);
     for (Run *r : runs) {
       r->d.q->memcpy(r->xc, xr.data(), xr.size() * 2).wait();
+      r->rs.pair_parity = rows_par;
       k::qsa_rows(*r->d.q, r->d.s, M, r->xc, r->d.w, r->d.c, r->d.rope, r->wd, 2, p0, r->d.sc, r->rs, runs.size() > 1 ? &r->wire : nullptr, rows_par, r->out);
     }
     for (Run *r : runs) r->d.q->wait_and_throw();
@@ -1014,6 +1159,7 @@ void test_rows_cards(xenithium::Fabric &f, k::QsaKv kv, int p0, int M) {
   const char *pf_env = std::getenv("XEN_QSA_PF_TILES");
   const std::string pf_keep = pf_env ? pf_env : "";
   bool attn_eq = true, out_eq = true, kv_eq = true;
+  BoundCmp split_cmp;
   for (const bool tiles1 : {true, false}) {
     int p1 = 0;
     history(one, nullptr, p1);
@@ -1030,7 +1176,9 @@ void test_rows_cards(xenithium::Fabric &f, k::QsaKv kv, int p0, int M) {
         const auto &st = Step{p, rows, 0};
         d[c].d.q->memcpy(d[c].d.x, xb.data(), xb.size() * 2).wait();
         d[c].d.q->memcpy(d[c].d.pos, &st.pos, 4).wait();
-        k::qsa_decode(*d[c].d.q, d[c].d.s, rows, d[c].d.x, d[c].d.w, d[c].d.c, d[c].d.rope, k::QsaStep{d[c].d.pos, p + rows}, d[c].d.sc, &w, par[c], d[c].d.out, 0);
+        k::QsaScratch sc = d[c].d.sc;
+        sc.pair_parity = par[c];
+        k::qsa_decode(*d[c].d.q, d[c].d.s, rows, d[c].d.x, d[c].d.w, d[c].d.c, d[c].d.rope, k::QsaStep{d[c].d.pos, p + rows}, sc, &w, par[c], d[c].d.out, 0);
         par[c] ^= 1;
       }
       for (int c = 0; c < C; ++c) d[c].d.q->wait_and_throw();
@@ -1045,14 +1193,39 @@ void test_rows_cards(xenithium::Fabric &f, k::QsaKv kv, int p0, int M) {
     for (int c = 0; c < C; ++c) {
       const int ok_ = d[c].d.s.o_k();
       const auto ac = rd(*d[c].d.q, reinterpret_cast<const uint16_t *>(d[c].rs.attn), static_cast<size_t>(M) * ok_);
-      for (int r = 0; r < M; ++r)
-        attn_eq &= std::equal(ac.begin() + static_cast<size_t>(r) * ok_, ac.begin() + static_cast<size_t>(r + 1) * ok_, a1.begin() + static_cast<size_t>(r) * o1 + c * ok_);
+      for (int r = 0; r < M; ++r) {
+        if (split) {
+          std::vector<float> dv(static_cast<size_t>(ok_)), rv(static_cast<size_t>(ok_));
+          for (int j = 0; j < ok_; ++j) {
+            dv[j] = k::bf16_value(ac[static_cast<size_t>(r) * ok_ + j]);
+            rv[j] = k::bf16_value(a1[static_cast<size_t>(r) * o1 + c * ok_ + j]);
+          }
+          split_cmp.add_rowf(dv.data(), rv.data(), ok_);
+        } else {
+          attn_eq &= std::equal(ac.begin() + static_cast<size_t>(r) * ok_, ac.begin() + static_cast<size_t>(r + 1) * ok_, a1.begin() + static_cast<size_t>(r) * o1 + c * ok_);
+        }
+      }
       out_eq &= rd16(*d[c].d.q, d[c].out, out0.size()) == out0;
     }
     const size_t P = d[0].d.pool_pages;
-    for (int c = 0; c + 1 < C; c += 2)
-      kv_eq &= rd(*d[c].d.q, d[c].d.c.k, P * k::qsa_page_kv_bytes(d[c].d.s)) == rd(*d[c + 1].d.q, d[c + 1].d.c.k, P * k::qsa_page_kv_bytes(d[c + 1].d.s)) &&
-               rd(*d[c].d.q, d[c].d.c.v, P * k::qsa_page_v_bytes(d[c].d.s)) == rd(*d[c + 1].d.q, d[c + 1].d.c.v, P * k::qsa_page_v_bytes(d[c + 1].d.s));
+    if (split) {  // each card's half pages == one card's rows of its kv head at the positions it owns
+      const auto &s1 = one.d.s;
+      const int krow = 256 * s1.kv_elem(), vrow = s1.v_row_bytes();
+      const auto k1 = rd(*one.d.q, one.d.c.k, P * k::qsa_page_kv_bytes(s1)), v1 = rd(*one.d.q, one.d.c.v, P * k::qsa_page_v_bytes(s1));
+      for (int c = 0; c < C; ++c) {
+        const auto kc = rd(*d[c].d.q, d[c].d.c.k, P * k::qsa_page_kv_bytes(d[c].d.s)), vc = rd(*d[c].d.q, d[c].d.c.v, P * k::qsa_page_v_bytes(d[c].d.s));
+        for (int t = d[c].d.s.kv_side(); t < p0 + M; t += 2) {
+          const size_t s1l = (static_cast<size_t>(one.d.pages[t / 64]) * 2 + d[c].d.s.kv0()) * 64 + t % 64;
+          const size_t scl = static_cast<size_t>(d[c].d.pages[t / 64]) * 32 + t % 64 / 2;
+          kv_eq &= std::equal(kc.begin() + scl * krow, kc.begin() + (scl + 1) * krow, k1.begin() + s1l * krow) &&
+                   std::equal(vc.begin() + scl * vrow, vc.begin() + (scl + 1) * vrow, v1.begin() + s1l * vrow);
+        }
+      }
+    } else {
+      for (int c = 0; c + 1 < C; c += 2)
+        kv_eq &= rd(*d[c].d.q, d[c].d.c.k, P * k::qsa_page_kv_bytes(d[c].d.s)) == rd(*d[c + 1].d.q, d[c + 1].d.c.k, P * k::qsa_page_kv_bytes(d[c + 1].d.s)) &&
+                 rd(*d[c].d.q, d[c].d.c.v, P * k::qsa_page_v_bytes(d[c].d.s)) == rd(*d[c + 1].d.q, d[c + 1].d.c.v, P * k::qsa_page_v_bytes(d[c + 1].d.s));
+    }
   }
   if (pf_env) setenv("XEN_QSA_PF_TILES", pf_keep.c_str(), 1);
   else unsetenv("XEN_QSA_PF_TILES");
@@ -1062,12 +1235,20 @@ void test_rows_cards(xenithium::Fabric &f, k::QsaKv kv, int p0, int M) {
     d[c].d.q->memcpy(&e, d[c].d.wire.error, 4).wait();
     err |= e;
   }
-  char what[400];
-  std::snprintf(what, sizeof what,
-                "integer data, %s KV, four cards, qsa_rows %d rows at %d (decode tiling and 8-tile): each card's o_proj input == the one-card rows of its "
-                "heads, bit for bit; every card's out identical; a kv head's two cards the same K / V; no mailbox timeout",
-                kv_name(kv), M, p0);
-  expect(attn_eq && out_eq && kv_eq && err == 0, what);
+  char what[480];
+  if (split) {
+    std::snprintf(what, sizeof what,
+                  "integer data, %s KV, four cards, KV split by tokens, qsa_rows %d rows at %d (decode tiling and 8-tile): each card's o_proj input vs the "
+                  "one-card rows of its heads: %s; every card's out identical; each card's half pages == one card's K / V at its positions; no mailbox timeout",
+                  kv_name(kv), M, p0, split_cmp.text().c_str());
+    expect(split_cmp.ok(1.0 / 64, 0.02) && out_eq && kv_eq && err == 0, what);
+  } else {
+    std::snprintf(what, sizeof what,
+                  "integer data, %s KV, four cards, qsa_rows %d rows at %d (decode tiling and 8-tile): each card's o_proj input == the one-card rows of its "
+                  "heads, bit for bit; every card's out identical; a kv head's two cards the same K / V; no mailbox timeout",
+                  kv_name(kv), M, p0);
+    expect(attn_eq && out_eq && kv_eq && err == 0, what);
+  }
   for (auto &r : d) free_card(f, r.d);
   free_card(f, one.d);
 }
@@ -1352,19 +1533,12 @@ void fill_random(Card &d, const k::QsaCache &c, size_t pages, uint32_t seed) {
 }
 
 // the fabric's first `C` cards
-TreeRig make_tree_rig(xenithium::Fabric &f, int C, const Model &m, k::QsaKv kv) {
+TreeRig make_tree_rig(xenithium::Fabric &f, int C, const Model &m, k::QsaKv kv, bool split = false) {
   TreeRig g;
   g.f = &f;
   g.lp = kTreeCap / k::kQsaPage;
-  for (int c = 0; c < C; ++c) g.d.push_back(make_card(f, c, m, C, kv, kTreeSlots, false, 0, kTreeCap));
-  for (int c = 0; c < C && C > 1; ++c) {
-    if (C == 2) {
-      g.d[c].wire.peer_inbox = g.d[1 - c].wire.inbox;
-    } else {
-      g.d[c].wire.quad.card = c;
-      for (int o = 0; o < C; ++o) g.d[c].wire.quad.inbox[o] = g.d[o].wire.inbox;
-    }
-  }
+  for (int c = 0; c < C; ++c) g.d.push_back(make_card(f, c, m, C, kv, kTreeSlots, false, 0, kTreeCap, split));
+  link_cards(g.d);
   const size_t P = static_cast<size_t>(kTreeSlots) * g.lp;  // the pool: every slot's pages, shuffled
   g.table.resize(P);
   std::iota(g.table.begin(), g.table.end(), 0);
@@ -1378,7 +1552,8 @@ TreeRig make_tree_rig(xenithium::Fabric &f, int C, const Model &m, k::QsaKv kv) 
     cc.tkc = static_cast<bf16 *>(d.dev(f, c, k::kQsaTreeKcElems * 2));
     g.c.push_back(cc);
     g.rec.push_back(static_cast<int32_t *>(d.dev(f, c, k::kMaxSegs * k::kSegRec * 4)));
-    fill_random(d, cc, P, 500u + static_cast<uint32_t>(d.s.kv0()) + 17u * static_cast<uint32_t>(kv));
+    // (a kv head's two cards: the same history; with the split each stores its own half of it)
+    fill_random(d, cc, P, 500u + static_cast<uint32_t>(d.s.kv0()) + 17u * static_cast<uint32_t>(kv) + 1000u * static_cast<uint32_t>(d.s.kv_side()));
     auto keep = [&](void *live, size_t bytes) {
       void *copy = d.dev(f, c, bytes);
       d.q->memcpy(copy, live, bytes).wait();
@@ -1418,7 +1593,9 @@ TreeOut tree_step(TreeRig &g, const std::vector<TreeSeg> &segs, int code, const 
     Card &d = g.d[c];
     d.q->memcpy(g.rec[c], w.data(), w.size() * 4);
     d.q->memcpy(d.x, xb.data(), xb.size() * 2);
-    k::qsa_decode(*d.q, d.s, rows, d.x, d.w, g.c[c], d.rope, k::QsaStep{g.rec[c], bound, k::kSegRec, code, tree}, d.sc, C > 1 ? &d.wire : nullptr,
+    k::QsaScratch sc = d.sc;
+    sc.pair_parity = g.parity;
+    k::qsa_decode(*d.q, d.s, rows, d.x, d.w, g.c[c], d.rope, k::QsaStep{g.rec[c], bound, k::kSegRec, code, tree}, sc, C > 1 ? &d.wire : nullptr,
                   g.parity, d.out);
   }
   g.parity ^= 1;
@@ -1454,7 +1631,7 @@ std::vector<uint8_t> path_state(TreeRig &g, int card, int slot, int p0, int n) {
   const auto &s = d.s;
   const int hkv = s.hkv(), krow = 256 * s.kv_elem(), vrow = s.v_row_bytes(), vsb = s.v_scale_bytes();
   const bool scaled = k::qsa_kv_scaled(s.kv);
-  const int t0 = std::max(0, p0 - 3), t1 = p0 + n;
+  const int t0 = std::max(0, p0 - 3), t1 = p0 + n, ways = s.kv_ways(), ptok = s.page_tokens();
   auto page_of = [&](int t) { return static_cast<size_t>(g.table[static_cast<size_t>(slot) * g.lp + t / k::kQsaPage]); };
   std::vector<uint8_t> st;
   auto take = [&](const void *base, size_t off, size_t bytes) {
@@ -1463,7 +1640,8 @@ std::vector<uint8_t> path_state(TreeRig &g, int card, int slot, int p0, int n) {
   };
   for (int t = t0; t < t1; ++t)
     for (int h = 0; h < hkv; ++h) {
-      const size_t sl = (page_of(t) * hkv + h) * k::kQsaPage + t % k::kQsaPage;
+      if (t % ways != s.kv_side()) continue;  // the split: the partner's position
+      const size_t sl = (page_of(t) * hkv + h) * ptok + t % k::kQsaPage / ways;
       take(c.k, sl * krow, krow);
       take(c.v, sl * vrow, vrow);
       if (scaled) {
@@ -1606,8 +1784,8 @@ void tree_report(const TreeTally &t, const std::string &who) {
 
 // Single tree segments at each context x p0 % 4 x shape, then mixed layouts, on the fabric's first C cards. contexts:
 // the first positions' bases.
-void test_trees(xenithium::Fabric &f, int C, const Model &m, k::QsaKv kv, const std::vector<int> &contexts, const char *tag) {
-  TreeRig g = make_tree_rig(f, C, m, kv);
+void test_trees(xenithium::Fabric &f, int C, const Model &m, k::QsaKv kv, const std::vector<int> &contexts, const char *tag, bool split = false) {
+  TreeRig g = make_tree_rig(f, C, m, kv, split);
   const std::string who = std::string(tag) + ", " + kv_name(kv) + " KV, " + std::to_string(C) + (C == 1 ? " card" : " cards");
   TreeTally t;
   uint32_t seed = 66000;
@@ -1734,6 +1912,11 @@ int main() {
       test_rows_cards(f4, k::QsaKv::i8, 2000, 300);
       test_rows_cards(f4, k::QsaKv::i8v4, 2000, 300);
       for (const k::QsaKv kv : {k::QsaKv::i8, k::QsaKv::bf16, k::QsaKv::i8v4}) test_trees(f4, 4, model, kv, {3000, 16400}, "trees");
+      // the KV split by tokens
+      for (const k::QsaKv kv : {k::QsaKv::i8, k::QsaKv::bf16, k::QsaKv::i8v4}) test_cards_split(f4, model, kv, kv_name(kv));
+      test_rows_cards(f4, k::QsaKv::i8, 2000, 300, true);
+      test_rows_cards(f4, k::QsaKv::i8v4, 2000, 300, true);
+      for (const k::QsaKv kv : {k::QsaKv::i8, k::QsaKv::i8v4}) test_trees(f4, 4, model, kv, {3000, 16400}, "trees, KV split by tokens", true);
     } else {
       std::printf("[SKIP] four-card QSA: %zu card(s) visible\n", loader.size());
     }

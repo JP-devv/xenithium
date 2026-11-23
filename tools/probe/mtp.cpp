@@ -82,6 +82,7 @@ int cmd_mtp_run(const std::string &model, const std::string &mtp, const std::str
   if (prompt_len <= 0 || prompt_len > len) prompt_len = len;
   const std::vector<int32_t> prompt(text.begin(), text.begin() + prompt_len);
   q38::ModelOptions mo;
+  mo.kv_split = g_kv_tokens ? xenithium::kernels::QsaKvSplit::tokens : xenithium::kernels::QsaKvSplit::heads;
   mo.prefill_moe_a8 = g_pf_moe_a8;
   mo.prefill_dense_a8 = g_pf_dense_a8 != 0;
   mo.prefill_dense_a8_row = g_pf_dense_a8 == 2;

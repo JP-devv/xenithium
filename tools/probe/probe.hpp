@@ -32,6 +32,7 @@ extern int g_dflash_wide;  // --dflash-wide N
 extern int g_dflash_tree_wide;  // --dflash-tree-wide N
 extern double g_dflash_cut;  // --dflash-cut X: DFlashOptions:conf_cut (0 = every draft; -1 = the default)
 extern bool g_kv_v4;  // --kv-v4 0|1: --kv-bytes 1 runs int8 K + int4 V (qwen38 / qsa
+extern bool g_kv_tokens;  // --kv-split heads|tokens: qwen38 TP4 ModelOptions::kv_split (true = tokens)
 extern int g_mtp_defer;  // --mtp-defer N: ModelOptions:mtp_kv_defer (0 = every KV-only pass runs; -1 = the default)
 extern bool g_pf_checks;  // --pf-checks 0|1: model35 --rows pf timing + continuation check
 extern int g_pf_merge_at;  // --pf-merge-at P (model35)

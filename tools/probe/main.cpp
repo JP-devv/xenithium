@@ -50,14 +50,14 @@
 // store --model DIR... [--dense 1] with --dense 1 the non-expert weights load first (the
 // arch's dense plan, int8 trunk) and the hot-expert count comes from the free VRAM left
 // after them minus the KV at the asked context and the reserve; then the dense spot checks
-// store --model DIR [--context N] [--seqs N] [--kv-bytes 1|2] [--drafter 0|1] [--hot N] [--verify 0|1]
+// store --model DIR [--context N] [--seqs N] [--kv-bytes 1|2] [--kv-split heads|tokens] [--drafter 0|1] [--hot N] [--verify 0|1]
 // every routed expert onto both cards (EP2, hot count from the arch budget unless --hot),
 // streamed layer by layer; prints the load phases and the per-card ledger, verifies every
 // blob by hash, and runs W4A16 on a hot and a cold (pinned host, read over PCIe) expert
 // per card against the raw-tensor reference
 // rank --model DIR --prompts F.jsonl --out F.xrc [--gen N] [--context N] a hot-expert ranking (XRC1) for a MoE
 // checkpoint (qwen38) from the decode routes of chat prompts (rank.cpp; scripts/make-hot-rank.sh)
-// model --model DIR [--ppl FILE] [--rows 1,4] [--generate N] [--at P] [--context N] [--kv-bytes 1|2] [--kv-v4 0|1] [--hot N] [--verify 0|1]
+// model --model DIR [--ppl FILE] [--rows 1,4] [--generate N] [--at P] [--context N] [--kv-bytes 1|2] [--kv-v4 0|1] [--kv-split heads|tokens] [--hot N] [--verify 0|1]
 // [--routes-out F] [--hot-rank F] [--reserve GIB] [--lp-out DIR] [--lp-ref F,F] [--bf16 PAT,PAT] [--moe-down-bf16 0|1] [--moe-dn-ks N] [--graphs 0|1]
 // [--moe-tp 0|1] [--hidden-out DIR] [--gen-out F] [--pf-chunk N] [--pf-moe-a8 0|1] [--pf-dense-a8 0|1|2] [--pf-wire fp32|bf16] [--dec-moe-a8 0|1] [--kv-pool N] [--kv-scramble 0|1] [--kv-lend 0|1] [--kv-lend-keep N] [--kv-lend-idle 0|1] [--moe-gu-ks N] [--gdn-scan 0|1] [--pf-cold-stage N] [--pf-route-trace F] [--pf-time-only 0|1] [--pf-sweep N,N]
 // the whole model on both cards (model.cpp): teacher-forced perplexity on a token file at
@@ -1837,6 +1837,10 @@ int main(int argc, char **argv) {
     else if (a == "--pf-merge-at") g_pf_merge_at = std::atoi(val);
     else if (a == "--mtp-defer") g_mtp_defer = std::atoi(val);
     else if (a == "--kv-v4") g_kv_v4 = std::atoi(val) != 0;
+    else if (a == "--kv-split") {
+      if (std::string(val) != "heads" && std::string(val) != "tokens") throw std::invalid_argument("--kv-split heads|tokens");
+      g_kv_tokens = std::string(val) == "tokens";
+    }
     else if (a == "--draft-conf") g_draft_conf = true, g_draft_conf_path = val;
     else if (a == "--seq-tokens") o.seq_tokens = v;
     else if (a == "--pf-prompt-len") o.pf_prompt_len = v;

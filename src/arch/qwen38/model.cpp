@@ -100,6 +100,8 @@ Model::Model(const l0::Loader &loader, Fabric &fab, const std::string &dir, cons
   if (nc_ == 1 && !opt.moe_tp) throw std::invalid_argument("qwen38 model: TP1 needs the expert TP layout (every expert whole on the card)");
   if (nc_ == 4 && !opt.moe_tp) throw std::invalid_argument("qwen38 model: TP4 needs the expert TP layout (every expert in quarters; there is no EP4)");
   if (nc_ != 2 && opt.calib) throw std::invalid_argument("qwen38 model: calibration runs at TP2");
+  if (opt.kv_split == k::QsaKvSplit::tokens && nc_ != kMaxCards)
+    throw std::invalid_argument("qwen38 model: the KV split by tokens needs four cards (TP4: the two cards of a kv head split its tokens)");
   const auto mc = model::ModelConfig::load(dir);
   const auto arch = model::open_arch(mc);
   cfg_ = Config::parse(mc);
@@ -135,7 +137,9 @@ Model::Model(const l0::Loader &loader, Fabric &fab, const std::string &dir, cons
 
   // ---- non-expert weights ----
   model::DeployParams p;
+  p.cards = nc_;
   p.context = cap_;
+  p.kv_shard = opt.kv_split == k::QsaKvSplit::tokens ? model::DeployParams::KvShard::tokens : model::DeployParams::KvShard::heads;
   p.kv_bytes = opt.kv == k::QsaKv::bf16 ? 2 : 1;
   p.kv_v4 = k::qsa_kv_v4(opt.kv);
   auto plan = arch->dense_plan(ck_, p);
@@ -205,7 +209,9 @@ Model::Model(const l0::Loader &loader, Fabric &fab, const std::string &dir, cons
   if (step_cap_ > k::kStepRows32 && (ms_.shape.rot || ms_.shape.a8 || !opt.moe_tp || opt.moe_cpu.mode != "off"))
     throw std::invalid_argument("qwen38 model: steps above 32 rows run the W4A16 experts tensor-parallel, without rotation and without the CPU path");
   gs_ = GdnSet::from(*dense_, cfg_, nc_);
-  qs_ = QsaSet::from(*dense_, cfg_, nc_, opt.kv);
+  qs_ = QsaSet::from(*dense_, cfg_, nc_, opt.kv, opt.kv_split);
+  qsa_ord_.assign(static_cast<size_t>(cfg_.layers), -1);
+  for (size_t i = 0; i < qs_.layers.size(); ++i) qsa_ord_[static_cast<size_t>(qs_.layers[i])] = static_cast<int>(i);
   ps_ = PleSet::from(*dense_, cfg_, nc_);
   if (head_->lora_ld() < hs_.down_ld) throw std::runtime_error("qwen38 model: head lora buffer narrower than a layer mixer's down output");
   if (opt.ple_dir.empty()) ple_tab_ = std::make_unique<PleTable>(ck_, cfg_, opt.ple_threads);
@@ -338,7 +344,7 @@ Model::Model(const l0::Loader &loader, Fabric &fab, const std::string &dir, cons
     auto &sc = K.qsc;
     sc.y = static_cast<float *>(dev(R8 * qw.qkv.n * 4));
     sc.yi = static_cast<float *>(dev(R8 * qw.idx.n * 4));
-    sc.q = static_cast<bf16 *>(dev(R8 * qsh.hq() * k::kQsaDim * 2));
+    sc.q = static_cast<bf16 *>(dev(R8 * qsh.attn_hq() * k::kQsaDim * 2));
     sc.iq = static_cast<bf16 *>(dev(R8 * k::kQsaIdxHeads * k::kQsaIdxDim * 2));
     sc.nblk = static_cast<int32_t *>(dev(R8 * 4));
     sc.score = static_cast<uint32_t *>(dev(k::qsa_score_words(static_cast<int>(cap_), Head::kRows) * 4));
@@ -350,6 +356,16 @@ Model::Model(const l0::Loader &loader, Fabric &fab, const std::string &dir, cons
     sc.part = static_cast<float *>(dev(k::qsa_part_floats(qsh, Head::kRows) * 4));
     sc.attn = static_cast<bf16 *>(dev(R8 * qsh.o_k() * 2));
     sc.partial = static_cast<float *>(dev(R8 * H * 4));
+    if (qsh.kv_ways() > 1) {  // the KV split by tokens: the pair's merge states and its mailbox (a region per QSA layer + the MTP layer's)
+      const int regions = static_cast<int>(qs_.layers.size()) + 1;
+      kv_pair_region_words_ = k::qsa_pair_words(static_cast<int>(R8), qsh.hq());
+      sc.pend = static_cast<float *>(dev(k::qsa_pair_floats(static_cast<int>(R8), qsh.hq()) * 4));
+      sc.pair.inbox = static_cast<uint32_t *>(fab.alloc_mailbox(c, kv_pair_region_words_ * regions * 4));
+      K.mem.push_back(sc.pair.inbox);
+      for (int g = 0; g < regions; ++g) k::qsa_pair_init(q, sc.pair.inbox + kv_pair_region_words_ * g, static_cast<int>(R8), qsh.hq());
+      sc.pair.error = K.pw.error;
+      sc.pair.rows_max = static_cast<int>(R8);
+    }
     // PLE
     const auto &psh = ps_.shape;
     K.ple_st.slot_elems = k::ple_ring_elems(psh);
@@ -509,7 +525,7 @@ Model::Model(const l0::Loader &loader, Fabric &fab, const std::string &dir, cons
         r.attn = static_cast<bf16 *>(dev((rows + 4) * static_cast<size_t>(qs_.shape_of(c).o_k()) * 2));
         r.partial = static_cast<float *>(dev(rows * H * 4));
         const size_t rr = rows + 4, B = k::kQsaRowsBatch;
-        r.q = static_cast<bf16 *>(dev(rr * qs_.shape_of(c).hq() * k::kQsaDim * 2));
+        r.q = static_cast<bf16 *>(dev(rr * qs_.shape_of(c).attn_hq() * k::kQsaDim * 2));
         r.iq = static_cast<bf16 *>(dev(rr * k::kQsaIdxHeads * k::kQsaIdxDim * 2));
         r.nblk = static_cast<int32_t *>(dev(rr * 4));
         r.sel = static_cast<int32_t *>(dev(rr * k::kQsaTopBlocks * 4));
@@ -519,6 +535,15 @@ Model::Model(const l0::Loader &loader, Fabric &fab, const std::string &dir, cons
         r.cand_id = static_cast<int32_t *>(dev(B * 16 * k::kQsaTopBlocks * 4));
         r.cand_n = static_cast<int32_t *>(dev(B * 16 * 4));
         r.part = static_cast<float *>(dev(k::qsa_part_floats(qs_.shape_of(c)) / k::kQsaRows * B * 4));
+        if (qsh.kv_ways() > 1) {  // the split's merge states and mailbox for a call's rows (lanes by row offset)
+          const int RR = static_cast<int>(rr);
+          r.pend = static_cast<float *>(dev(k::qsa_pair_floats(RR, qsh.hq()) * 4));
+          r.pair.inbox = static_cast<uint32_t *>(fab.alloc_mailbox(c, k::qsa_pair_words(RR, qsh.hq()) * 4));
+          K.mem.push_back(r.pair.inbox);
+          k::qsa_pair_init(q, r.pair.inbox, RR, qsh.hq());
+          r.pair.error = K.pw.error;
+          r.pair.rows_max = RR;
+        }
       }
       {
         const auto &psh = ps_.shape;
@@ -609,6 +634,10 @@ Model::Model(const l0::Loader &loader, Fabric &fab, const std::string &dir, cons
       Card &K = *cards_[static_cast<size_t>(c)];
       K.pw.quad = dq, K.mw.quad = mq, K.pf.pw.quad = rq;
       K.pw.quad.card = K.mw.quad.card = K.pf.pw.quad.card = c;
+      if (K.qsc.pair.inbox) {  // the KV split by tokens: the pair's mailboxes (card ^ 1)
+        K.qsc.pair.peer_inbox = cards_[static_cast<size_t>(c ^ 1)]->qsc.pair.inbox;
+        K.pf.qsa.pair.peer_inbox = cards_[static_cast<size_t>(c ^ 1)]->pf.qsa.pair.inbox;
+      }
       k::pair_wire_init(fab.compute(c), H, K.pw.inbox, nc_).wait();
       k::moe_wire_init(fab.compute(c), ms_.shape_of(c), K.mw.inbox).wait();
       k::pair_rows_wire_init(fab.compute(c), K.pf.pw.rows_max, K.pf.pw.n_max, K.pf.pw.inbox, nc_).wait();
@@ -1173,11 +1202,14 @@ void Model::kv_pool_alloc(int pool_pages) {
       return ptr;
     };
     auto pages = [&](k::QsaCache &cc, const k::QsaShape &s, std::vector<void *> &mem) {
-      cc.k = static_cast<uint8_t *>(dev(PP * k::qsa_page_kv_bytes(s), mem));
-      cc.v = static_cast<uint8_t *>(dev(PP * k::qsa_page_v_bytes(s), mem));
-      cc.ks = static_cast<float *>(dev(PP * k::qsa_page_scale_floats(s) * 4, mem));
-      cc.vs = static_cast<float *>(dev(PP * k::qsa_page_vscale_floats(s) * 4, mem));
+      // the KV split by tokens with draft trees: the tree step area's rows past the pool's (QsaCache::tree_row0)
+      const size_t area = s.kv_ways() > 1 && cc.tkc ? static_cast<size_t>(k::kQsaTreeAreaRows) * s.hkv() : 0;
+      cc.k = static_cast<uint8_t *>(dev(PP * k::qsa_page_kv_bytes(s) + area * k::kQsaDim * s.kv_elem(), mem));
+      cc.v = static_cast<uint8_t *>(dev(PP * k::qsa_page_v_bytes(s) + area * s.v_row_bytes(), mem));
+      cc.ks = static_cast<float *>(dev((PP * k::qsa_page_scale_floats(s) + area) * 4, mem));
+      cc.vs = static_cast<float *>(dev((PP * k::qsa_page_vscale_floats(s) + area * s.v_scale_bytes() / 4) * 4, mem));
       cc.kc = static_cast<bf16 *>(dev(PP * k::qsa_page_kc_elems() * 2, mem));
+      cc.tree_row0 = area ? static_cast<int>(PP * s.hkv() * s.page_tokens()) : -1;
     };
     Card &K = *cards_[static_cast<size_t>(c)];
     for (int l : qs_.layers) pages(K.qc[static_cast<size_t>(l)], qs_.shape_of(c), K.mem);
@@ -1191,6 +1223,16 @@ void Model::kv_pool_alloc(int pool_pages) {
     q.wait();
   }
   kvp_.clear_dirty();
+}
+
+k::QsaScratch Model::qsa_pair_region(const k::QsaScratch &sc, int region) const {
+  k::QsaScratch r = sc;
+  if (r.pair.inbox) {
+    r.pair.inbox += kv_pair_region_words_ * static_cast<size_t>(region);
+    r.pair.peer_inbox += kv_pair_region_words_ * static_cast<size_t>(region);
+    r.pair_parity = 0;
+  }
+  return r;
 }
 
 void Model::step(const int32_t *tokens, int rows) {
@@ -1624,7 +1666,7 @@ void Model::submit_step(int rows, int seg_key, int bound) {
         k::QsaStep qst{K.seg, bound, k::kSegRec, seg_rows};
         qst.tree = tree;
         qst.every = bound <= kDecEveryBound;  // the first bound bucket selects every block
-        k::QsaScratch qsc = K.qsc;
+        k::QsaScratch qsc = qsa_pair_region(K.qsc, qsa_ord_[static_cast<size_t>(l)]);
         qsc.stamps = dec_inner_stamps(c, kMarkQsa, k::kQsaStamped);
         // from kDecSelOwnerFrom tokens of step bound each owner scores and selects its own rows and shares their
         // selection (the same bits as every card selecting every row)

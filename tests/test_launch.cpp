@@ -221,6 +221,14 @@ void test_catalog(const std::string &root) {
   const Spec *dprof = cat.find("XEN_DEC_PROFILE");
   expect(dprof && dprof->diag && unused_reason(*dprof, "qwen38", dv).empty() && !unused_reason(*dprof, "qwen35", dv).empty(), "XEN_DEC_PROFILE is a qwen38-only diagnostic");
   expect(vocab && unused_reason(*vocab, "qwen35", dv).empty(), "draft vocabulary shown with the drafter on");
+  {  // The KV split by tokens: qwen38 on four cards only
+    const Spec *ks = cat.find("XEN_KV_SPLIT");
+    Values t4 = dv, t2 = dv;
+    t4["XEN_Q38_TP"] = "4", t2["XEN_Q38_TP"] = "2";
+    expect(ks && ks->kind == Kind::Choice && dv.at("XEN_KV_SPLIT") == "heads" && unused_reason(*ks, "qwen38", t4).empty() && !unused_reason(*ks, "qwen38", t2).empty() &&
+               !unused_reason(*ks, "qwen35", t4).empty() && moves_memory("XEN_KV_SPLIT"),
+           "XEN_KV_SPLIT: qwen38 at TP4 only, heads by default, moves the memory plan");
+  }
   {  // Unequal segments on the dense 27B with its drafter (not llama / flint)
     const Spec *uq = cat.find("XEN_UNEQUAL_SEGMENTS");
     Values nd = dv;

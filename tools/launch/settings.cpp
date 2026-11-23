@@ -165,6 +165,15 @@ const char *brief_of(std::string_view key) {
        "Takes (int8): - nothing noticeable: the quality change is within run-to-run noise.\n"
        "Gives (int8-v4): + KV pool on the 27B (about 1.3x the tokens of int8) and + decode speed in long conversations. On qwen38 the freed VRAM goes to hot experts.\n"
        "Takes (int8-v4): - prompt reading speed on the 27B, - draft trees on the 27B (it drafts chains), - a small numerics change."},
+      {"XEN_KV_SPLIT",
+       "qwen38 on four cards: how the two cards that share a KV head store its KV cache.\n"
+       "\n"
+       "`heads`  both cards hold every token of the head (each card stores half of the model's KV)\n"
+       "`tokens`  each card holds every other token (each card stores a quarter)\n"
+       "\n"
+       "Gives (tokens): + KV pool: about 1.75x the tokens per GiB, so longer or more conversations fit.\n"
+       "Takes (tokens): - a little decode speed (one more exchange between the two cards per attention layer), - a small numerics change.\n"
+       "Needs: four cards (XEN_Q38_TP 4)."},
       {"XEN_HOT",
        "MoE models: how many routed experts live in GPU memory (hot), counted over ALL layers.\n"
        "\n"
@@ -1058,6 +1067,12 @@ std::vector<Spec> schema() {
     auto &s = add("XEN_KV", "KV cache dtype", cap, Kind::Choice);
     s.choices = {"int8", "bf16", "int8-v4"};  // int8-v4: qwen38 and the 27B
     s.names = {{"int8", "int8"}, {"bf16", "bf16"}, {"int8-v4", "int8 K + int4 V (qwen38, 27B)"}};
+  }
+  {
+    auto &s = add("XEN_KV_SPLIT", "KV split on four cards", cap, Kind::Choice);
+    s.scope = Scope::Qwen38;
+    s.choices = {"heads", "tokens"};
+    s.names = {{"heads", "by head (both cards of a head hold all its tokens)"}, {"tokens", "by token (a quarter of the KV per card)"}};
   }
   {
     auto &s = add("XEN_HOT", "Hot experts in VRAM", cap, Kind::Int);
@@ -2103,6 +2118,7 @@ std::string unused_reason(const Spec &s, std::string_view arch, const Values &va
   if (s.key.rfind("XEN_VIDEO", 0) == 0 && v("XEN_VISION_FFMPEG").empty()) return "needs a video decoder (XEN_VISION_FFMPEG)";
   if ((s.key == "XEN_MEDIA_DOMAINS" || s.key == "XEN_MEDIA_TIMEOUT") && v("XEN_MEDIA_URLS") == "0") return "needs images by link on";
   if (s.key == "XEN_CARD" && v("XEN_TP") != "1") return "only with TP1 (TP2 runs on cards 0 and 1)";
+  if (s.key == "XEN_KV_SPLIT" && v("XEN_Q38_TP") != "4") return "only with TP4 (at TP1 / TP2 each card holds whole KV heads)";
   if (s.key == "XEN_Q38_CARD" && v("XEN_Q38_TP") != "1") return "only with TP1 (TP2 runs on cards 0 and 1, TP4 on 0-3)";
   if (s.key == "XEN_PREFILL_WIRE" && arch == "qwen38") return v("XEN_Q38_TP") == "1" ? "TP1 has no two-card sums" : "";
   if ((s.key == "XEN_WIRE" || s.key == "XEN_PREFILL_WIRE") && v("XEN_TP") == "1") return "TP1 has no two-card sums";
@@ -2199,7 +2215,7 @@ std::string fmt_gib(double g) {
 }
 
 bool moves_memory(std::string_view key) {
-  static const char *const keys[] = {"XEN_MODEL", "XEN_SLOTS", "XEN_CONTEXT", "XEN_KV", "XEN_KV_POOL_TOKENS", "XEN_RESERVE", "XEN_TP", "XEN_Q38_TP", "XEN_EMU_CARD",
+  static const char *const keys[] = {"XEN_MODEL", "XEN_SLOTS", "XEN_CONTEXT", "XEN_KV", "XEN_KV_SPLIT", "XEN_KV_POOL_TOKENS", "XEN_RESERVE", "XEN_TP", "XEN_Q38_TP", "XEN_EMU_CARD",
                                      "XEN_HOT", "XEN_MTP", "XEN_DRAFTER", "XEN_DRAFTER_MODEL", "XEN_DRAFTER_MTP_FROM", "XEN_DRAFTER_INT4",
                                      "XEN_SEG_ROWS", "XEN_DRAFT_VOCAB", "XEN_PREFILL_CHUNK", "XEN_PREFILL_GEMM", "XEN_PREFILL_W4", "XEN_PREFILL_ATTN", "XEN_ATTN_SELECT", "XEN_PREFILL_SELECT",
                                      "XEN_LM_HEAD", "XEN_VISION", "XEN_VISION_MAX_PIXELS", "XEN_VISION_IMAGES", "XEN_WARMUP", "XEN_PREFILL_COLD_STAGE",

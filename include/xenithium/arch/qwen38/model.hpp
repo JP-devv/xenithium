@@ -109,6 +109,10 @@ struct ModelOptions {
   // partials are laid out by this, the drafter's step buffers too).
   int step_rows_cap = 0;
   kernels::QsaKv kv = kernels::QsaKv::i8;  // target KV (int8 + one scale per token and kv head)
+  // How the two cards of a kv head (four cards: 2 kv heads) store its KV (kernels/attention/qsa.hpp): heads = both all of
+  // its tokens; tokens = each every other token (a quarter of the K / V per card; the partner's q heads replicated, one
+  // pair exchange per attention layer, a numerics change). The MTP layer's KV follows. Four cards only.
+  kernels::QsaKvSplit kv_split = kernels::QsaKvSplit::heads;
   int64_t hot = -1;                   // hot experts per card; -1 = measured from free VRAM
   double reserve_gib = 0.25;  // VRAM left free per card after the experts (every allocation precedes them)
   int threads = 16;                   // load threads (dense + expert packing)
@@ -979,6 +983,15 @@ class Model {
   int step_parity_ = 0, pair_parity_ = 0, moe_parity_ = 0;
   int pf_moe_parity_ = 0;  // the prefill MoE wire's (moe_rows)
   int pf_pair_parity_ = 0; // the prefill pair wire's (gdn_rows, qsa)
+  // The KV split by tokens (ModelOptions::kv_split): the pairs' mailboxes of the attention merge. Decode: a region per QSA
+  // layer and one for the MTP layer (qsa_pair_region), each used once a step, so the module sums between two uses of
+  // a region keep the partner past its last read (parity 0 throughout, graph-safe). Prefill: one mailbox, its parity
+  // flipped per qsa_rows call (pf_kv_parity_; the target's layers and the MTP layer's, lanes by row offset).
+  size_t kv_pair_region_words_ = 0;  // words of one decode region
+  std::vector<int> qsa_ord_;         // [layer]: the QSA layer's index (its decode region), -1 for the others
+  int pf_kv_parity_ = 0;
+  // A copy of `sc` with the pair's mailbox at decode region `region` (qs_.layers.size() = the MTP layer's).
+  kernels::QsaScratch qsa_pair_region(const kernels::QsaScratch &sc, int region) const;
   uint32_t pf_split_seq_ = 0;  // the last sequence number on the split sums' flag lines
   uint64_t *pf_stamps_[kMaxCards] = {};  // XEN_PF_PROFILE=3 stamp words per card, allocated on first use
   // XEN_DEC_PROFILE: decode stamp words per card, the marks of the step being recorded (part, word), totals

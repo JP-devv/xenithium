@@ -87,6 +87,7 @@ XEN_SLOTS=${XEN_SLOTS:-4}
 XEN_CONTEXT=${XEN_CONTEXT:-262144}
 XEN_KV_POOL_TOKENS=${XEN_KV_POOL_TOKENS:-auto}
 XEN_KV=${XEN_KV:-int8}
+XEN_KV_SPLIT=${XEN_KV_SPLIT:-heads}
 XEN_HOT=${XEN_HOT:-}
 XEN_HOT_RANK=${XEN_HOT_RANK-auto}
 XEN_MOE_CPU=${XEN_MOE_CPU:-off}
@@ -194,7 +195,7 @@ XEN_VIDEO_MAX_PIXELS=${XEN_VIDEO_MAX_PIXELS:-25165824}
 XEN_VIDEO_FPS=${XEN_VIDEO_FPS:-2}
 
 cmd=(./build/xenithium-server --model "$XEN_MODEL" --host "$XEN_HOST" --port "$XEN_PORT" --served-model-name "$XEN_SERVED_NAME"
-     --slots "$XEN_SLOTS" --context "$XEN_CONTEXT" --kv-pool-tokens "$XEN_KV_POOL_TOKENS" --kv "$XEN_KV" --reserve "$XEN_RESERVE" --graphs "$XEN_GRAPHS"
+     --slots "$XEN_SLOTS" --context "$XEN_CONTEXT" --kv-pool-tokens "$XEN_KV_POOL_TOKENS" --kv "$XEN_KV" --kv-split "$XEN_KV_SPLIT" --reserve "$XEN_RESERVE" --graphs "$XEN_GRAPHS"
      --prefill-chunk "$XEN_PREFILL_CHUNK" --prefill-stall-ms "$XEN_PREFILL_STALL_MS" --prefill-part-ms "$XEN_PREFILL_PART_MS" --prefill-merge "$XEN_PREFILL_MERGE" --prefill-moe "$XEN_PREFILL_MOE" --prefill-dense "$XEN_PREFILL_DENSE" --decode-moe "$XEN_DECODE_MOE" --gdn-w4 "$XEN_GDN_W4" --prefill-cold-stage "$XEN_PREFILL_COLD_STAGE" --sample-threads "$XEN_SAMPLE_THREADS" --warmup "$XEN_WARMUP" --max-queue "$XEN_MAX_QUEUE" --queue-policy "$XEN_QUEUE_POLICY"
      --queue-aging "$XEN_QUEUE_AGING" --queue-timeout "$XEN_QUEUE_TIMEOUT" --idle-timeout "$XEN_IDLE_TIMEOUT"
      --log-interval "$XEN_LOG_INTERVAL" --drafter "$XEN_DRAFTER" --draft-vocab "$XEN_DRAFT_VOCAB" --drafter-defer "$XEN_DRAFTER_DEFER" --drafter-cut "$XEN_DRAFTER_CUT" --drafter-tree "$XEN_DRAFTER_TREE" --drafter-tree-seqs "$XEN_DRAFTER_TREE_SEQS" --step-rows "$XEN_STEP_ROWS" --seg-rows "$XEN_SEG_ROWS" --drafter-wide "$XEN_DRAFTER_WIDE" --drafter-tree-wide "$XEN_DRAFTER_TREE_WIDE" --drafter-mtp-from "$XEN_DRAFTER_MTP_FROM" --drafter-int4 "$XEN_DRAFTER_INT4" --wire "$XEN_WIRE" --prefill-wire "$XEN_PREFILL_WIRE" --yarn-tiers "$XEN_YARN_TIERS" --tp "$tp" --card "$card" --emu-card "$XEN_EMU_CARD" --w4-items "$XEN_W4_ITEMS" --attn-select "$XEN_ATTN_SELECT" --prefill-select "$XEN_PREFILL_SELECT" --decode-attn "$XEN_DECODE_ATTN" --decode-w4 "$XEN_DECODE_W4"

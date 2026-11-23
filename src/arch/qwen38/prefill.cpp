@@ -603,6 +603,13 @@ void Model::pf_lane_attention(int lane, int layer) {
       k::QsaRowsScratch sc = K.pf.qsa;
       sc.partial += at;
       sc.trace = stage_trace(fab_, c, R.qsa_trace);
+      if (sc.pair.inbox) {  // the KV split by tokens: the lane's rows of the call's merge states and mailbox
+        const size_t pw0 = static_cast<size_t>(ln.r0) * qs_.shape.hq() * k::kQsaPairWords;
+        sc.pend += pw0;
+        sc.pair.inbox += pw0;
+        sc.pair.peer_inbox += pw0;  // (rows_max stays the parities' stride; the lane's rows end inside it)
+        sc.pair_parity = pf_kv_parity_;
+      }
       std::function<void(const sycl::event *)> between;
       if (sel_owner) {
         // the lane's rows of sel / sel_n (a peer's share lands there while this card may still read the lane before)
@@ -627,6 +634,7 @@ void Model::pf_lane_attention(int lane, int layer) {
     }
   }
   pf_pair_parity_ ^= 1;
+  if (cfg_.full_attention[layer]) pf_kv_parity_ ^= 1;
 }
 
 void Model::pf_lanes_moe(int lane0, int count, int layer) {
@@ -827,11 +835,13 @@ void Model::pf_layers(int count) {
         }
         k::QsaRowsScratch qrs = K.pf.qsa;
         qrs.trace = stage_trace(fab_, c, R.qsa_trace);
+        qrs.pair_parity = pf_kv_parity_;
         sent[c] = k::qsa_rows(fab_.compute(c), qs_.shape_of(c), m, K.pf.xa, qs_.w[c][l], K.qc[static_cast<size_t>(l)], K.rope, K.pf.words, k::kSegRec, pos0, K.qsc,
                     qrs, wire_of(pw), pf_pair_parity_, K.pf.ya).send;
       }
       if (split) pf_split_sum([&](Card &K) { return K.pf.qsa.partial; }, [&](Card &K) { return K.pf.ya; }, false, 1, send_ok ? sent : nullptr);
       pf_pair_parity_ ^= 1;
+      pf_kv_parity_ ^= 1;
     }
     pf_mark(cfg_.full_attention[l] ? 2 : 5);
     pf_tr("L" + std::to_string(l) + (cfg_.full_attention[l] ? ".qsa.ya" : ".gdn.ya"), cards_[0]->pf.ya, H);
