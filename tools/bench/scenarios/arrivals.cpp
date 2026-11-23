@@ -50,8 +50,8 @@ class Arrivals final : public Scenario {
 
   ScenarioResult run(Session &session, const Params &params) const override {
     ScenarioResult result;
-    const auto prompts = short_prompts();
-    for (int64_t i = 0; i < params.integer("warmup"); ++i) (void)session.client().chat(session.sampled(std::string(prompts.front().text), prompts.front().max_tokens));
+    const auto prompts = session.prompts();
+    for (int64_t i = 0; i < params.integer("warmup"); ++i) (void)session.client().chat(session.sampled(prompts.front()));
 
     std::mt19937_64 rng(session.seed());
     const size_t count = static_cast<size_t>(std::max<int64_t>(1, params.integer("requests")));
@@ -60,7 +60,7 @@ class Arrivals final : public Scenario {
       std::vector<ChatRequest> requests;
       for (size_t i = 0; i < count; ++i) {
         const ShortPrompt &prompt = prompts[next_prompt++ % prompts.size()];
-        requests.push_back(session.sampled(std::string(prompt.text), prompt.max_tokens));
+        requests.push_back(session.sampled(prompt));
       }
       const std::vector<double> arrivals = poisson_arrivals_s(count, rate, rng);
       const PowerSpan power(session);

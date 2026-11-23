@@ -13,7 +13,9 @@
 namespace xenithium::launch {
 
 enum class Kind { Int, Float, Choice, Bool, Path, Text };
-enum class Scope { All, Qwen38, Qwen35, MoE };  // MoE: the routed-expert archs with a hot/cold split (qwen38)
+// MoE: the routed-expert archs with a hot/cold split (qwen38); Vision: the archs whose checkpoints carry a vision tower
+// (qwen38, qwen35).
+enum class Scope { All, Qwen38, Qwen35, MoE, Vision };
 
 struct Spec {
   std::string key, label, group;

@@ -10,6 +10,74 @@ Host-route labels below come from a **separate instrumented qualification run**,
 - Unmodified cleanup `4a6b1e4abc17bc232df16bb6e72e6d061639d0e4`, server SHA-256 `4131140b53f935f27969ce91133b4d3f5e13c49737b70fe90d1e148338f74c7a`.
 - Separate fixed-fixture runner `6c283821562f572d5e91f8d4a41e0bd255006353`, binary SHA-256 `568c219dd4d961c2a6875ecf624520d92bb0e7eeb3bf580ffaf9d7c717778538`; it is not a PR #3 runtime change. Post-template prompt IDs were independently checked on both revision endpoints: short 8,007 / `bdfe6efe3f1ff2189441ac4f3c8ca720bd1ee86ca8b907fec6adbf6bedb50d6d`; middle 36,864 / `203f11564296866f3667895153ecc28785cb4cd99c750dceee3569a1b581d661`; near 176,073 / `1673ac28f1aa403c9cfce733638b680ac056b2eaadb2044c608a0b6cf5e31c78` (canonical u32le SHA-256). Near means the configured 177,216-token one-slot cap, not the model's maximum.
 
+## Reproduce these historical results
+
+**Historical pre-merge pins:** these results apply to base `df5f761` and cleanup `4a6b1e4`, not a later merge with upstream. Use the exact binaries and XL libraries above; a fresh build or current PR head is a different experiment. The original run used two Intel Arc Pro B60s (TP2), the compatible Swift-1.5 Qwen3.5-27B GPTQ W4/group-128 export with BF16 bridge head and the DSpine b16 drafter, int8-K/packed-int4-V KV, one configured slot and **one active request**, context and KV pool both 177,216. Prefix caching was enabled with a 2 GiB budget and live prefix disabled; the first request is cold and the identical second request is a partial cache hit. No power measurement or runtime profiling was enabled. Runner requests are greedy (`temperature=0`, `top_p=1`, `top_k=0`, no seed), ignore EOS, disable thinking, and request exactly 128 tokens; the report's general sampling defaults are not the burst request's greedy overrides.
+
+The commands below are for an **authorized exclusive GPU window only**. They are not a production deployment procedure: independently take the shared lease, stop and later restore the existing service with the established safety controller, verify both GPUs and the test listener are free, and run one fresh server process per cell. Never start them alongside production. Use two clean shells; in each, start with `env -i HOME="$HOME" USER="$USER" LOGNAME="$USER" PATH=/usr/bin:/bin /usr/bin/bash --noprofile --norc`, then set these machine-local paths to the matching historical artifacts:
+
+```bash
+cd /path/to/Xenithium/docs/benchmark/pr3-matched-sweep-20261123
+export BASE_SERVER=/path/to/df5f761/build/xenithium-server
+export CLEANUP_SERVER=/path/to/4a6b1e4/build/xenithium-server
+export RUNNER=/path/to/6c28382/build/xenithium-bench
+export MODEL_DIR=/path/to/compatible-swift-checkpoint
+export DRAFTER_DIR=/path/to/dspine-b16-checkpoint
+export QSA_BANK=/path/to/pinned-qsa-sidecar-directory
+export FIXTURE_DIR=/path/to/pinned-request-fixtures
+export OUTPUT_ROOT=/path/to/new-results-directory
+export ONEAPI_ENV=/path/to/pinned/oneapi-env.sh
+```
+
+The [server launcher](reproduce-server.sh) and [benchmark launcher](reproduce-bench.sh) check the recorded executable, XL-library, fixture, sidecar where applicable, and environment-script SHA-256s. The [argument template](reproduce-server.argv) is the archived `sweep-frozen.argv` with **only** the model and drafter paths replaced by placeholders; all other 180 argument lines, including nondefault flags, are unchanged. The archived original SHA is `b79480f2295a343423ad6bd4b58a55fe1541a86ded991610df12448d63303dde`; template SHA is `73be680ca60a51876227c8df842569a63032e892926fd6f6b64f7a935e8b912e`. Set the same paths in both shells; in the benchmark shell select `case_name=short`, `middle` or `near` and rerun the appropriate pair below from a **new server process** each time. Wait for `/v1/models` readiness and confirm actual slot/cap/pool, then run the benchmark in the second shell. Stop and reap the test server gracefully before the next cell.
+
+The pinned fixture JSONs and compatible model/drafter artifacts are not distributed in this results directory. Their request and native-ID SHA-256s are above; the model compatibility manifest SHA is `acc6e2cb2bce83f0b9868938b477a1757888f4da7f5bdd42d64d92f5f3baf67b`. The recorded manifest pins the export configuration, tokenizer, bridge and sidecar, but does not establish a complete hash of every model and drafter shard. Thus the commands reproduce the **recorded configuration**, while exact artifact reproduction remains conditional on access to the original artifacts and their independent verification; do not substitute a similarly named checkpoint and call it matched. The private runner `6c28382` is separate tooling and is not the current upstream runner; its binary and fixed-fixture inputs must be obtained independently. Machine paths are the only placeholders.
+
+### Baseline: exact base, dense chain
+
+Terminal 1 (fresh server): `bash ./reproduce-server.sh base`
+
+Terminal 2: `case_name=short; bash ./reproduce-bench.sh "$case_name" base`
+
+### Preferred comparable setting: cleanup, dense chain
+
+Use this for the default-off, same-route comparison against the base; it is not a claim about general production tuning.
+
+Terminal 1 (fresh server): `bash ./reproduce-server.sh dense`
+
+Terminal 2: `case_name=short; bash ./reproduce-bench.sh "$case_name" dense`
+
+### Trained decode, XMX prefill off
+
+Use only when evaluating the pinned trained sidecar. This is not assumed numerically identical to dense.
+
+Terminal 1 (fresh server): `bash ./reproduce-server.sh trained`
+
+Terminal 2: `case_name=short; bash ./reproduce-bench.sh "$case_name" trained`
+
+### Opt-in XMX prefill setting
+
+Use this setting to reproduce the **experimental XMX result group**, not as a default or general recommendation: the middle/near full-text outputs differ and one observation is not a statistical speed claim.
+
+Terminal 1 (fresh server): `bash ./reproduce-server.sh xmx`
+
+Terminal 2: `case_name=near; bash ./reproduce-bench.sh "$case_name" xmx`
+
+## Upstream merge host check
+
+The merge candidate combined PR head `8fb3c237045f15798d1ede0e27754144bb20df5d` with upstream `9e542a1b5fefcdb6ee46eea2ba778075cc8362b0`. Its Release/BMG server build and unchanged `ctest -L host --output-on-failure` completed successfully. The source-root `build/xenithium-server` was temporarily linked to the actual merged server build for the launch test and removed afterward. The terminal CTest summary was:
+
+```text
+100% tests passed, 0 tests failed out of 18
+
+Label Time Summary:
+host    =  28.22 sec*proc (18 tests)
+
+Total Test time (real) =  28.23 sec
+```
+
+These are host checks, not merged-head GPU, output-parity or performance validation. The timings above remain historical results for the original pins.
+
 ## Host suite and adjacent behavior
 
 At cleanup commit `4a6b1e4`, the original out-of-tree host suite reported **17/18**, with two `launch` assertions in the one failing target ([raw receipt](host-original.txt)). The unchanged exact base reproduced the same two failures ([raw base launch](host-base-launch.txt)); a controlled diagnosis found the missing source-root server executable changed the 120-column model-card text. With the same real public-head server temporarily present at the expected path, the unchanged full suite passed **18/18** ([raw receipt](host-server-present.txt)); the temporary symlink was removed. This does not retroactively turn the original run into a pass or establish GPU serving parity.

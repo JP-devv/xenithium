@@ -179,8 +179,15 @@ void w4a16_pf_a8_keep(const uint8_t *w_packed);
 // whole rows, a row offset that keeps the scales' 16-byte loads aligned) reads those codes and skips its quantiser - the
 // same bits. One per device; the producer registers it after enqueuing, clear when src is rewritten otherwise.
 // scales_rows (optional) = the same scales row-major [rows][k / 128]: a oneDNN call then skips its transpose.
+// codes_only: src was written as codes only (RmsNormQ8::codes_only): a w4a16_gemm_pf / _swiglu call that would read its bf16
+// values throws (std::logic_error), as for w4a16_pf_set_h_codes_only's h.
 void w4a16_pf_a8_input(sycl::queue &q, const sycl::ext::oneapi::bfloat16 *src, int lda, int rows, int k, const int8_t *codes, const float *scales, int lds,
-                       const float *scales_rows = nullptr);
+                       const float *scales_rows = nullptr, bool codes_only = false);
 void w4a16_pf_a8_input_clear(sycl::queue &q);
+// While on: the oneDNN GLU with down's quantiser fused (W4A8, the wide gate|up) writes only h's int8 codes, not the
+// bf16 h - for a caller whose only reader of h is the W4A8 down GEMM (w4a16_gemm_pf), which takes the codes. A W4A8
+// call on such an h whose codes are gone throws (std::logic_error); other readers of h would read stale values.
+// Process-wide; the caller sets it around its GLU calls.
+void w4a16_pf_set_h_codes_only(bool on);
 
 }  // namespace xenithium:kernels

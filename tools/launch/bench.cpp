@@ -16,6 +16,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <set>
+#include <string_view>
 #include <system_error>
 
 #include "settings.hpp"
@@ -58,6 +59,18 @@ const ModeRow &mode_row(BenchMode m) {
 }  // namespace
 
 const char *bench_mode_name(BenchMode m) { return mode_row(m).name; }
+
+std::string bench_mode_text(const BenchRun &r) {
+  struct Gloss {
+    std::string_view mode, corpus, about;
+  };
+  static constexpr Gloss kGlosses[] = {{"easy", "medium", "tasks that repeat or reshape their input, natural-length replies"},
+                                       {"medium", "medium", "conventional code and prose"},
+                                       {"hard", "hard", "the engine's own code and docs"}};
+  for (const Gloss &g : kGlosses)
+    if (g.mode == r.mode) return r.mode + " (" + std::string(g.about) + (r.corpus == g.corpus ? ")" : "; corpus " + r.corpus + ")");
+  return r.mode + ", corpus " + r.corpus;
+}
 const char *bench_mode_title(BenchMode m) { return mode_row(m).title; }
 std::vector<std::string> bench_mode_args(BenchMode m) { return mode_row(m).args; }
 
@@ -135,9 +148,15 @@ void read_env(const json::Value &v, BenchRun &r) {
         if (m.second.is_string()) r.notes.push_back({m.first, m.second.str});
   }
   if (r.model.empty()) r.model = "(unknown)";
-  if (const auto *config = v.get_object("config"))
+  if (const auto *config = v.get_object("config")) {
     if (const auto *s = config->get_string("corpus")) r.corpus = *s;
-  if (r.corpus.empty()) r.corpus = "hard";  // runs from before the easy set read the engine's own code
+    if (const auto *s = config->get_string("mode")) r.mode = *s;
+  }
+  if (r.corpus.empty()) r.corpus = "hard";  // runs from before the second set read the engine's own code
+  if (r.mode.empty()) {  // runs from before the modes: the set named "easy" then is the medium corpus now
+    if (r.corpus == "easy") r.corpus = "medium";
+    r.mode = r.corpus == "medium" ? "medium" : "hard";
+  }
 }
 
 // The run's `summary.

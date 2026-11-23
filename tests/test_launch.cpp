@@ -394,8 +394,8 @@ void test_catalog(const std::string &root) {
     }
     const Spec *yt = cat.find("XEN_YARN_TIERS");
     expect(yt && yt->def == "on" && yt->flag == "--yarn-tiers" && yt->choices.size() == 2 && unused_reason(*yt, "qwen35", dv).empty() &&
-               !unused_reason(*yt, "qwen38", dv).empty(),
-           "YaRN per request: a qwen35 choice on / off, default on, flag from the docs");
+               unused_reason(*yt, "qwen38", dv).empty() && unused_reason(*yt, "llama", dv).empty() && !unused_reason(*yt, "flint", dv).empty(),
+           "YaRN per request: a choice on / off for qwen35, qwen38 and llama (not flint), default on, flag from the docs");
     // qwen38 keeps its own pair: XEN_TP=1 for qwen35 leaves qwen38's TP alone
     const Spec *t8 = cat.find("XEN_Q38_TP"), *c8 = cat.find("XEN_Q38_CARD");
     Values one8 = dv;
@@ -429,10 +429,11 @@ void test_catalog(const std::string &root) {
     Values von = dv, voff = dv;
     von["XEN_VISION"] = "1", voff["XEN_VISION"] = "0";
     expect(vi && vp && vn && vi->def == "0" && vi->flag == "--vision" && vp->def == "1048576" && vp->flag == "--vision-max-pixels" && vn->def == "16" &&
-               vn->flag == "--vision-images" && unused_reason(*vi, "qwen38", voff).empty() && unused_reason(*vi, "qwen35", voff).empty() &&
+               vn->flag == "--vision-images" && vi->scope == Scope::Vision && scope_name(vi->scope).find("qwen35") != std::string::npos &&
+               unused_reason(*vi, "qwen38", voff).empty() && unused_reason(*vi, "qwen35", voff).empty() &&
                !unused_reason(*vi, "llama", voff).empty() && unused_reason(*vp, "qwen35", von).empty() &&
                !unused_reason(*vp, "qwen35", voff).empty() && !check_value(*vp, "1000", "qwen38", "").empty() && check_value(*vn, "64", "qwen38", "").empty(),
-           "image input (round 167): qwen38 / qwen35 only, defaults 0 / 1048576 / 16 and flags from the docs, size settings shown with it on");
+           "image input (round 167): qwen38 / qwen35 only (Scope::Vision, named so in the help), defaults 0 / 1048576 / 16 and flags from the docs, size settings shown with it on");
     const Spec *mu = cat.find("XEN_MEDIA_URLS"), *md = cat.find("XEN_MEDIA_DOMAINS"), *mt = cat.find("XEN_MEDIA_TIMEOUT");
     Values uoff = von;
     uoff["XEN_MEDIA_URLS"] = "0";
@@ -865,6 +866,16 @@ void test_app(const std::string &root) {
   expect(app.values().at("XEN_SERVED_NAME") == "moe-a", "the served name defaults to the checkpoint's folder name on open");
   expect(has(app.preview(), "--served-model-name moe-a"), "the preview carries the folder name as the served model");
 
+  // A search finds a setting that waits on another one (dimmed, n/a), not one of the other arch.
+  s = run({ch('/'), ch('h'), ch('t'), ch('t'), ch('p'), ch('s')});
+  expect(app.values().at("XEN_VISION") == "0" && has(s, "Images by http(s) link") && has(s, "n/a"),
+         "filter: / https finds Images by http(s) link while Image input is off (dimmed, n/a)");
+  run({Key::of(Key::Esc)});
+  s = run({ch('/'), ch('k'), ch('-'), ch('s'), ch('p'), ch('l'), ch('i'), ch('t')});
+  expect(!has(s, "W4 k-split target"), "filter: a qwen35-only setting stays hidden for a qwen38 model");
+  s = run({Key::of(Key::Esc)});
+  expect(!has(s, "find: "), "Esc clears the filter");
+
   // Find Slots, pick 2 from its popup.
   s = run({ch('/'), ch('s'), ch('l'), ch('o'), ch('t'), Key::of(Key::Enter)});
   expect(app.selected_key() == "XEN_SLOTS", "filter: / slots selects Slots");
@@ -1207,8 +1218,8 @@ void test_bench(const std::string &root) {
   std::string s = run({ch('3')});  // Benchmark is the third shown tab while Chat stays hidden
   expect(app.tab() == 3 && has(s, "Benchmark") && has(s, "beta") && has(s, "alpha") && has(s, "3 runs"),
          "bench: key 3 opens the Benchmark tab (the digits name the shown tabs), runs grouped by model with a run count");
-  // The mouse regression (the owner: "when you enter Bench you can't click another tab"): a left click on a
-  // header chip switches tabs from any tab - the Benchmark tab used to swallow every mouse event for its scroll handling.
+  // A mouse regression: a left click on a header chip switches tabs from any tab - the Benchmark tab used to swallow
+  // every mouse event for its scroll handling.
   auto click_tab = [&](int t) {
     int x = 0, y = 0;
     if (!app.tab_click_point(t, x, y)) return false;
@@ -1263,14 +1274,15 @@ void test_bench(const std::string &root) {
   s = run({Key::of(Key::Enter)});
   expect(!has(s, "Run the benchmark") && !has(s, "Concurrency at your stream counts") && has(s, "no ready server"),
          "bench: the stream-count mode without a ready server warns instead of asking for counts");
-  // m on Benchmark picks the mode (the corpus the long prompts are cut from): easy by default, hard = the engine's own
-  // code. The tab stays: a letter acts only on the tab whose hint row shows it (m once jumped to Settings' model list).
+  // m on Benchmark picks the mode (xenithium-bench --mode): easy by default, then medium and hard. The tab stays: a
+  // letter acts only on the tab whose hint row shows it (m once jumped to Settings' model list).
   // (the hint row shows "m mode: easy" / "hard"; a toast covers it here, so the menu's "(now)" mark is read instead)
   s = run({ch('m')});
-  expect(app.tab() == 3 && app.popup_open() && has(s, "Benchmark mode") && has(s, "Easy: conventional code") && has(s, "Hard: this engine's own code") &&
-             has(s, "guess it well  (now)") && !has(s, "guessed least well  (now)") && !has(s, "dense-b"),
+  expect(app.tab() == 3 && app.popup_open() && has(s, "Benchmark mode") && has(s, "Easy: tasks that repeat") && has(s, "Medium: conventional code") &&
+             has(s, "Hard: this engine's own code") && has(s, "model ends them  (now)") && !has(s, "guess it well  (now)") && !has(s, "guessed least well  (now)") &&
+             !has(s, "dense-b"),
          "bench: m opens the mode menu on the Benchmark tab (easy by default), not the model list");
-  s = run({Key::of(Key::Down), Key::of(Key::Enter)});
+  s = run({Key::of(Key::Down), Key::of(Key::Down), Key::of(Key::Enter)});
   expect(app.tab() == 3 && !app.popup_open() && has(s, "benchmark mode: hard"), "bench: picking Hard sets the mode; the tab stays");
   s = run({ch('m')});
   expect(has(s, "guessed least well  (now)"), "bench: the menu marks the mode now in use");

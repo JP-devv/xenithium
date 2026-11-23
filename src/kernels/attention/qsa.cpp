@@ -114,6 +114,8 @@ sycl::event prep(sycl::queue &q, const QsaShape &s, int rows, const QsaWeights &
       const int vpos = tr.vp;
       const int32_t *pages = pages0 + static_cast<size_t>(sr.slot) * slot_pages;
       bf16 *ring = ring0 + static_cast<size_t>(sr.slot) * kQsaRing * kID;
+      // the segment's rope delta (records: word kSegRope, a YaRN tier's first table row; a bare position word: 0)
+      const int rdelta = rstride >= kSegRec ? rec[sr.seg * rstride + kSegRope] : 0;
       const auto grp = it.get_group();
       auto norm_rope = [&](float v, int L, const bf16 *nw, int rp) {
         const float ss = sycl::reduce_over_group(grp, d < L ? v * v : 0.f, sycl::plus<float>());
@@ -125,8 +127,9 @@ sycl::event prep(sycl::queue &q, const QsaShape &s, int rows, const QsaWeights &
         float o = n;
         if (d < kQsaRot) {
           const int i = d & 31;
-          const float cs = static_cast<float>(rope[static_cast<size_t>(rp) * kQsaRopeRow + i]);
-          const float sn = static_cast<float>(rope[static_cast<size_t>(rp) * kQsaRopeRow + 32 + i]);
+          const size_t row = static_cast<size_t>(rp + rdelta) * kQsaRopeRow;
+          const float cs = static_cast<float>(rope[row + i]);
+          const float sn = static_cast<float>(rope[row + 32 + i]);
           o = d < 32 ? bfr(n * cs - buf[d + 32] * sn) : bfr(n * cs + buf[d - 32] * sn);
         }
         return o;

@@ -22,15 +22,30 @@ std::vector<std::string> split_commas(const std::string &text) {
   return items;
 }
 
+// "scenario.key=value", split. Throws std:invalid_argument for another form.
+struct Setting {
+  std::string scenario, key, value;
+};
+Setting setting_of(std::string_view item) {
+  const size_t dot = item.find('.'), eq = item.find('=');
+  if (dot == std::string::npos || eq == std::string::npos || dot > eq) throw std::invalid_argument("--set takes scenario.key=value, got \"" + std::string(item) + "\"");
+  return {std::string(item.substr(0, dot)), std::string(item.substr(dot + 1, eq - dot - 1)), std::string(item.substr(eq + 1))};
+}
+
 // "scenario.key=value" onto the step of that scenario.
 void apply_override(RunPlan &plan, const std::string &item) {
-  const size_t dot = item.find('.'), eq = item.find('=');
-  if (dot == std::string::npos || eq == std::string::npos || dot > eq) throw std::invalid_argument("--set takes scenario.key=value, got \"" + item + "\"");
-  const std::string scenario = item.substr(0, dot);
+  const Setting s = setting_of(item);
   bool applied = false;
   for (SuiteStep &step : plan.steps)
-    if (step.scenario == scenario) step.params.set(item.substr(dot + 1, eq - dot - 1), item.substr(eq + 1)), applied = true;
-  if (!applied) throw std::invalid_argument("--set " + item + ": the run has no scenario \"" + scenario + "\"");
+    if (step.scenario == s.scenario) step.params.set(s.key, s.value), applied = true;
+  if (!applied) throw std::invalid_argument("--set " + item + ": the run has no scenario \"" + s.scenario + "\"");
+}
+
+// A mode's "scenario.key=value" onto the steps of that scenario that do not set the key themselves.
+void apply_default(RunPlan &plan, std::string_view item) {
+  const Setting s = setting_of(item);
+  for (SuiteStep &step : plan.steps)
+    if (step.scenario == s.scenario && !step.params.has(s.key)) step.params.set(s.key, s.value);
 }
 
 // Seconds the cards are watched before the first scenario for the run's idle power.
@@ -72,7 +87,7 @@ ScenarioResult run_step(const Scenario &scenario, const SuiteStep &step, Session
 
 }  // namespace
 
-RunPlan make_plan(const std::string &suite, const std::string &scenarios, const std::vector<std::string> &overrides) {
+RunPlan make_plan(const std::string &suite, const std::string &scenarios, const std::vector<std::string> &overrides, std::span<const std::string_view> defaults) {
   RunPlan plan;
   const auto all = all_scenarios();
   if (!scenarios.empty()) {
@@ -84,6 +99,7 @@ RunPlan make_plan(const std::string &suite, const std::string &scenarios, const 
     plan.suite = it->id;
     plan.steps = it->steps;
   }
+  for (const std::string_view item : defaults) apply_default(plan, item);
   for (const std::string &item : overrides) apply_override(plan, item);
   for (const SuiteStep &step : plan.steps) {
     const Scenario *scenario = find(all, step.scenario);

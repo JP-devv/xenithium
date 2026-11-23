@@ -129,8 +129,9 @@ struct ModelOptions {
   bool prefill_wire_bf16 = false;
   // YaRN per request. Past the trained positions the rope table holds one sub-table per tier (trained x 2^k positions
   // at that length's factor: 1, 2, ...; the last tier = the whole context at its factor), and a sequence starts at its
-  // tier's first row through the M-RoPE delta (set_rope_tier), so a short request on a 1M server gets factor 1, the bits
-  // of a server at the trained context. false = one factor for every request.
+  // tier's first row through the rope delta (set_rope_tier: the M-RoPE delta word, plain rope too), so a short request
+  // on a 1M server gets factor 1, the bits of a server at the trained context. false = one factor for every request.
+  // Arch flint never scales (yarn_factor 1).
   bool yarn_tiers = true;
   int rope_tier_reset = -1;  // the tier reset() starts a sequence in (-1 = the last: the whole context's factor)
   bool prefill_split = true;  // the many-row two-card sums split over the cards (pair_split_rows) from 64 rows; false = the mailbox
@@ -455,6 +456,10 @@ class Model {
   // draft_after_prefill).
   void prefill(const int32_t *ids, int n, const std::function<void(int64_t, int)> &on_rows = {}, int32_t next = -1);
   int prefill_chunk() const { return opt_.prefill_chunk_run > 0 ? opt_.prefill_chunk_run : opt_.prefill_chunk; }
+  // The prefix cache's alignment (StepModel::snap_align): 64 where a row's bits do not depend on its prefill call's size
+  // (no fa-body context splits, no library GEMM route); else the prefill chunk, so a cached continuation runs the very
+  // calls a cold read runs (the tail splits and the library-vs-own GEMM choice follow the call's rows).
+  int call_align() const;
   // One prefill call in parts (): prefill_begin(ids, n <= prefill_chunk, next) on the current
   // slot, then prefill_advance(layers) runs that many more layers (at least 1) and returns true once all ran (picks /
   // logits / draft_after_prefill then as after prefill()). Same bits as one call. Between parts steps of OTHER slots may
@@ -670,7 +675,14 @@ class Model {
   // rms_norm over the chunk's rows on card c: with a pending split sum (pend) the card's own rows of `add` first, then
   // proj(lo, hi) of them (the consumer's first GEMM in row parts), the wait for the peer's rows, then the rest likewise
   //. Without pend proj is not called (the consumer projects every row itself).
-  void pf_norm(int c, int m, const bf16 *add, const bf16 *w, uint32_t pend, const std::function<void(int, int)> &proj = {});
+  // codes_only: xn's only readers are W4A8 GEMMs (the norm writes its codes, not its bf16 values; pf_codes_only)
+  // mode (with pend; the sum finished as SplitRows::owner, nothing copied back): owner = the card norms its own rows only
+  // and shares their codes (the peer's arrive the same way; needs codes_only), so the residual's peer rows go stale on
+  // this card; restore = the card norms its own rows, shares their residual, then norms the peer's rows from theirs.
+  enum class PfNorm : uint8_t { both, owner, restore };
+  void pf_norm(int c, int m, const bf16 *add, const bf16 *w, uint32_t pend, const std::function<void(int, int)> &proj = {}, bool codes_only = false,
+               PfNorm mode = PfNorm::both);
+  bool pf_codes_only(int m) const;
   void pf_wait_pending();  // both cards wait for a pending split sum's peer rows
 
   Fabric &fab_;
@@ -680,6 +692,7 @@ class Model {
   double yarn_factor_ = 1.0;
   std::vector<int64_t> tier_limit_, tier_base_;  // per tier its positions and first row in the rope table
   std::vector<double> tier_factor_;
+  bool mrope_cfg_ = false;  // the checkpoint's interleaved M-RoPE (image input); the tiers use the delta without it
   int last_rows_ = 0, pending_accept_ = 0, parity_ = 0, mix_parity_ = 0, pf_parity_ = 0;
   int gdn_accept_max_ = 4;      // the step's largest accept word (GdnState:accept_max)
   bool gdn_commit_ = false;     // this step's GDN rows are final (GdnState:commit)

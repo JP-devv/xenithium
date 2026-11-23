@@ -1155,44 +1155,65 @@ void test_segments(xenithium::Fabric &f, const Model &m, k::QsaKv kv, const char
       ++k2;
     }
   }
-  // batched
-  history();
-  int pos[NS], own[NS] = {};
-  std::copy(hist, hist + NS, pos);
-  bool same = true;
+  // batched; rope_rows / delta: the table and every record's kSegRope (a YaRN tier: the same rows at row delta on)
+  auto batched = [&](const bf16 *rope_t, int delta, size_t &rows_cmp) {
+    history();
+    int pos[NS], own[NS] = {};
+    std::copy(hist, hist + NS, pos);
+    bool same = true;
+    rows_cmp = 0;
+    int i = 0;
+    for (const auto &st : plan) {
+      ++i;
+      const int ns = static_cast<int>(st.seqs.size()), R = st.all();
+      std::vector<int32_t> w(static_cast<size_t>(k::kMaxSegs) * k::kSegRec, 0);
+      std::vector<uint16_t> x(static_cast<size_t>(k::kStepRows32) * H, 0);
+      int need = 0;
+      for (int j = 0, r0 = 0; j < ns; r0 += st.of(static_cast<size_t>(j)), ++j) {
+        const int q = st.seqs[static_cast<size_t>(j)], rq = st.of(static_cast<size_t>(j));
+        w[static_cast<size_t>(j) * k::kSegRec + k::kSegPos] = pos[q];
+        w[static_cast<size_t>(j) * k::kSegRec + k::kSegRope] = delta;
+        w[static_cast<size_t>(j) * k::kSegRec + k::kSegSlot] = q;
+        const auto xq = x_of(q, own[q]);
+        std::copy(xq.begin(), xq.begin() + static_cast<size_t>(rq) * H, x.begin() + static_cast<size_t>(r0) * H);
+        need = std::max(need, pos[q] + rq);
+      }
+      d.q->memcpy(rec, w.data(), w.size() * 4).wait();
+      d.q->memcpy(d.x, x.data(), x.size() * 2).wait();
+      k::qsa_decode(*d.q, d.s, R, d.x, d.w, all, rope_t, k::QsaStep{rec, i % 2 ? kCap : need, k::kSegRec, st.code()}, d.sc, nullptr, 0, d.out);
+      d.q->wait_and_throw();
+      const auto out = rd(*d.q, reinterpret_cast<const uint16_t *>(d.out), static_cast<size_t>(R) * H);
+      for (int j = 0, r0 = 0; j < ns; r0 += st.of(static_cast<size_t>(j)), ++j) {
+        const int q = st.seqs[static_cast<size_t>(j)], rq = st.of(static_cast<size_t>(j));
+        same &= std::equal(out.begin() + static_cast<size_t>(r0) * H, out.begin() + static_cast<size_t>(r0 + rq) * H, solo[q][own[q]].begin());
+        rows_cmp += rq;
+        pos[q] += commit_of(own[q], rq);
+        ++own[q];
+      }
+    }
+    return same;
+  };
   size_t rows_cmp = 0;
-  int i = 0;
-  for (const auto &st : plan) {
-    ++i;
-    const int ns = static_cast<int>(st.seqs.size()), R = st.all();
-    std::vector<int32_t> w(static_cast<size_t>(k::kMaxSegs) * k::kSegRec, 0);
-    std::vector<uint16_t> x(static_cast<size_t>(k::kStepRows32) * H, 0);
-    int need = 0;
-    for (int j = 0, r0 = 0; j < ns; r0 += st.of(static_cast<size_t>(j)), ++j) {
-      const int q = st.seqs[static_cast<size_t>(j)], rq = st.of(static_cast<size_t>(j));
-      w[static_cast<size_t>(j) * k::kSegRec + k::kSegPos] = pos[q];
-      w[static_cast<size_t>(j) * k::kSegRec + k::kSegSlot] = q;
-      const auto xq = x_of(q, own[q]);
-      std::copy(xq.begin(), xq.begin() + static_cast<size_t>(rq) * H, x.begin() + static_cast<size_t>(r0) * H);
-      need = std::max(need, pos[q] + rq);
-    }
-    d.q->memcpy(rec, w.data(), w.size() * 4).wait();
-    d.q->memcpy(d.x, x.data(), x.size() * 2).wait();
-    k::qsa_decode(*d.q, d.s, R, d.x, d.w, all, d.rope, k::QsaStep{rec, i % 2 ? kCap : need, k::kSegRec, st.code()}, d.sc, nullptr, 0, d.out);
-    d.q->wait_and_throw();
-    const auto out = rd(*d.q, reinterpret_cast<const uint16_t *>(d.out), static_cast<size_t>(R) * H);
-    for (int j = 0, r0 = 0; j < ns; r0 += st.of(static_cast<size_t>(j)), ++j) {
-      const int q = st.seqs[static_cast<size_t>(j)], rq = st.of(static_cast<size_t>(j));
-      same &= std::equal(out.begin() + static_cast<size_t>(r0) * H, out.begin() + static_cast<size_t>(r0 + rq) * H, solo[q][own[q]].begin());
-      rows_cmp += rq;
-      pos[q] += commit_of(own[q], rq);
-      ++own[q];
-    }
-  }
+  const bool same = batched(d.rope, 0, rows_cmp);
   char what[512];
   std::snprintf(what, sizeof what, "%s segments (%d slots at %d-%d tokens, own page tables + rings, 1-4 rows each, unequal segments, up to 16 a step, skipped steps, partial commits): out == each "
                 "sequence alone, bit for bit (%zu rows)", tag, NS, hist[0], hist[2], rows_cmp);
   expect(same, what);
+  // a rope delta (YaRN tiers): the table's rows behind kDelta random rows, every record's kSegRope = kDelta: the same
+  // bits (history and solo ran at delta 0 on the plain table: the rows the delta reads)
+  {
+    constexpr int kDelta = 4099;
+    std::vector<uint16_t> shifted = bits(make_x(kDelta * k::kQsaRopeRow / 4 + 16, 913u));  // (make_x: 4 rows of H)
+    shifted.resize(static_cast<size_t>(kDelta) * k::kQsaRopeRow);
+    const auto plain = k::qsa_rope_table(kCap, 64, 1e7, k::QsaYarn{});
+    shifted.insert(shifted.end(), plain.begin(), plain.end());
+    const auto *rope2 = reinterpret_cast<const bf16 *>(up(f, 0, shifted, d.mem));
+    size_t n2 = 0;
+    const bool same2 = batched(rope2, kDelta, n2);
+    std::snprintf(what, sizeof what, "%s segments with rope delta %d (kSegRope, the table shifted by as many random rows): out == each sequence alone at delta 0, bit for bit (%zu rows)",
+                  tag, kDelta, n2);
+    expect(same2, what);
+  }
   // qsa_store writes the cache bits qsa_decode writes. The same batched plan
   // with every other step as qsa_store: K / V / scales / compressed keys / rings == all qsa_decode.
   {

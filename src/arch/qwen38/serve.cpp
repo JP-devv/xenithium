@@ -35,10 +35,13 @@ constexpr int kDenseOneDnnRows = 1024;  // rows per call from which the int8 tru
 serve::VisionPlan vision_plan(const serve::Options &o, const model::ModelConfig &cfg) { return serve::vision_plan(o, cfg, o.tp); }
 
 ModelOptions model_options(const serve::Options &o, const model::ModelConfig &cfg) {
+  if (o.prefill_gemm == "onednn-all")  // (qwen35's int4 trunk only; this arch's trunk is int8)
+    throw serve::OptionError("--prefill-gemm onednn-all: every int4 prefill GEMM on oneDNN is built for the dense 27B (qwen35); arch qwen38 takes onednn|esimd");
   ModelOptions mo;
   mo.slots = o.slots;
   mo.step_rows_cap = o.step_rows > kernels::kStepRows32 ? kernels::kMaxRows : 0;  // --step-rows 64 (four cards)
   mo.context = o.context;
+  mo.yarn_tiers = o.yarn_tiers == "on";  // YaRN per request past the trained positions
   mo.kv = o.kv == "bf16" ? kernels::QsaKv::bf16 : o.kv == "int8-v4" ? kernels::QsaKv::i8v4 : kernels::QsaKv::i8;
   // The MTP layer's KV in the target's dtype; its KV per token as a target QSA layer's (bf16: 1,088 B per card).
   mo.mtp_kv = mo.kv;
@@ -199,7 +202,12 @@ class Backend final : public serve::Backend {
     if (ls.onednn_gib > 0)
       std::fprintf(stderr, "server: prefill trunk GEMMs on oneDNN from %d rows per call (--prefill-gemm onednn; %.3f GiB per card of repack slots)\n",
                    mo.prefill_dense_onednn, ls.onednn_gib);
-    serve::log_rope(m.capacity(), m.config().max_positions, m.yarn_factor());
+    serve::log_rope(m.capacity(), m.config().max_positions, m.yarn_factor(), nullptr, m.rope_tiers() > 1);
+    {
+      std::vector<std::pair<int64_t, double>> tiers;
+      for (int i = 0; i < m.rope_tiers(); ++i) tiers.emplace_back(m.rope_tier_limit(i), m.rope_tier_factor(i));
+      serve::log_rope_tiers(tiers);
+    }
     serve::log_ranking(m.ranking(), o_.hot_rank);
     std::fprintf(stderr, "server: MoE CPU path %s\n", ls.moe_cpu.c_str());  // --moe-cpu
     std::fprintf(stderr, "server: KV lending %s\n", ls.kv_lend.c_str());  // --kv-lend

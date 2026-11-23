@@ -464,6 +464,7 @@ void Model::mtp_pass(int pass, int rows, const std::vector<const bf16 *> &hidden
     if (slot < 0 || slot >= slots() || pos < 0 || pos + nr > cap_) throw std::invalid_argument("qwen38 mtp: slot / position out of range");
     kv_need(slot, pos + nr);  // the drafter KV rows this pass writes (shared pages with the target's)
     w[i * k::kSegRec + k::kSegPos] = static_cast<int32_t>(pos);
+    w[i * k::kSegRec + k::kSegRope] = static_cast<int32_t>(seqs_[static_cast<size_t>(slot)].rope_delta);  // its YaRN tier
     w[i * k::kSegRec + k::kSegSlot] = slot;
     need = std::max(need, pos + nr);
   }

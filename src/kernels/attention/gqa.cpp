@@ -211,11 +211,14 @@ sycl::event prep_e(sycl::queue &q, const GqaShape &s, int rows, const GqaWeights
   const int32_t *pages0 = c.pages, *rec = sw.rec;
   const int slot_pages = c.slot_pages, rstride = sw.stride, seg_rows = sw.seg_rows;
   const bf16 *qnw = w.q_norm, *knw = w.k_norm;
+  const bool mrope = s.mrope;  // the row's rope row at position + delta (GqaShape::mrope; no rope_rows here)
+  const int rdelta = s.rope_delta;
   return q.parallel_for<GqaPrepEK<KV, D>>(sycl::nd_range<1>(static_cast<size_t>(rows) * units, 1), [=](sycl::nd_item<1> it) SYCL_ESIMD_KERNEL {
     const int g = static_cast<int>(it.get_group(0));
     const int r = g / units, u = g % units;
     const SegRow sr = seg_row(rec, rstride, seg_rows, r);
     const int p = sr.pos;
+    const int rp = p + (mrope ? (rstride >= kSegRec ? rec[sr.seg * rstride + kSegRope] : rdelta) : 0);
     const int32_t *pages = pages0 + static_cast<size_t>(sr.slot) * slot_pages;
     auto norm_rope = [&](esimd::simd<float, D> v, const bf16 *nw) SYCL_ESIMD_FUNCTION {
       esimd::simd<float, D> n = v;
@@ -230,8 +233,8 @@ sycl::event prep_e(sycl::queue &q, const GqaShape &s, int rows, const GqaWeights
       }
       if (rot == D) {  // NeoX over every dim (arch flint's sliding layers; the D 128 shapes): pairs d, d + D / 2
         constexpr int H2 = D / 2;
-        const esimd::simd<float, H2> cs = esimd::block_load<bf16, H2>(rope + static_cast<size_t>(p) * D);
-        const esimd::simd<float, H2> sn = esimd::block_load<bf16, H2>(rope + static_cast<size_t>(p) * D + H2);
+        const esimd::simd<float, H2> cs = esimd::block_load<bf16, H2>(rope + static_cast<size_t>(rp) * D);
+        const esimd::simd<float, H2> sn = esimd::block_load<bf16, H2>(rope + static_cast<size_t>(rp) * D + H2);
         const esimd::simd<float, H2> lo = n.template select<H2, 1>(0), hi = n.template select<H2, 1>(H2);
         const esimd::simd<float, H2> olo = lo * cs - hi * sn, ohi = hi * cs + lo * sn;
         n.template select<H2, 1>(0) = esimd::simd<float, H2>(esimd::simd<bf16, H2>(olo));
@@ -670,7 +673,7 @@ sycl::event prep_kv(sycl::queue &q, const GqaShape &s, int rows, const GqaWeight
                     const GqaScratch &sc, bool decode = false) {
   // decode steps: the ESIMD prep at D 128 without gate, rotary over every dim or none (arch flint's and llama's shapes)
   if (s.kv == QsaKv::i8v4 && s.head_dim != kD) throw std::invalid_argument("gqa: int8-v4 KV (4-bit V) is built for head_dim 256");
-  if (decode && g_prep_e && s.head_dim == 128 && !s.gate && (s.rot == 128 || s.rot == 0) && !s.mrope && !s.rope_rows)
+  if (decode && g_prep_e && s.head_dim == 128 && !s.gate && (s.rot == 128 || s.rot == 0) && !s.rope_rows)
     return s.kv == QsaKv::i8 ? prep_e<QsaKv::i8, 128>(q, s, rows, w, c, rope, sw, sc) : prep_e<QsaKv::bf16, 128>(q, s, rows, w, c, rope, sw, sc);
   switch (s.kv) {
     case QsaKv::i8: return prep<QsaKv::i8>(q, s, rows, w, c, rope, sw, sc);
