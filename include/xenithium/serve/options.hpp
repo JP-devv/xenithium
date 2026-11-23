@@ -32,7 +32,7 @@ struct Options {
   int tp = 2, card = 0;  // cards (TP1 / TP2); TP1's card
   std::string emu_card = "off";  // off | b60 | b65: run as that card (XEN_EMU_CARD, util/cards.hpp, rt/card.hpp)
   std::string wire = "bf16";
-  std::string yarn_tiers = "on";  // qwen35: YaRN per request past the trained positions, or one factor
+  std::string yarn_tiers = "on";  // qwen35 / qwen38 / llama: YaRN per request past the trained positions, or one factor
   std::string prefill_wire = "auto";  // the prefill two-card sums: bf16 partials or fp32; auto = qwen35 bf16, qwen38 fp32
   int threads = 16;
   bool graphs = true;
@@ -47,7 +47,7 @@ struct Options {
   int attn_tail = 2;  // qwen35 / llama prefill attention context splits: 1 = the last wave's work-groups, 2 = + calls under one wave, 0 = none
   int prefill_gemm_rows = 1024;  // qwen35: rows per call from which the wide W4A8 GEMMs take oneDNN (128..4096; below 1024 a numerics change that pays with KV lending)
   int prefill_short = 32;  // qwen35: prefill calls of <= N rows run their int4 GEMMs on the decode kernels (0 off, 1..32)
-  std::string prefill_gemm = "onednn";  // onednn | esimd: qwen35 W4A8 prefill GEMMs n >= 6144 on oneDNN; qwen38 int8 trunk with chunks >= 2048
+  std::string prefill_gemm = "onednn";  // onednn | onednn-all | esimd: qwen35 W4A8 prefill GEMMs n >= 6144 (onednn-all: every one) on oneDNN; qwen38 int8 trunk with chunks >= 2048
   std::string prefill_a8_keep;
   std::string prefill_a8_body = "auto";  // auto | slm | direct: qwen35 W4A8 prefill GEMM body
   std::string prefill_moe = "w4a16";  // qwen38

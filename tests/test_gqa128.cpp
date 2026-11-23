@@ -302,6 +302,22 @@ void run(Ctx &cx, k::QsaKv kv) {
         }
       same &= step(cx, r, rows, p) == a;  // run-to-run
       expect(same, std::string(kn) + " " + std::to_string(rows) + " row(s) at " + std::to_string(p) + ": attention groups 1/2/4/8 rows, 128/256 GRF, rerun bit-identical");
+      {  // a rope delta (YaRN tiers, GqaShape::mrope + rope_delta): the table behind 777 random rows reads the same rows
+        constexpr int kDelta = 777;
+        std::mt19937 rr(5 + p);
+        std::normal_distribution<float> nd(0.f, 1.f);
+        std::vector<uint16_t> t2(static_cast<size_t>(kDelta) * 128);
+        for (auto &v : t2) v = k::bf16_bits(nd(rr));
+        t2.insert(t2.end(), r.rope_h.begin(), r.rope_h.end());
+        auto *rope2 = cx.alloc<bf16>(t2.size());
+        cx.q.memcpy(rope2, t2.data(), t2.size() * 2).wait();
+        Rig rd = r;
+        rd.rope = rope2;
+        rd.s.mrope = true;
+        rd.s.rope_delta = kDelta;
+        expect(step(cx, rd, rows, p) == a, std::string(kn) + " " + std::to_string(rows) + " row(s) at " + std::to_string(p) +
+                                               ": rope delta 777 on the shifted table (the decode prep with a delta) == delta 0, bit for bit");
+      }
       if (rows > 1) {  // R rows at p == R one-row steps at p.. p + R - 1 (each row's own x)
         Rig r1 = make_rig(cx, kv, cap, 1000 + p);
         bool seq = true;

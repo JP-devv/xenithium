@@ -1,8 +1,8 @@
 // Xenithium · the DFlash 2 block drafter on the cards: an alternative to a target's MTP layer (ModelOptions::dflash_dir;
 // server XEN_DRAFTER_MODEL), `DFlash2DraftModel` checkpoints (for Qwen3.8-27B, arch qwen35, and Qwen3.8 Flash-Next,
-// arch qwen38; bf16). Shared by the archs: the target hands over its sizes, embedding tables and lm_head rows
-// (DFlashTarget) and captures its own features (capture() copies a single-stream residual's columns; an arch with
-// several residual streams fills step_features / prefill_features with its own kernel).
+// arch qwen38; bf16, or GPTQ int4 Linears: dflash_dense_plan). Shared by the archs: the target hands over its sizes,
+// embedding tables and lm_head rows (DFlashTarget) and captures its own features (capture() copies a single-stream
+// residual's columns; an arch with several residual streams fills step_features / prefill_features with its own kernel).
 //
 // Semantics (config.json + the checkpoint):
 //   features  F_p = [h_p(l_0) | ... | h_p(l_4)]: the target's residual after decoder layers dflash_config.target_layer_ids
@@ -38,6 +38,7 @@
 #include <string>
 #include <vector>
 
+#include "xenithium/arch/common/dflash_plan.hpp"
 #include "xenithium/arch/common/lm_mat.hpp"
 #include "xenithium/kernels/gemm/dense.hpp"
 #include "xenithium/kernels/drafter/dflash.hpp"
@@ -312,7 +313,10 @@ class DFlash {
 };
 
 // The drafter's tensors with their placement (see above). dense_bytes 1 = int8 per row, 2 = bf16, 4 = int4 by RTN (q, o,
-// gate | up, down; the rest int8).
-std::vector<model::DenseSpec> dflash_dense_plan(const model::Checkpoint &ck, const DFlashConfig &cfg, int dense_bytes);
+// gate | up, down; the rest int8). A GPTQ `.qweight` Linear is packed as w4 (when the path would RTN) or dequantised
+// to the dense precision (fc and the other dense-only mats); the store is keyed as the canonical `.weight` name.
+inline std::vector<model::DenseSpec> dflash_dense_plan(const model::Checkpoint &ck, const DFlashConfig &cfg, int dense_bytes) {
+  return dflash_dense_plan(ck, cfg.layers, dense_bytes, cfg.kind == DFlashConfig::Kind::dspine);
+}
 
 }  // namespace xenithium::arch

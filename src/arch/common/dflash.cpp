@@ -131,51 +131,15 @@ DFlashConfig DFlashConfig::load(const std::string &dir, int max_block) {
   need(c.block >= 2 && c.block <= k::kStepRows16, "block_size 2..16 (a verify segment's rows)");
   need(!c.target_layers.empty() && c.mask_id >= 0 && c.mask_id < c.vocab, "target_layer_ids / mask_token_id");
   need(c.window >= 2, "sliding_window");
-  return c;
-}
-
-std::vector<model::DenseSpec> dflash_dense_plan(const model::Checkpoint &ck, const DFlashConfig &cfg, int dense_bytes) {
-  using S = model::DenseSpec;
-  if (dense_bytes != 1 && dense_bytes != 2 && dense_bytes != 4) throw std::invalid_argument("dflash plan: dense_bytes 1 (int8), 2 (bf16) or 4 (int4 by RTN)");
-  const S::Store mat = dense_bytes == 2 ? S::Store::bf16 : S::Store::i8;
-  const S::Store big = dense_bytes == 4 ? S::Store::w4r : mat;  // q, o, gate | up, down
-  std::vector<S> out;
-  auto add = [&](std::string name, S::Split split, S::Store store, int layer, std::vector<std::string> append = {}) {
-    if (!ck.find(name)) throw std::runtime_error("dflash plan: missing " + name);
-    for (const auto &a : append)
-      if (!ck.find(a)) throw std::runtime_error("dflash plan: missing " + a);
-    S sp;
-    sp.name = std::move(name);
-    sp.split = split;
-    sp.store = store;
-    sp.append = std::move(append);
-    sp.comp = model::Component::mtp;
-    sp.layer = layer;
-    out.push_back(std::move(sp));
-  };
-  const bool ds = cfg.kind == DFlashConfig::Kind::dspine;
-  add("fc.weight", S::Split::cols, mat, 0);
-  add("hidden_norm.weight", S::Split::replicate, S::Store::raw, 0);
-  add("norm.weight", S::Split::replicate, S::Store::raw, cfg.layers - 1);
-  if (!ds) add("candidate_selector.hidden_projection.weight", S::Split::replicate, mat, cfg.layers - 1);
-  for (int l = 0; l < cfg.layers; ++l) {
-    const std::string L = "layers." + std::to_string(l) + ".";
-    add(L + "input_layernorm.weight", S::Split::replicate, S::Store::raw, l);
-    add(L + "post_attention_layernorm.weight", S::Split::replicate, S::Store::raw, l);
-    add(L + "self_attn.q_proj.weight", S::Split::rows, big, l);
-    add(L + "self_attn.k_proj.weight", S::Split::rows, mat, l, {L + "self_attn.v_proj.weight"});
-    add(L + "self_attn.o_proj.weight", S::Split::cols, big, l);
-    add(L + "self_attn.q_norm.weight", S::Split::replicate, S::Store::raw, l);
-    add(L + "self_attn.k_norm.weight", S::Split::replicate, S::Store::raw, l);
-    add(L + "mlp.gate_proj.weight", S::Split::rows, big, l, {L + "mlp.up_proj.weight"});
-    add(L + "mlp.down_proj.weight", S::Split::cols, big, l);
-    if (ds) continue;  // DSpine: no convolution (its bridge loads in DFlash::load_dspine)
-    add(L + "attention_conv.kernel_projection.weight", S::Split::replicate, mat, l);
-    add(L + "attention_conv.base_kernel", S::Split::replicate, S::Store::raw, l);
-    add(L + "mlp_conv.kernel_projection.weight", S::Split::replicate, mat, l);
-    add(L + "mlp_conv.base_kernel", S::Split::replicate, S::Store::raw, l);
+  // GPTQ int4 Linears (dflash_dense_plan): the loader reads scale x (code - 8) per 128-k group, in order
+  if (const json::Value *q = t.get("quantization_config"); q && !q->is_null()) {
+    need(ModelConfig::str_or(*q, "quant_method", "") == "gptq", "quantization_config: quant_method gptq");
+    need(ModelConfig::need_int(*q, "bits") == 4 && ModelConfig::need_int(*q, "group_size") == k::kW4Group, "quantization_config: bits 4, group_size 128");
+    const json::Value *sym = q->get("sym"), *act = q->get("desc_act");
+    need(sym && sym->is_bool() && sym->b, "quantization_config: sym true");
+    need(!act || !act->is_bool() || !act->b, "quantization_config: desc_act true (act order) is not implemented");
   }
-  return out;
+  return c;
 }
 
 DFlash::DFlash(Fabric &fab, const std::string &dir, const std::string &target_dir, const DFlashTarget &tcfg, int64_t capacity, const DFlashOptions &opt)

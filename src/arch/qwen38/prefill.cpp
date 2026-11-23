@@ -256,6 +256,7 @@ void Model::pf_start(const int32_t *tokens, int m, int row_base, const std::func
   for (int s = 0; s < R.slices; ++s) {
     int32_t *w = pf_words_.data() + static_cast<size_t>(s) * k::kSegRec;
     w[k::kSegPos] = static_cast<int32_t>(R.pos0 + 4 * s);
+    w[k::kSegRope] = static_cast<int32_t>(sq.rope_delta);  // its YaRN tier's table rows (qsa.hpp)
     w[k::kSegAccept] = s == 0 ? sq.last_rows : 4;
     w[k::kSegParity] = sq.gdn_par;
     w[k::kSegSlot] = R.slot;
@@ -269,6 +270,7 @@ void Model::pf_start(const int32_t *tokens, int m, int row_base, const std::func
       pf_words_.resize(pf_words_.size() + k::kSegRec, 0);
       int32_t *w = pf_words_.data() + pf_words_.size() - k::kSegRec;
       w[k::kSegPos] = static_cast<int32_t>(R.pos0 + ln.r0 + 4 * s);
+      w[k::kSegRope] = static_cast<int32_t>(sq.rope_delta);
       w[k::kSegAccept] = s > 0 ? 4 : ln.r0 == 0 ? sq.last_rows : 0;
       w[k::kSegParity] = ln.gp0;
       w[k::kSegSlot] = R.slot;
@@ -1467,6 +1469,13 @@ void Model::calib_logits(const int32_t *tokens, int m, const CalibState &in, con
 }
 
 // Image input (set_vision).
+void Model::set_vision(VisionStore *v) {
+  if (v && v->cards() < static_cast<int>(fab_.size()))
+    throw std::invalid_argument("qwen38 model: the image store holds rows on " + std::to_string(v->cards()) + " cards, the model gathers on " +
+                                std::to_string(fab_.size()));
+  vis_ = v;
+}
+
 const int32_t *Model::vis_map(const int32_t *tokens, int m, std::vector<int32_t> &buf) {
   if (!vis_) return tokens;
   buf.resize(static_cast<size_t>(m));

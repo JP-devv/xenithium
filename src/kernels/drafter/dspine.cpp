@@ -5,7 +5,9 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <mutex>
 #include <stdexcept>
+#include <unordered_map>
 #include <vector>
 
 #include "xenithium/kernels/head/head.hpp"
@@ -26,6 +28,7 @@ class DsMessageK;
 class DsBridgeOutK;
 class DsSelectK;
 class DsTreeK;
+class DsTreeScoreK;
 class DsScaleRowsK;
 
 constexpr int kRowItems = 256;
@@ -41,6 +44,26 @@ inline float key_logit(uint64_t kl) {
   return sycl::bit_cast<float>(static_cast<uint32_t>(bb) << 16);
 }
 inline int32_t key_index(uint64_t kl) { return static_cast<int32_t>(0xFFFFFFFEu - static_cast<uint32_t>(kl)); }
+
+// ds_tree's candidate-list table, one per device (kMaxSegs segments x the most lists a 16-row block needs), allocated on
+// the first call and kept for the process
+struct DsTreeTab {
+  int32_t *cand = nullptr;
+  float *lp = nullptr;
+};
+DsTreeTab ds_tree_tab(sycl::queue &q) {
+  static std::mutex mu;
+  static std::unordered_map<sycl::device, DsTreeTab> tabs;
+  std::lock_guard<std::mutex> lk(mu);
+  DsTreeTab &t = tabs[q.get_device()];
+  if (!t.cand) {
+    const size_t n = static_cast<size_t>(kMaxSegs) * (1 + (kTreeRows - 2) * kDfTopK) * kDfTopK;
+    t.cand = sycl::malloc_device<int32_t>(n, q);
+    t.lp = sycl::malloc_device<float>(n, q);
+    if (!t.cand || !t.lp) throw std::runtime_error("ds_tree: table allocation");
+  }
+  return t;
+}
 
 }  // namespace
 
@@ -285,106 +308,109 @@ void ds_select_ref(int seg_rows, const uint64_t *keys, const float *packed, cons
 }
 
 // ---- the best-first draft tree with DSpine's scores ----
+// Two launches. DsTreeScoreK: every candidate list a node can need, one work-group each - block row 1 given the anchor
+// (slot 0) and block row j >= 2 given each of row j - 1's 16 candidates (slots 1 + (j - 2) x 16 + b) - each scored,
+// log-softmaxed and ranked by the same expressions as the serial walk's node expansion (the same work-group shape, so
+// the same reductions and bits). DsTreePickK: one item per segment walks the best-first frontier over that table.
 sycl::event ds_tree(sycl::queue &q, int segs, int seg_rows, const uint64_t *keys, const float *packed, const bf16 *tsv, const bf16 *tg, const bf16 *bias,
                     const DsTail &tail, int sub_k, int sub_s0, int budget, float cut, int32_t *tree, float inv_temp) {
   constexpr int kParts = 16, kItems = kDfTopK * kParts, R = kDsRank, per = R / kParts, kN = kTreeRows;
-  if (segs < 1 || seg_rows < 2 || segs * seg_rows > kMaxRows || !tail.out || !tail.rms || !tail.msg || tail.hidden < 1 || budget < 1 || budget >= kN)
+  if (segs < 1 || segs > kMaxSegs || seg_rows < 2 || seg_rows > kN || segs * seg_rows > kMaxRows || !tail.out || !tail.rms || !tail.msg || tail.hidden < 1 ||
+      budget < 1 || budget >= kN)
     throw std::invalid_argument("ds_tree: shape");
   const bf16 *outp = tail.out, *msgp = tail.msg;
   const float *rmsp = tail.rms, feps = tail.eps;
   const int H = tail.hidden, D = seg_rows - 1;
+  const int slots = 1 + (D - 1) * kDfTopK;  // the candidate lists a segment's nodes can need
   const float lcut = cut > 0.f ? std::log(cut) : -std::numeric_limits<float>::infinity();
   const float tscale = inv_temp;
-  return q.submit([&](sycl::handler &h) {
+  DsTreeTab tab = ds_tree_tab(q);  // [segs][slots][16]: (the candidate's key slot, its log-probability), best first
+  int32_t *tc = tab.cand;
+  float *tl = tab.lp;
+  const sycl::event sc = q.submit([&](sycl::handler &h) {
     sycl::local_accessor<float, 1> part(sycl::range<1>(kItems), h);
     sycl::local_accessor<float, 1> score(sycl::range<1>(kDfTopK), h);
-    sycl::local_accessor<int32_t, 1> ccand(sycl::range<1>(kN * kDfTopK), h);  // node i's candidate indices, best first
-    sycl::local_accessor<float, 1> clp(sycl::range<1>(kN * kDfTopK), h);
-    sycl::local_accessor<int32_t, 1> ncand(sycl::range<1>(kN), h), npar(sycl::range<1>(kN), h), ndep(sycl::range<1>(kN), h), nnext(sycl::range<1>(kN), h);
-    sycl::local_accessor<float, 1> nw(sycl::range<1>(kN), h);
-    sycl::local_accessor<int32_t, 1> ctl(sycl::range<1>(2), h);  // [0] the node whose candidates come next (-1 none, -2 done), [1] nodes
-    h.parallel_for<DsTreeK>(sycl::nd_range<1>(static_cast<size_t>(segs) * kItems, kItems), [=](sycl::nd_item<1> it) {
-      const int s = static_cast<int>(it.get_group(0)), lid = static_cast<int>(it.get_local_id(0));
+    h.parallel_for<DsTreeScoreK>(sycl::nd_range<1>(static_cast<size_t>(segs) * slots * kItems, kItems), [=](sycl::nd_item<1> it) {
+      const int g = static_cast<int>(it.get_group(0)), s = g / slots, u = g % slots, lid = static_cast<int>(it.get_local_id(0));
       const int b = lid / kParts, p = lid % kParts;
       const float *row0 = packed + static_cast<size_t>(s) * seg_rows * 3 * R;
-      auto tok_of = [&](int32_t v) { return sub_k > 0 && v >= sub_k ? v - sub_k + sub_s0 : v; };
-      if (lid == 0) ncand[0] = -1, npar[0] = -1, ndep[0] = 0, nnext[0] = 0, nw[0] = 0.f, ctl[0] = 0, ctl[1] = 1;
-      sycl::group_barrier(it.get_group());
-      for (;;) {
-        const int node = ctl[0];
-        sycl::group_barrier(it.get_group());  // every item read the word before item 0 rewrites it
-        if (node >= 0) {  // node's 16 candidates (ds_select's score, bit for bit), log-softmax, best first
-          const int row = s * seg_rows + ndep[node] + 1;
-          float ss = 0.f;
-          for (int e = lid; e < H; e += kItems) {
-            const float x = static_cast<float>(outp[static_cast<size_t>(row) * H + e]);
-            ss += x * x;
-          }
-          ss = sycl::reduce_over_group(it.get_group(), ss, sycl::plus<float>());
-          const float ratio = sycl::sqrt(ss / static_cast<float>(H) + feps) / rmsp[row];
-          const int32_t v = key_index(keys[static_cast<size_t>(row) * kDfTopK + b]);
-          const int32_t pv = ncand[node];
-          const float *qr = packed + static_cast<size_t>(row) * 3 * R;
-          const bf16 *T = tg + static_cast<size_t>(v) * R, *M = msgp + static_cast<size_t>(row) * R;
-          float acc = 0.f;
-          if (pv < 0) {
-            for (int i = p * per; i < (p + 1) * per; ++i)
-              acc += (sigmoidf(bfr(qr[i]) + bfr(row0[R + i]) + static_cast<float>(bias[i])) * bfr(row0[2 * R + i]) - static_cast<float>(M[i])) * static_cast<float>(T[i]);
-          } else {
-            const bf16 *S = tsv + static_cast<size_t>(pv) * 2 * R;
-            for (int i = p * per; i < (p + 1) * per; ++i)
-              acc += (sigmoidf(bfr(qr[i]) + static_cast<float>(S[i]) + static_cast<float>(bias[i])) * static_cast<float>(S[R + i]) - static_cast<float>(M[i])) *
-                     static_cast<float>(T[i]);
-          }
-          part[lid] = acc;
-          sycl::group_barrier(it.get_group());
-          if (lid < kDfTopK) {
-            float t = 0.f;
-            for (int i = 0; i < kParts; ++i) t += part[lid * kParts + i];
-            score[lid] = (ratio * key_logit(keys[static_cast<size_t>(row) * kDfTopK + lid]) + t) * tscale;  // the tree's temperature
-          }
-          sycl::group_barrier(it.get_group());
-          if (lid < kDfTopK) {
-            float mx = score[0];
-            for (int i = 1; i < kDfTopK; ++i) mx = sycl::fmax(mx, score[i]);
-            float se = 0.f;
-            for (int i = 0; i < kDfTopK; ++i) se += sycl::exp(score[i] - mx);
-            const float me = score[lid];
-            int rk = 0;
-            for (int i = 0; i < kDfTopK; ++i) rk += score[i] > me || (score[i] == me && i < lid);
-            ccand[node * kDfTopK + rk] = key_index(keys[static_cast<size_t>(row) * kDfTopK + lid]);
-            clp[node * kDfTopK + rk] = me - mx - sycl::log(se);
-          }
-          sycl::group_barrier(it.get_group());
-        }
-        if (lid == 0) {  // the frontier's best joins the tree
-          const int n = ctl[1];
-          int bi = -1;
-          float bw = 0.f;
-          if (n - 1 < budget)
-            for (int i = 0; i < n; ++i)
-              if (ndep[i] < D && nnext[i] < kDfTopK) {
-                const float w = nw[i] + clp[i * kDfTopK + nnext[i]];
-                if (bi < 0 || w > bw) bi = i, bw = w;
-              }
-          if (bi < 0 || bw < lcut) {
-            ctl[0] = -2;
-          } else {
-            ncand[n] = ccand[bi * kDfTopK + nnext[bi]], npar[n] = bi, ndep[n] = ndep[bi] + 1, nnext[n] = 0, nw[n] = bw;
-            ++nnext[bi];
-            ctl[0] = ndep[n] < D ? n : -1;
-            ctl[1] = n + 1;
-          }
-        }
-        sycl::group_barrier(it.get_group());
-        if (ctl[0] == -2) break;
+      const int j = u == 0 ? 1 : 2 + (u - 1) / kDfTopK;  // the block row whose candidates this list ranks
+      const int row = s * seg_rows + j;
+      const int32_t pv = u == 0 ? -1 : key_index(keys[static_cast<size_t>(row - 1) * kDfTopK + (u - 1) % kDfTopK]);
+      float ss = 0.f;
+      for (int e = lid; e < H; e += kItems) {
+        const float x = static_cast<float>(outp[static_cast<size_t>(row) * H + e]);
+        ss += x * x;
       }
-      if (lid < kN) {
-        const int n = ctl[1] - 1;
-        int32_t *o = tree + static_cast<size_t>(s) * kDfTreeInts;
-        if (lid == 0) o[0] = n;
-        o[1 + lid] = lid < n ? tok_of(ncand[lid + 1]) : 0;
-        o[1 + kN + lid] = lid < n ? npar[lid + 1] : 0;
+      ss = sycl::reduce_over_group(it.get_group(), ss, sycl::plus<float>());
+      const float ratio = sycl::sqrt(ss / static_cast<float>(H) + feps) / rmsp[row];
+      const int32_t v = key_index(keys[static_cast<size_t>(row) * kDfTopK + b]);
+      const float *qr = packed + static_cast<size_t>(row) * 3 * R;
+      const bf16 *T = tg + static_cast<size_t>(v) * R, *M = msgp + static_cast<size_t>(row) * R;
+      float acc = 0.f;
+      if (pv < 0) {
+        for (int i = p * per; i < (p + 1) * per; ++i)
+          acc += (sigmoidf(bfr(qr[i]) + bfr(row0[R + i]) + static_cast<float>(bias[i])) * bfr(row0[2 * R + i]) - static_cast<float>(M[i])) * static_cast<float>(T[i]);
+      } else {
+        const bf16 *S = tsv + static_cast<size_t>(pv) * 2 * R;
+        for (int i = p * per; i < (p + 1) * per; ++i)
+          acc += (sigmoidf(bfr(qr[i]) + static_cast<float>(S[i]) + static_cast<float>(bias[i])) * static_cast<float>(S[R + i]) - static_cast<float>(M[i])) *
+                 static_cast<float>(T[i]);
+      }
+      part[lid] = acc;
+      sycl::group_barrier(it.get_group());
+      if (lid < kDfTopK) {
+        float t = 0.f;
+        for (int i = 0; i < kParts; ++i) t += part[lid * kParts + i];
+        score[lid] = (ratio * key_logit(keys[static_cast<size_t>(row) * kDfTopK + lid]) + t) * tscale;  // the tree's temperature
+      }
+      sycl::group_barrier(it.get_group());
+      if (lid < kDfTopK) {
+        float mx = score[0];
+        for (int i = 1; i < kDfTopK; ++i) mx = sycl::fmax(mx, score[i]);
+        float se = 0.f;
+        for (int i = 0; i < kDfTopK; ++i) se += sycl::exp(score[i] - mx);
+        const float me = score[lid];
+        int rk = 0;
+        for (int i = 0; i < kDfTopK; ++i) rk += score[i] > me || (score[i] == me && i < lid);
+        const size_t o = (static_cast<size_t>(s) * slots + u) * kDfTopK + rk;
+        tc[o] = lid;
+        tl[o] = me - mx - sycl::log(se);
+      }
+    });
+  });
+  return q.submit([&](sycl::handler &h) {
+    h.depends_on(sc);
+    h.parallel_for<DsTreeK>(sycl::range<1>(static_cast<size_t>(segs)), [=](sycl::id<1> sid) {
+      const int s = static_cast<int>(sid[0]);
+      auto tok_of = [&](int32_t v) { return sub_k > 0 && v >= sub_k ? v - sub_k + sub_s0 : v; };
+      int32_t nslot[kN], npar[kN], ndep[kN], nnext[kN], ncand[kN];
+      float nw[kN];
+      nslot[0] = 0, npar[0] = -1, ndep[0] = 0, nnext[0] = 0, ncand[0] = -1, nw[0] = 0.f;
+      int n = 1;
+      // node i's list: the root's slot 0; a node at depth d >= 1 (key slot b of block row d) slot 1 + (d - 1) x 16 + b
+      auto list_of = [&](int i) { return (static_cast<size_t>(s) * slots + (ndep[i] == 0 ? 0 : 1 + (ndep[i] - 1) * kDfTopK + nslot[i])) * kDfTopK; };
+      while (n - 1 < budget) {  // the frontier's best joins the tree
+        int bi = -1;
+        float bw = 0.f;
+        for (int i = 0; i < n; ++i)
+          if (ndep[i] < D && nnext[i] < kDfTopK) {
+            const float w = nw[i] + tl[list_of(i) + nnext[i]];
+            if (bi < 0 || w > bw) bi = i, bw = w;
+          }
+        if (bi < 0 || bw < lcut) break;
+        const int b = tc[list_of(bi) + nnext[bi]];
+        const int d = ndep[bi] + 1;
+        nslot[n] = b, npar[n] = bi, ndep[n] = d, nnext[n] = 0, nw[n] = bw;
+        ncand[n] = key_index(keys[static_cast<size_t>(s * seg_rows + d) * kDfTopK + b]);
+        ++nnext[bi];
+        ++n;
+      }
+      int32_t *o = tree + static_cast<size_t>(s) * kDfTreeInts;
+      o[0] = n - 1;
+      for (int i = 0; i < kN; ++i) {
+        o[1 + i] = i < n - 1 ? tok_of(ncand[i + 1]) : 0;
+        o[1 + kN + i] = i < n - 1 ? npar[i + 1] : 0;
       }
     });
   });

@@ -98,15 +98,15 @@ struct MemPlan {
 };
 std::string plan_json(const MemPlan &p);
 
-// --vision 1: the tower's per-card bytes (weights + scratch at the largest image) and the image rows of a load
-// on `cards` cards; on = false with --vision 0. Throws OptionError when the checkpoint has no vision tower.
+// --vision 1: the tower's per-card bytes (weights + scratch at the largest image) plus the image rows every card holds,
+// for a load on `cards` cards; on = false with --vision 0. Throws OptionError when the checkpoint has no vision tower.
 struct VisionPlan {
   bool on = false;
   model::VisionConfig vc;
   int max_patches = 0;
   int64_t rows = 0;
-  double gib[2] = {0, 0};
-  double max_gib() const { return gib[0] > gib[1] ? gib[0] : gib[1]; }
+  std::vector<double> gib;  // per card
+  double max_gib() const { return gib.empty() ? 0.0 : *std::max_element(gib.begin(), gib.end()); }
 };
 VisionPlan vision_plan(const Options &o, const model::ModelConfig &cfg, int cards);
 // The tower + store of a plan on the fabric (after the model loaded), the store's cap set, the load line logged.
@@ -117,7 +117,7 @@ std::unique_ptr<arch::VisionStore> load_vision(Fabric &fab, const Options &o, co
 // running requests hold every row).
 std::unique_ptr<server::MediaHook> make_vision_hook(arch::VisionStore &store, const Options &o);
 // "server: vision..." the load line of an arch that loaded its tower.
-void log_vision(const arch::VisionStore &store, double gib_card0, double gib_card1, double load_s);
+void log_vision(const arch::VisionStore &store, const std::vector<double> &gib_per_card, double load_s);
 
 // ---- helpers shared by the backends (src/serve/backend.cpp) ----------------------------------------------------------
 
@@ -139,8 +139,11 @@ inline int64_t shared_pool_auto(int slots, int64_t context, int64_t trained = 0)
 }
 
 // One load line when the max context passes the checkpoint's trained positions: the YaRN factor the load applied
-// (factor 1 = none; `why_none` says why the arch needs none). Silent at or below the trained positions.
-void log_rope(int64_t context, int64_t trained, double yarn_factor, const char *why_none = nullptr);
+// (factor 1 = none; `why_none` says why the arch needs none; tiers: YaRN per request, the factor is the last tier's).
+// Silent at or below the trained positions.
+void log_rope(int64_t context, int64_t trained, double yarn_factor, const char *why_none = nullptr, bool tiers = false);
+// With YaRN per request (--yarn-tiers on, more than one tier): the tiers, (positions, factor) ascending. Silent with one.
+void log_rope_tiers(const std::vector<std::pair<int64_t, double>> &tiers);
 // The MoE servers' recorded hot-expert ranking: where it came from and where it is saved (--hot-rank FILE;
 // rec null = not recorded: no file given, or a file of another model).
 void log_ranking(const model::RouteRecord *rec, const std::string &file);

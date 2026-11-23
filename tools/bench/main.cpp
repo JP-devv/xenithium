@@ -20,6 +20,7 @@
 #include "client.hpp"
 #include "corpus.hpp"
 #include "html_report.hpp"
+#include "mode.hpp"
 #include "power.hpp"
 #include "report.hpp"
 #include "runner.hpp"
@@ -57,16 +58,21 @@ constexpr const char *kUsage =
     "  --seed N              request k samples with seed N + k (default 1)\n"
     "  --temperature T --top-p P --top-k K    sampling (default 0.7 / 0.95 / 20; T 0 = greedy)\n"
     "  --thinking default|on|off              the model's thinking switch, where the endpoint has one\n"
-    "  --reply-length fixed|natural           the sampled scenarios' replies: fixed = run to max_tokens (ignore_eos,\n"
-    "                        the default: equal lengths on every build), natural = end where the model ends them\n"
-    "                        (what a chat client sees)\n"
+    "  --mode easy|medium|hard  how easy the measured text is for a draft model (default hard):\n"
+    "                        hard = the engine's own code and docs, open tasks, replies run to their length, the\n"
+    "                        agent mix (the published numbers); medium = the same method over conventional\n"
+    "                        template-made code and prose; easy = tasks that repeat or reshape their input, replies\n"
+    "                        that end where the model ends them, a code-led weighted mean (the public-benchmark style)\n"
+    "  --reply-length fixed|natural           the sampled scenarios' replies (default: the mode's, fixed for hard and\n"
+    "                        medium, natural for easy): fixed = run to max_tokens (ignore_eos: equal lengths on every\n"
+    "                        build), natural = end where the model ends them (what a chat client sees)\n"
     "  --context TOKENS      the longest prompt to send (default: what the endpoint reports)\n"
     "  --kv-pool TOKENS      tokens of context the endpoint holds for all requests at once (default: what it\n"
     "                        reports); the scenarios sized by a share of it use this\n"
     "  --timeout SECONDS     per request (default 1800)\n"
-    "  --corpus hard|easy|DIR   the text long prompts are cut from: hard (the default) = this engine's own code and\n"
-    "                        docs, easy = conventional template-made code and prose a drafter guesses well, DIR =\n"
-    "                        another directory of DIR/<kind>/<files>\n"
+    "  --corpus hard|medium|DIR the text long prompts are cut from (default: the mode's): hard = this engine's own code\n"
+    "                        and docs, medium = conventional template-made code and prose a drafter guesses well,\n"
+    "                        DIR = another directory of DIR/<kind>/<files>\n"
     "  --power auto|on|off   sample the GPUs' board power and clock from this machine's hwmon files (auto: when\n"
     "                        the URL is this machine's loopback address)\n"
     "  --strict              OpenAI fields only: no ignore_eos / top_k / thinking switch / usage-in-stream probing\n"
@@ -74,7 +80,9 @@ constexpr const char *kUsage =
     "Exit code: 0 = every request answered, 1 = some failed, 2 = a usage or setup error.\n";
 
 struct Options {
-  std::string url = kDefaultUrl, model, api_key, suite = "standard", scenarios, name, out_dir, corpus = "hard", thinking = "default", power = "auto", reply_length = "fixed";
+  std::string url = kDefaultUrl, model, api_key, suite = "standard", scenarios, name, out_dir, thinking = "default", power = "auto";
+  std::string mode = std::string(bench::kDefaultMode);
+  std::string corpus, reply_length;  // empty = the mode's
   std::vector<std::string> overrides;
   std::vector<bench::Label> notes;
   uint64_t seed = 1;
@@ -130,6 +138,11 @@ bench::Thinking thinking_of(const std::string &word) {
   usage_error("--thinking takes default, on or off");
 }
 
+const bench::Mode &mode_of(const std::string &id) {
+  if (const bench::Mode *mode = bench::find_mode(id)) return *mode;
+  usage_error("--mode takes easy, medium or hard");
+}
+
 bench::ReplyLength reply_length_of(const std::string &word) {
   if (word == "fixed") return bench::ReplyLength::fixed;
   if (word == "natural") return bench::ReplyLength::natural;
@@ -163,6 +176,7 @@ Options parse_run_options(int argc, char **argv) {
     else if (flag == "--set") o.overrides.push_back(value);
     else if (flag == "--name") o.name = value;
     else if (flag == "--out") o.out_dir = value;
+    else if (flag == "--mode") o.mode = value;
     else if (flag == "--corpus") o.corpus = value;
     else if (flag == "--thinking") o.thinking = value;
     else if (flag == "--reply-length") o.reply_length = value;
@@ -181,7 +195,10 @@ Options parse_run_options(int argc, char **argv) {
     } else usage_error("unknown option " + flag);
   }
   if (o.api_key.empty()) o.api_key = env_or("XEN_BENCH_API_KEY", env_or("OPENAI_API_KEY", ""));
-  (void)reply_length_of(o.reply_length);  // refused before anything is sent
+  const bench::Mode &mode = mode_of(o.mode);  // refused before anything is sent, like a wrong reply length
+  if (o.corpus.empty()) o.corpus = mode.corpus;
+  if (o.reply_length.empty()) o.reply_length = mode.reply_length == bench::ReplyLength::natural ? "natural" : "fixed";
+  (void)reply_length_of(o.reply_length);
   return o;
 }
 
@@ -236,7 +253,10 @@ int cmd_html(const std::string &where, const std::string &file) {
 }
 
 int cmd_list() {
-  std::printf("Suites (xenithium-bench run --suite ID):\n");
+  std::printf("Modes (xenithium-bench run --mode ID):\n");
+  for (const bench::Mode &mode : bench::modes())
+    std::printf("  %-9.*s %.*s\n", static_cast<int>(mode.id.size()), mode.id.data(), static_cast<int>(mode.about.size()), mode.about.data());
+  std::printf("\nSuites (xenithium-bench run --suite ID):\n");
   for (const bench::Suite &s : bench::suites()) {
     std::printf("  %-9s ~%d min  %s\n            ", s.id.c_str(), s.minutes, s.about.c_str());
     for (const bench::SuiteStep &step : s.steps) std::printf("%s ", step.scenario.c_str());
@@ -295,9 +315,10 @@ int cmd_run(const Options &o) {
   if (!endpoint) usage_error(err);
   endpoint->api_key = o.api_key;
 
+  const bench::Mode &mode = mode_of(o.mode);
   bench::RunPlan plan;
   try {
-    plan = bench::make_plan(o.suite, o.scenarios, o.overrides);
+    plan = bench::make_plan(o.suite, o.scenarios, o.overrides, mode.defaults);
   } catch (const std::invalid_argument &e) {
     usage_error(e.what());
   }
@@ -322,7 +343,9 @@ int cmd_run(const Options &o) {
                           .kv_pool_tokens = caps.kv_pool_tokens,
                           .progress = [](std::string_view line) { std::printf("  .. %.*s\n", static_cast<int>(line.size()), line.data()), std::fflush(stdout); },
                           .power = power.get(),
-                          .reply_length = reply_length_of(o.reply_length)});
+                          .reply_length = reply_length_of(o.reply_length),
+                          .prompts = bench::short_prompts(mode.prompts),
+                          .fresh_prompts = mode.fresh_prompts});
 
   bench::RunInfo info{.name = o.name.empty() ? plan.suite : o.name,
                       .timestamp = timestamp_now(),
@@ -335,6 +358,8 @@ int cmd_run(const Options &o) {
                       .seed = o.seed,
                       .sampling = o.sampling,
                       .thinking = o.thinking,
+                      .mode = o.mode,
+                      .mode_version = mode.version,
                       .reply_length = o.reply_length,
                       .corpus = o.corpus,
                       .corpus_version = corpus_set ? corpus_set->version : bench::kCorpusVersion,
@@ -352,6 +377,7 @@ int cmd_run(const Options &o) {
   std::printf("  extensions: ignore_eos %s, top_k %s, thinking switch %s, usage in the stream %s, /metrics %s\n", caps.ignore_eos ? "yes" : "no", caps.top_k ? "yes" : "no",
               caps.thinking_switch ? "yes" : "no", caps.stream_usage ? "yes" : "no (token counts are estimates)", caps.metrics ? "yes" : "no");
   if (power) std::printf("  power: sampling %zu card(s) from hwmon (board energy, GPU clock)\n", power->cards().size());
+  std::printf("  mode %s: %.*s; long prompts from the %s corpus\n", o.mode.c_str(), static_cast<int>(mode.about.size()), mode.about.data(), o.corpus.c_str());
   std::printf("  replies of the sampled scenarios: %s length%s\n", o.reply_length.c_str(),
               o.reply_length == "fixed" && !caps.ignore_eos ? " asked, but the endpoint refuses ignore_eos: they end where the model ends them" : "");
   std::fflush(stdout);

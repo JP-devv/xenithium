@@ -18,6 +18,8 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <span>
 
 #include "xenithium/util/json.hpp"
 
@@ -168,14 +170,54 @@ double number_of(const json::Value *v) {
   return 0;
 }
 
+// ffmpeg's select expression over a frame set: its eq(n,i) terms summed as a balanced tree. A flat a+b+c+... sum
+// nests one parser level per term and ffmpeg refuses it past ~100 terms ("Error while parsing expression"), while the
+// sampling takes up to 768 frames; the tree nests log2(terms) levels.
+void append_select_sum(std::span<const int64_t> frames, std::string &out) {
+  if (frames.size() == 1) {
+    out += "eq(n\\," + std::to_string(frames[0]) + ")";
+    return;
+  }
+  const size_t half = frames.size() / 2;
+  out += '(';
+  append_select_sum(frames.first(half), out);
+  out += '+';
+  append_select_sum(frames.subspan(half), out);
+  out += ')';
+}
+
 }  // namespace
 
+std::vector<std::string> ffmpeg_install_paths() {
+  std::vector<std::string> out = {"/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/opt/ffmpeg/bin/ffmpeg", "/snap/bin/ffmpeg"};
+  if (const char *home = std::getenv("HOME")) {  // static builds unpacked under ~/bin, ~/.local/bin or ~/.hermes/tools/<name>/bin
+    const std::string h = home;
+    out.push_back(h + "/bin/ffmpeg");
+    out.push_back(h + "/.local/bin/ffmpeg");
+    std::error_code ec;
+    std::vector<std::string> tools;
+    for (const auto &e : std::filesystem::directory_iterator(h + "/.hermes/tools", ec)) tools.push_back((e.path() / "bin" / "ffmpeg").string());
+    std::sort(tools.begin(), tools.end());  // a stable order (the directory's own is not)
+    out.insert(out.end(), tools.begin(), tools.end());
+  }
+  return out;
+}
+
 bool find_video_tools(const std::string &ffmpeg, VideoTools &out, std::string &why) {
-  out.ffmpeg = on_path(ffmpeg.empty() ? std::string("ffmpeg") : ffmpeg);
-  if (out.ffmpeg.empty()) return why = "no ffmpeg executable (" + (ffmpeg.empty() ? std::string("ffmpeg") : ffmpeg) + ") found: video input is off", false;
-  const size_t sl = out.ffmpeg.rfind('/');
-  const std::string beside = out.ffmpeg.substr(0, sl + 1) + "ffprobe";
-  out.ffprobe = executable(beside) ? beside : on_path("ffprobe");
+  const std::string name = ffmpeg.empty() ? std::string(kDefaultFfmpeg) : ffmpeg;
+  auto ffprobe_for = [](const std::string &ff) {  // beside it, else on PATH
+    const std::string beside = ff.substr(0, ff.rfind('/') + 1) + "ffprobe";
+    return executable(beside) ? beside : on_path("ffprobe");
+  };
+  out.ffmpeg = on_path(name);
+  if (out.ffmpeg.empty() && name == kDefaultFfmpeg)  // the default name: the usual install places too (the first complete one)
+    for (const std::string &p : ffmpeg_install_paths())
+      if (executable(p) && !ffprobe_for(p).empty()) {
+        out.ffmpeg = p;
+        break;
+      }
+  if (out.ffmpeg.empty()) return why = "no ffmpeg executable (" + name + ") found: video input is off", false;
+  out.ffprobe = ffprobe_for(out.ffmpeg);
   if (out.ffprobe.empty()) return why = "no ffprobe beside " + out.ffmpeg + " or on PATH: video input is off", false;
   return true;
 }
@@ -223,7 +265,7 @@ bool decode_video_frames(const std::string &bytes, const VideoTools &tools, cons
   Fd mf;
   if (!memfile(bytes, mf, err)) return false;
   std::string sel = "select=";
-  for (size_t i = 0; i < indices.size(); ++i) sel += (i ? "+eq(n\\," : "eq(n\\,") + std::to_string(indices[i]) + ")";
+  append_select_sum(indices, sel);
   const std::vector<std::string> argv = {tools.ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-i", "/proc/self/fd/3",
                                          "-map", "0:v:0", "-an", "-sn", "-dn", "-vf", sel, "-fps_mode", "passthrough",
                                          "-sws_flags", "bicubic", "-pix_fmt", "rgb24", "-c:v", "ppm", "-f", "image2pipe", "-"};

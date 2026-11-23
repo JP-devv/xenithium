@@ -87,6 +87,7 @@ int Model::snap_save(int slot) {
   for (int c = 0; c < nc_; ++c)
     if (!r.host[c]) r.host[c] = fab_.alloc_host(std::max<size_t>(snap_bytes(c), 4096));
   r.pos = sq.pos;
+  r.rope_delta = sq.rope_delta;
   r.gdn_par = sq.gdn_par;
   r.ple = sq.ple_ctx;
   r.used = true;
@@ -127,6 +128,7 @@ void Model::snap_restore(int slot, int id) {
   Seq &sq = seqs_[static_cast<size_t>(slot)];
   sq = Seq{};
   sq.pos = r.pos;
+  sq.rope_delta = r.rope_delta;  // the snapshot's YaRN tier (the engine restores a tier's snapshots in that tier only)
   sq.gdn_par = r.gdn_par;
   sq.last_rows = 0;  // as after a prefill call: committed, nothing to replay
   sq.ple_ctx = r.ple;

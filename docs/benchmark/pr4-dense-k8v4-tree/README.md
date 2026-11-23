@@ -28,6 +28,8 @@ The screenshot references two `results.html` reports, a summary and `~/experimen
 
 ## Evidence status
 
+**Revision boundary:** the host checks below ran on the original base `df5f761` and local candidate `a5d55e9`, before the merge with upstream `9e542a1`. They do not validate or measure the merged code; merged-head host and device qualification are separate.
+
 | Check | Status | Scope and limits |
 | --- | --- | --- |
 | Base and candidate Release/BMG GQA builds | **Completed offline, exit 0 each** | Base binary `1f80463f3cae2e53c0bcc723e49ed9fbf67a482a2c2e6e730396b66bfd467037`; test build `9d5a029da6a329dc7c2bf7705d2cef5a13100c7e0b3916a91968fee34cb04b82`. Compilation is not execution. |

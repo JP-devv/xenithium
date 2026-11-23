@@ -136,8 +136,7 @@ const char *brief_of(std::string_view key) {
        "A limit, not a reservation: all slots share the KV pool, and a request takes KV only as it grows.\n"
        "\n"
        "Past the trained length (262,144 on qwen35 / qwen38, 524,288 on Nanbeige) the engine turns on YaRN by itself, with the smallest factor that reaches the limit: 524,288 on a 262,144 model = factor 2.00.\n"
-       "- qwen35: each request gets its own factor (`XEN_YARN_TIERS`), so short requests keep the trained numerics.\n"
-       "- Other models: YaRN changes every request, short ones too. Stay at or under the trained length unless you need more.\n"
+       "- qwen35, qwen38 and Nanbeige: each request gets its own factor (`XEN_YARN_TIERS`), so short requests keep the trained numerics.\n"
        "- flint needs no YaRN.\n"
        "\n"
        "Limits: up to 1,048,576 tokens. The load refuses a limit whose KV for one request does not fit the cards, and names the largest that does."},
@@ -501,9 +500,9 @@ const char *brief_of(std::string_view key) {
        "Gives (bf16): + prompt reading speed.\n"
        "Takes (bf16): - exactness: a small numerics change."},
       {"XEN_YARN_TIERS",
-       "qwen35, for a max context past the trained 262,144 tokens: YaRN per request.\n"
+       "qwen35, qwen38 and Nanbeige, for a max context past the trained length (262,144 tokens; Nanbeige 524,288): YaRN per request. flint needs no YaRN.\n"
        "\n"
-       "`on`  a request gets the factor of the smallest tier that holds its prompt plus room to grow. Tiers: 262,144 at 1.00, 524,288 at 2.00, then the max context.\n"
+       "`on`  a request gets the factor of the smallest tier that holds its prompt plus room to grow. Tiers: the trained length at 1.00, twice it at 2.00 (and so on, doubling), then the max context.\n"
        "`off`  one factor for every request: the max context's\n"
        "\n"
        "Gives (on): + quality for chat-sized requests: they keep the trained model's numerics, and long ones still reach the max context.\n"
@@ -631,10 +630,13 @@ const char *brief_of(std::string_view key) {
        "Which kernels run the prompt's large matrix products.\n"
        "\n"
        "`onednn`  library GEMMs where they win, repacked per call (no extra weight copy)\n"
+       "`onednn-all`  qwen35: the library for every int4 matrix of the prompt, the narrow ones too (down, out, o)\n"
        "`esimd`  the engine's own kernels only\n"
        "\n"
        "Gives (onednn): + prompt reading speed.\n"
        "Takes (onednn): - VRAM on qwen38: about 0.12 GiB per card, taken from the hot experts.\n"
+       "Gives (onednn-all): + prompt reading speed on the dense 27B: +4.8 % at 2K, +3.1 % at 8K, +2.9 % at 32K over `onednn` (two cards, KV lending on).\n"
+       "Takes (onednn-all): - a small numerics change: the narrow matrices take the library's rounding. - KV lending keeps 128 more layouts (about 1.8 GiB per card of free KV pages; given back when the pool fills).\n"
        "- qwen35 (with `XEN_PREFILL_W4` a8): the wide int4 matrices run on oneDNN. Calls under `XEN_PREFILL_GEMM_ROWS` rows stay on esimd.\n"
        "- qwen38: its int8 dense matrices run on oneDNN with prefill chunks of 2,048+ (same output). With smaller chunks it stays off."},
       {"XEN_PREFILL_W4",
@@ -917,6 +919,7 @@ const char *brief_of(std::string_view key) {
       {"XEN_VISION_FFMPEG",
        "With image input on: requests may also include videos (`video_url` parts: mp4, webm, mov, ... as `data:` or http(s) URLs). This ffmpeg program decodes them.\n"
        "\n"
+       "`ffmpeg`  the one on PATH, else the first of /usr/bin, /usr/local/bin, /opt/ffmpeg/bin, /snap/bin, ~/bin, ~/.local/bin, ~/.hermes/tools/*/bin\n"
        "`empty`  videos are refused; so is a program that is not found (the log says why)\n"
        "\n"
        "Needs: `ffprobe` beside it or on PATH."},
@@ -1293,8 +1296,7 @@ std::vector<Spec> schema() {
     s.choices = {"auto", "bf16", "fp32"};
   }
   {
-    auto &s = add("XEN_YARN_TIERS", "YaRN per request", num, Kind::Choice);
-    s.scope = Scope::Qwen35;
+    auto &s = add("XEN_YARN_TIERS", "YaRN per request", num, Kind::Choice);  // every arch but flint (flint_skips)
     s.choices = {"on", "off"};
   }
   {
@@ -1376,8 +1378,8 @@ std::vector<Spec> schema() {
   {
     auto &s = add("XEN_PREFILL_GEMM", "Prefill GEMM library", num, Kind::Choice);
     s.scope = Scope::All;  // qwen35 and qwen38 (applies)
-    s.choices = {"onednn", "esimd"};
-    s.names = {{"onednn", "oneDNN where it wins"}, {"esimd", "engine kernels only"}};
+    s.choices = {"onednn", "onednn-all", "esimd"};
+    s.names = {{"onednn", "oneDNN where it wins"}, {"onednn-all", "oneDNN for every int4 matrix (qwen35)"}, {"esimd", "engine kernels only"}};
   }
   {
     auto &s = add("XEN_PREFILL_GEMM_ROWS", "Prefill GEMM library: from rows per call", num, Kind::Choice);
@@ -1451,11 +1453,11 @@ std::vector<Spec> schema() {
   }
   {  // Image input
     auto &s = add("XEN_VISION", "Image input", net, Kind::Bool);
-    s.scope = Scope::Qwen38;
+    s.scope = Scope::Vision;
   }
   {
     auto &s = add("XEN_VISION_MAX_PIXELS", "Image size cap", net, Kind::Int);
-    s.scope = Scope::Qwen38;
+    s.scope = Scope::Vision;
     s.lo = 65536;
     s.hi = 16777216;
     s.choices = {"262144", "1048576", "4194304"};
@@ -1463,30 +1465,30 @@ std::vector<Spec> schema() {
   }
   {
     auto &s = add("XEN_VISION_IMAGES", "Images kept encoded", net, Kind::Int);
-    s.scope = Scope::Qwen38;
+    s.scope = Scope::Vision;
     s.lo = 1;
     s.hi = 256;
     s.choices = {"4", "16", "64"};
   }
   {  // Media URLs
     auto &s = add("XEN_MEDIA_URLS", "Images by http(s) link", net, Kind::Bool);
-    s.scope = Scope::Qwen38;
+    s.scope = Scope::Vision;
   }
   {
     auto &s = add("XEN_MEDIA_DOMAINS", "Image link hosts", net, Kind::Text);
-    s.scope = Scope::Qwen38;
+    s.scope = Scope::Vision;
     s.allow_empty = true;
     s.names = {{"", "any host"}};
   }
   {  // Video input
     auto &s = add("XEN_VISION_FFMPEG", "Video decoder (ffmpeg)", net, Kind::Path);
-    s.scope = Scope::Qwen38;
+    s.scope = Scope::Vision;
     s.allow_empty = true;
     s.names = {{"", "off (no video)"}};
   }
   {
     auto &s = add("XEN_VIDEO_MAX_PIXELS", "Video pixel budget", net, Kind::Int);
-    s.scope = Scope::Qwen38;
+    s.scope = Scope::Vision;
     s.lo = 65536;
     s.hi = 268435456;
     s.choices = {"6291456", "25165824", "50331648"};
@@ -1494,7 +1496,7 @@ std::vector<Spec> schema() {
   }
   {
     auto &s = add("XEN_VIDEO_FPS", "Video frames per second", net, Kind::Float);
-    s.scope = Scope::Qwen38;
+    s.scope = Scope::Vision;
     s.lo = 0.01;
     s.hi = 30;
     s.choices = {"1", "2", "4"};
@@ -1502,7 +1504,7 @@ std::vector<Spec> schema() {
   }
   {
     auto &s = add("XEN_MEDIA_TIMEOUT", "Image download timeout", net, Kind::Float);
-    s.scope = Scope::Qwen38;
+    s.scope = Scope::Vision;
     s.lo = 0.1;
     s.hi = 600;
     s.choices = {"5", "30", "120"};
@@ -1967,6 +1969,7 @@ std::string scope_name(Scope s) {
     case Scope::Qwen38: return "qwen38 only";
     case Scope::Qwen35: return "qwen35 only";
     case Scope::MoE: return "MoE models only";
+    case Scope::Vision: return "qwen38 and qwen35 (the checkpoints with a vision tower)";
     default: return "every model";
   }
 }
@@ -1991,7 +1994,7 @@ bool llama_skips(std::string_view key) {
 // whole lm_head, no MTP layer) and the settings it reads.
 bool flint_skips(std::string_view key) {
   if (key == "XEN_PREFILL_W4") return false;
-  if (key == "XEN_LM_HEAD") return true;
+  if (key == "XEN_LM_HEAD" || key == "XEN_YARN_TIERS") return true;  // (no YaRN: rotary only inside its windows)
   for (const char *k : {"XEN_DRAFTER", "XEN_DRAFTER_MODEL", "XEN_DRAFTER_DEFER", "XEN_DRAFTER_CUT", "XEN_DRAFT_DEPTHS", "XEN_ADAPTIVE_DEPTH"})
     if (key == k) return false;
   return llama_skips(key);
@@ -2009,8 +2012,7 @@ bool applies(const Spec &s, std::string_view arch) {
   if (arch == "qwen38" && s.key == "XEN_DRAFTER_MTP_FROM") return true;  // Both drafters
   if (arch == "qwen38" && (s.key == "XEN_DRAFTER_TREE" || s.key == "XEN_DRAFTER_TREE_SEQS")) return true;  // DFlash trees
   if (arch == "qwen38" && s.key == "XEN_STEP_ROWS") return true;  // Qwen38's 32-row steps
-  if (s.key.rfind("XEN_VISION", 0) == 0 || s.key.rfind("XEN_MEDIA", 0) == 0 || s.key.rfind("XEN_VIDEO", 0) == 0)
-    return arch.empty() || arch == "qwen38" || arch == "qwen35";  // The checkpoints with a tower
+  if (s.scope == Scope::Vision) return arch.empty() || arch == "qwen38" || arch == "qwen35";
   if (arch.empty() || s.scope == Scope::All) return true;
   return (s.scope == Scope::Qwen38 && arch == "qwen38") || (s.scope == Scope::MoE && arch == "qwen38") ||
          (s.scope == Scope::Qwen35 && (arch == "qwen35" || arch == "llama" || arch == "flint"));
@@ -2078,11 +2080,11 @@ std::string unused_reason(const Spec &s, std::string_view arch, const Values &va
   // B70s every expert fits in VRAM at TP4: nothing is cold)
   if (s.key.rfind("XEN_MOE_CPU", 0) == 0 && arch == "qwen38" && v("XEN_Q38_TP") == "4") return "not at TP4 (32-column expert quarters)";
   if ((s.key == "XEN_KV_LEND" || s.key == "XEN_KV_LEND_KEEP") && arch == "qwen35") {
-    if (v("XEN_PREFILL_W4") != "a8" || v("XEN_PREFILL_GEMM") != "onednn") return "only with the prefill GEMMs on oneDNN (int4 GEMMs a8)";
+    if (v("XEN_PREFILL_W4") != "a8" || v("XEN_PREFILL_GEMM").rfind("onednn", 0) != 0) return "only with the prefill GEMMs on oneDNN (int4 GEMMs a8)";
     if (v("XEN_KV_POOL_TOKENS") == "0") return "needs the shared KV pool";
     if (s.key == "XEN_KV_LEND_KEEP" && v("XEN_KV_LEND") == "off") return "needs KV lending on";
   }
-  if (s.key == "XEN_PREFILL_GEMM_ROWS" && (v("XEN_PREFILL_W4") != "a8" || v("XEN_PREFILL_GEMM") != "onednn")) return "only with the prefill GEMMs on oneDNN (int4 GEMMs a8)";
+  if (s.key == "XEN_PREFILL_GEMM_ROWS" && (v("XEN_PREFILL_W4") != "a8" || v("XEN_PREFILL_GEMM").rfind("onednn", 0) != 0)) return "only with the prefill GEMMs on oneDNN (int4 GEMMs a8)";
   if (s.key == "XEN_PREFILL_A8_KEEP" && v("XEN_PREFILL_W4") != "a8") return "only with prefill int4 GEMMs a8";
   if (s.key == "XEN_PREFILL_A8_BODY" && v("XEN_PREFILL_W4") != "a8") return "only with prefill int4 GEMMs a8";
   if (s.key == "XEN_PREFILL_GEMM" && arch != "qwen38" && v("XEN_PREFILL_W4") != "a8") return "only with prefill int4 GEMMs a8";
@@ -2431,14 +2433,8 @@ std::vector<std::string> ffmpeg_candidates() {
     const std::string real = std::filesystem::canonical(vt.ffmpeg, ec).string();
     if (seen.insert(ec ? vt.ffmpeg : real).second) out.push_back(vt.ffmpeg);
   };
-  take("ffmpeg");
-  for (const char *d : {"/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/opt/ffmpeg/bin/ffmpeg", "/snap/bin/ffmpeg"}) take(d);
-  if (const char *h = std::getenv("HOME")) {  // static builds unpacked under ~/.hermes/tools/<name>/bin or ~/bin
-    take(std::string(h) + "/bin/ffmpeg");
-    take(std::string(h) + "/.local/bin/ffmpeg");
-    std::error_code ec;
-    for (const auto &e : std::filesystem::directory_iterator(std::string(h) + "/.hermes/tools", ec)) take((e.path() / "bin" / "ffmpeg").string());
-  }
+  take(std::string(xenithium::util::kDefaultFfmpeg));  // PATH (else the first install place the server would pick)
+  for (const std::string &p : xenithium::util::ffmpeg_install_paths()) take(p);
   return out;
 }
 

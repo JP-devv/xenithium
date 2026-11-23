@@ -182,10 +182,12 @@ class StepModelAdapter final : public core::StepModel {
   void kv_trim(int slot, int64_t tokens) override { m_.kv_trim(slot, tokens); }
   int64_t kv_held_tokens(int slot) const override { return m_.kv_held_tokens(slot); }
   int kv_page_tokens() const override { return Model::k_page_tokens; }
-  // Prefill calls at multiples of 64 with 64+ rows compute every row as a cold prefill does; a cut elsewhere or a call
-  // under 64 rows does not. That holds with the fa body's context splits off (XEN_ATTN_TAIL 0); with them a row's bits
-  // depend on its call's size.
-  int snap_align() const override { return 64; }
+  // Prefill calls at multiples of 64 with 64+ rows compute every row as a cold prefill does when no kernel's work split
+  // follows the call's size (XEN_ATTN_TAIL 0, no library GEMM route). With the fa body's context splits or the library
+  // route, a row's bits depend on its call: the alignment is then the prefill chunk (Model::call_align), so a cached
+  // continuation starts at a chunk boundary and runs the cold read's own calls (measured: cached == cold, logprobs bit
+  // for bit, round 101).
+  int snap_align() const override { return m_.call_align(); }
   int rope_tiers() const override { return m_.rope_tiers(); }  // ModelOptions::yarn_tiers
   int64_t rope_tier_limit(int t) const override { return m_.rope_tier_limit(t); }
   void set_rope_tier(int slot, int t) override {
