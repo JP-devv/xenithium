@@ -1,0 +1,3 @@
+ROUTE_CASE {"accepted_cache_tokens": 0, "arm": "dense", "case": "middle", "decode_rank_layer_pairs": 32, "decode_routes": ["dense"], "generation": 3, "prefill_rank_layer_pairs": 32, "prefill_routes": ["dense"], "prompt": 36864, "remaining_prefill_rows": 36864, "request": 6, "round": "cold", "slot": 0}
+ROUTE_CASE {"accepted_cache_tokens": 36800, "arm": "dense", "case": "middle", "decode_rank_layer_pairs": 32, "decode_routes": ["dense"], "generation": 4, "prefill_rank_layer_pairs": 32, "prefill_routes": ["dense"], "prompt": 36864, "remaining_prefill_rows": 64, "request": 8, "round": "repeat", "slot": 0}
+ROUTE_CASE_GATE=PASS

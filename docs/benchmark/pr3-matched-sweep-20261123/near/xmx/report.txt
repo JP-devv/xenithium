@@ -1,0 +1,14 @@
+xenithium-bench run 20261123-181803-near-xmx
+  endpoint http://127.0.0.1:18102/v1, model swift15-baked, context 177,216 tokens, KV pool 177,216 tokens
+  suite custom, seed 1, sampling T 0.70 / top-p 0.95 / top-k 20, thinking off, replies fixed, corpus hard v4 13373ca1b8581df7, 118 s
+
+== Burst on one shared document   [burst: 118 s, 2 requests]
+  requests   TTFT ms  prompt tokens  cached tokens  decode tok/s  all done s
+  1 alone    113,564  176,073        0              71.8          115
+  1 at once  188      176,073        176,000        56.4          2.41
+  note: fixed fixture: identical user message reused; verify actual cache counts and outputs separately
+  note: fixed fixture output: {"text":"COBALT LANTERN 7286\n\nThe record was identified by locating the specific text block labeled `[AUTHORISED VAULT REGISTER]` embedded within the provided C++ source code (specifically inside the `BatchEngine::loop` function in the `xenithium/core` namespace). The archive itself contains a large collection of C++ source code for a system named \"Xenithium,\" which includes components for a batch inference engine, an HTTP server, a Jinja template interpreter, a BPE tokenizer, a dense weight store loader, and various SYCL/ESIMD kernel implementations for attention and G","reasoning":"","finish_reason":"length"}
+  note: fixed fixture: identical user message reused; verify actual cache counts and outputs separately
+  note: fixed fixture output: {"text":"COBALT LANTERN 7286\n\nThe record was identified by locating the specific text block labeled `[AUTHORISED VAULT REGISTER]` embedded within the provided C++ source code (specifically within the `BatchEngine` implementation in `xenithium/core/batch_engine.cpp`). The archive contains a comprehensive codebase for a high-performance inference engine named \"Xenithium,\" including modules for batch processing, speculative decoding, prefix caching, a Jinja template interpreter, a BPE tokenizer, and a SYCL-based kernel library for dense and quantized matrix multiplications.\n","reasoning":"","finish_reason":"length"}
+  note: server: 2.59 tokens per speculative step over 98 steps
+  note: server: its prefix cache served 176000 of 352146 prompt tokens

@@ -1,0 +1,5 @@
+ROUTE_DISPATCH request=6 slot=0 generation=3 rank=0 layer=3 phase=prefill_rows route=trained_qsa pos=32768 rows=2048 reason=none
+ROUTE_DISPATCH request=6 slot=0 generation=3 rank=0 layer=3 phase=verify_chain route=trained_qsa pos=176073 rows=4 reason=none
+ROUTE_CACHE_ADMIT request=8 slot=0 generation=4 prompt=176073 accepted_cache_tokens=176000 admission=new remaining_prefill_rows=73
+ROUTE_DISPATCH request=8 slot=0 generation=4 rank=0 layer=3 phase=prefill_rows route=dense pos=176000 rows=73 reason=history_incomplete
+ROUTE_DISPATCH request=8 slot=0 generation=4 rank=0 layer=3 phase=verify_chain route=dense pos=176073 rows=4 reason=history_incomplete_or_short

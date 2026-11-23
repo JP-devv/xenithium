@@ -1,0 +1,340 @@
+Internal ctest changing into directory: /home/dan/agent-work/xenithium-pr3-cleanup-AZkL4v/build
+Test project /home/dan/agent-work/xenithium-pr3-cleanup-AZkL4v/build
+      Start  1: model
+ 1/18 Test  #1: model ............................   Passed    0.21 sec
+      Start  2: qsa-host
+ 2/18 Test  #2: qsa-host .........................   Passed    0.22 sec
+      Start  3: ple-host
+ 3/18 Test  #3: ple-host .........................   Passed    0.00 sec
+      Start  4: eval
+ 4/18 Test  #4: eval .............................   Passed    0.13 sec
+      Start  5: tokenizer
+ 5/18 Test  #5: tokenizer ........................   Passed    0.00 sec
+      Start  6: chat
+ 6/18 Test  #6: chat .............................   Passed    0.01 sec
+      Start  7: jinja
+ 7/18 Test  #7: jinja ............................   Passed    0.00 sec
+      Start  8: server
+ 8/18 Test  #8: server ...........................   Passed   16.34 sec
+      Start  9: launch
+ 9/18 Test  #9: launch ...........................***Failed    0.90 sec
+[PASS] schema, start-server.sh and docs/server-env.md list the same settings
+[PASS] every start-server.sh variable is in the catalog with its default (107)
+[PASS] XEN_PORT: default, flag and help from the script and docs
+[PASS] XEN_HOT_RANK keeps its ${X-default} default (auto: the model's own ranking)
+[PASS] XEN_ROUTE_STATE is gone (round 169: the ranking file is recorded while serving)
+[PASS] XEN_HOT_RANK: auto valid, and a file that does not exist yet is fine (the server records it)
+[PASS] XEN_HOT: a MoE setting, empty = auto (as many as fit)
+[PASS] ${X:--1} parses as -1
+[PASS] XEN_SEG_ROWS: 16 = the default (was 8), 8 stays offered
+[PASS] XEN_DRAFTER_MTP_FROM: 9 = the default (was 5)
+[PASS] docs cells keep their escaped pipes as text
+[PASS] diagnostic switches come from the docs' second table
+[PASS] every setting has a brief description
+[PASS] descriptions: every code span closes in its paragraph ()
+[PASS] descriptions: every choice of a closed list has its line ()
+[PASS] descriptions: a setting that moves memory says so ()
+[PASS] descriptions: what a setting gives and takes, without measured results ()
+[PASS] moves_memory: the settings the memory plan reads
+[PASS] whatif_values: a closed list's choices
+[PASS] whatif_values: a number's suggestions with the current value, ascending
+[PASS] whatif_values: on / off
+[PASS] whatif_values: a drafter path's candidates after none, named by their folder
+[PASS] whatif_values: nothing to compare = no table
+[PASS] whatif_name: large numbers with separators
+[PASS] kv_capacity_text: full contexts, or every slot at once (2 requests at the full 524,288-token max context, or all 16 slots at 69,440 tokens each)
+[PASS] kv_capacity_text: a pool of slots x context
+[PASS] kv_capacity_text: a pool below one context
+[PASS] kv_delta_text: a value's pool against the current one
+[PASS] XEN_PF_PROFILE is a qwen38-only switch
+[PASS] XEN_QSA_PF_TILES is a qwen38-only switch
+[PASS] XEN_DEC_PROFILE is a qwen38-only diagnostic
+[PASS] draft vocabulary shown with the drafter on
+[PASS] XEN_UNEQUAL_SEGMENTS: qwen35 with its drafter (round 229), not llama / flint
+[PASS] XEN_HOT: shown for qwen38, hidden for the dense archs
+[PASS] qwen38 reserve: shown with auto and pinned hot experts (a pinned count is cut to the fit minus the reserve)
+[PASS] flint: graphs, KV, TP, prefill int4 / attention and the prefix cache shown; lm_head, W4A8 keep and the drafter hidden
+[PASS] flint with a DFlash drafter: its settings shown, trees / 16-row segments / MTP / draft vocabulary hidden; none without the model
+[PASS] qwen38 draft vocabulary: shown with XEN_MTP set, hidden without
+[PASS] adaptive draft depth: shown with XEN_MTP set, hidden without (round 111)
+[PASS] adaptive draft depth: a qwen35 setting too, shown with the drafter on (round 119)
+[PASS] lookup drafting: shown with a drafter (qwen35 drafter on, qwen38 XEN_MTP), hidden without (round 53)
+[PASS] MTP depth: a qwen38 choice (3/2/1), default 3, flag from the docs, needs XEN_MTP, hidden for qwen35
+[PASS] DFlash drafter: qwen35 and qwen38 (round 171), shown with the drafter on; not llama
+[PASS] qwen38 DFlash drafter: replaces XEN_MTP (XEN_DRAFTER_MTP_FROM 0) / XEN_MTP_DEPTH, enables its cut, keeps the draft vocabulary (round 171)
+[PASS] qwen38 both drafters: XEN_MTP beside XEN_DRAFTER_MODEL with XEN_DRAFTER_MTP_FROM > 0 (engine round 264); the switch needs both
+[PASS] prefill attention numerics: a qwen35 choice (auto / exact / fast / int8 / int8-fast / onednn, rounds 34 / 36 / 41), default auto, flag from the docs
+[PASS] prefill W4 numerics: a qwen35 choice (exact / dequant / a8), default a8 (qwen38-27b round 33), flag from the docs
+[PASS] prefill dense trunk: a qwen38 choice (w8a16 / w8a8 / w8a8-row), default w8a8-row (round 36), flag from the docs
+[PASS] GDN projections: a qwen38 choice (int8 / int4 / int4-qkvz), default int8, flag from the docs
+[PASS] W4A8 keep spec: a qwen35 text setting, default empty, flag from the docs, shown only with XEN_PREFILL_W4=a8
+[PASS] W4A8 GEMM body: a qwen35 choice auto / slm / direct, default auto, flag from the docs, shown only with XEN_PREFILL_W4=a8
+[PASS] TP: a qwen35 choice (2 / 1), default 2, flag from the docs
+[PASS] TP1 card: default 0, flag from the docs, shown only with XEN_TP=1
+[PASS] two-card wire: hidden with TP1
+[PASS] prefill two-card wire: auto / bf16 / fp32 for qwen35 and qwen38 (round 207), default auto, flag from the docs, hidden with qwen35 TP1
+[PASS] KV lending: a choice on / off (default on) + its keep (32768) for qwen38 and the dense 27B (qwen38-27b round 89), flags from the docs
+[PASS] KV lending vs the prefix cache: park timeout 300 s, pressure kv / lru / idle, grace 60 s (qwen38), flags from the docs
+[PASS] prefill GEMM row threshold (qwen38-27b round 89): 1024 / 512 / 256 / 128 for the dense 27B on oneDNN, default 1024, flag from the docs
+[PASS] KV lending on the dense 27B: only with the oneDNN prefill GEMMs and the shared pool; the keep only with it on; the prefix-cache settings stay qwen38's
+[PASS] YaRN per request: a qwen35 choice on / off, default on, flag from the docs
+[PASS] qwen38 TP: its own qwen38 setting (default 2), apart from qwen35's XEN_TP
+[PASS] qwen38 TP1 card: shown only with XEN_Q38_TP=1, not with qwen35's XEN_TP=1
+[PASS] lm_head format: a qwen35 choice (auto / int8 / int4 / int4-rescore, round 36), default auto, flag from the docs
+[PASS] two-stage head tiles: a qwen35 int 1..32, default 32, flag from the docs, shown with XEN_LM_HEAD=int4-rescore or auto (round 36), hidden with int8
+[PASS] draft head rows: a qwen35 choice (auto / int8 / int4), default auto, flag from the docs
+[PASS] image input (round 167): qwen38 / qwen35 only, defaults 0 / 1048576 / 16 and flags from the docs, size settings shown with it on
+[PASS] media URLs (round 168): qwen38 / qwen35 with image input on, defaults 1 / any host / 30 s and flags from the docs, host list and timeout only with links on
+[PASS] video input (round 168): ffmpeg path / pixel budget / fps, defaults ffmpeg / 25165824 / 2 and flags from the docs, shown with image input on and a decoder set
+[PASS] video decoder: a program on PATH or a path (no folder check), a missing one a warning; 2 found on this host pass
+[PASS] prefix cache (qwen38-27b round 22; qwen38 since round 104): both archs, defaults 1 / 8 GiB / 1024 / live 0 and flags from the docs
+[PASS] prefix cache memory, mark and live resumes hidden with the cache off
+[PASS] draft vocabulary hidden with the drafter off
+[PASS] DFlash drafter hidden with the drafter off
+[PASS] SJF aging shown with policy sjf
+[PASS] SJF aging hidden with policy fifo
+[PASS] reserve is unused by qwen35 without an auto pool
+[PASS] the stub engine ignores prefill settings, keeps slots
+[PASS] every default is a valid value 
+[PASS] an unknown setting appears under Other as text
+[PASS] env: plain, export and trailing-comment lines
+[PASS] env: $HOME expands
+[PASS] env: single quotes
+[PASS] env: set in place, append quoted, erase, keep comments and other lines
+[PASS] env: a quote inside a value round-trips
+[PASS] env: apply keeps changed settings and drops the ones back at their default
+[PASS] slots: qwen38 1..64 (engine round 276; 17+ needs four cards: a cross-setting check), qwen35 1..16 (qwen38-27b round 71), llama/flint 1..8
+[PASS] prefill chunk: a multiple of 4
+[PASS] draft vocabulary: a multiple of 32
+[PASS] draft vocabulary: a multiple of 64 for qwen38 (round 106)
+[PASS] drafter defer: 0 or 8..512 rows
+[PASS] drafter cut: a probability below 1
+[PASS] drafter cut / MTP-from / int4: shown only with a DFlash drafter model; defer with any drafter
+[PASS] drafter MTP-from: 0..16 sequences
+[PASS] page selection: 0 (dense) by default, up to 4096 pages, qwen35 only
+[PASS] prefill page selection: 0 (dense) by default, up to 4096 pages, qwen35 only
+[PASS] prompts per prefill call: 16 by default, 1 (a call per prompt) to 16, qwen35 only
+[PASS] page sharing among heads: auto by default, same allowed, anything else refused, qwen35 only
+[PASS] DFlash drafter: empty = the MTP layer; a directory without a DFlash2DraftModel config warns; a missing one fails
+[PASS] KV pool: auto or a number
+[PASS] KV pool: 0 (the fixed per-slot layout) is refused with a reason
+[PASS] choices and integers are checked
+[PASS] KV int8-v4 (int8 K + int4 V, rounds 205 / 226): offered for qwen38 and the 27B, refused with a reason elsewhere
+[PASS] wire int8 (qwen38-27b round 89): offered for the dense 27B, refused with a reason for llama / flint
+[PASS] the served name must not be empty
+[PASS] max context: up to the kernels' 1,048,576 (rounded up to 64)
+[PASS] max context past the trained positions: a warning with the automatic YaRN factor (2.00 / 1.28; Nanbeige 524,288 trained); flint none
+[PASS] launcher YaRN factor = the load's rule (qsa_yarn_for)
+[PASS] a KV pool smaller than one context is an error
+[PASS] a port below 1024 is a warning
+[PASS] step rows: XEN_STEP_ROWS / XEN_SEG_ROWS / XEN_DRAFT_DEPTHS checked as the server checks them
+[PASS] flint: draft depths checked against its 8-row steps
+[PASS] XEN_HOT: a count past the model's total warns, a count within it does not
+[PASS] max_hot_of: the routed experts over all MoE layers (qwen38 48 x 512)
+[PASS] bytes_per_expert_card: qwen38 = 3 x 2560 x 640 x 0.5 / 2
+[PASS] hot_description: qwen38 states the total expert count and the two-card split
+[PASS] parse_plan: the server's --plan JSON (hot experts, KV tokens, pinned host RAM)
+[PASS] hot_description: the plan's fit when there is one
+[PASS] plan_issues: pinned host RAM past the free RAM is an error
+[PASS] plan_issues: only a warning while a server runs (its memory is counted in the free RAM)
+[PASS] plan_issues: a prefix cache past the RAM left is a warning (the server cuts it)
+[PASS] plan_issues: a pinned hot count past the fit warns (the load cuts it)
+[PASS] plan_issues: a pinned hot count within the fit is fine
+[PASS] hot_description: empty for the dense archs
+[PASS] hot_fit: qwen38 within [0, max] (0 when no known card)
+[PASS] qwen38 too (round 102): a KV pool smaller than one context is an error
+[PASS] settings of the other arch are not validated
+[PASS] keys: arrows, CSI ~, SS3, SGR mouse, paste, UTF-8, controls (13 keys)
+[PASS] keys: a lone ESC waits for more bytes, then reads as Esc
+[PASS] keys: a sequence cut between reads is joined
+[PASS] widths: ASCII 1, box drawing 1, CJK 2
+[PASS] ellipsize
+[PASS] wrap at word boundaries
+[PASS] wrap splits a word longer than the line
+[PASS] help_label: a label word, an optional (case), the colon
+[PASS] help_label: only the listed words followed by a colon
+[PASS] help_lines: one paragraph per line break, an empty one is a blank line
+[PASS] help_lines: a run of values shares one text column (as drawn: the backticks take no cell), wrapped lines hang under it (What it does.||`int8`     half the memory|`int8-v4`  keys int8, values|         int4, a quarter less||Gives (int8): twice the tokens|  of bf16|• one|• two|)
+[PASS] help_lines: a labelled line hangs by two, the label's bytes marked
+[PASS] help_lines: bullets
+[PASS] help_lines: a percent sign stays with its number
+[PASS] help_lines: a code span cut by a line break is closed and reopened
+[PASS] help_lines: a single value keeps two spaces before its text
+[PASS] canvas: a wide char takes two cells, clipped at the edge
+[PASS] metrics: labels summed
+[PASS] exit: the OOM kill of the pid, its time and anon RSS
+[PASS] exit: a pid prefix is not a match
+[PASS] exit: dmesg -T format
+[PASS] exit: statuses in words
+[PASS] exit: a crash needs no kernel log
+[PASS] model scan: arch from the registry, MTP and DFlash drafters told apart
+[PASS] drafters: <target>-mtp* siblings
+[PASS] dflash drafters: DFlash2DraftModel and DFlashDraftModel (DSpine) checkpoints under the models directory
+[PASS] model: max_position_embeddings read from text_config (trained positions; max context the kernels' 1,048,576)
+[PASS] first frame: header, model card, settings
+[FAIL] the model card says a MoE model's ranking is recorded from this run on (none yet)
+[PASS] the file's port is shown
+[PASS] preview is the script's dry run with the file's values
+[PASS] qwen35-only settings hidden for a qwen38 model
+[PASS] nothing unsaved after open
+[PASS] the served name defaults to the checkpoint's folder name on open
+[PASS] the preview carries the folder name as the served model
+[PASS] filter: / slots selects Slots
+[PASS] Enter opens the choices popup
+[PASS] picking 2 sets XEN_SLOTS=2
+[PASS] the change is marked unsaved
+[PASS] the preview follows the change
+[PASS] Right cycles a choice (int8 -> bf16)
+[PASS] u undoes
+[PASS] a slot count of 65 is refused with the reason
+[PASS] s writes the shared settings to the model's own file (models/<folder>.env), with its XEN_MODEL
+[PASS] s writes the setup's settings to models/<folder>.tp2.env (only what differs from the model's file and the defaults)
+[PASS] server.env keeps its comment, names the model's file and holds no settings any more
+[PASS] saved: nothing unsaved
+[PASS] setup switch: XEN_Q38_TP 4 loads models/<folder>.tp4.env (its shared keys ignored), the choice unsaved
+[PASS] setup switch: s writes the choice to the model's file and keeps the setup's file (its comment; shared keys dropped)
+[PASS] setup switch with unsaved setup changes asks first
+[PASS] setup switch back: models/<folder>.tp2.env again (the discarded change gone)
+[PASS] setup switch back: saved
+[PASS] model popup: grouped by arch, drafter checkpoints left out
+[PASS] model popup: filter and pick
+[PASS] models folder: the settings file's XEN_MODELS_DIR beats the project's models/
+[PASS] m scans the settings file's XEN_MODELS_DIR
+[PASS] changing XEN_MODELS_DIR in the TUI moves the models folder live
+[PASS] the m list rescans the new folder (the old one's models are gone)
+[PASS] XEN_MODELS_DIR empty = the project's models/ folder
+[PASS] a model without a settings file starts from the defaults (moe-a's port and slots stay in its file)
+[PASS] switching the model retakes the served name from its folder name
+[PASS] qwen35 settings shown after the switch
+[PASS] a qwen38-only setting is left at its default (no --hot-rank) for qwen35
+[PASS] DFlash drafter: Enter lists the DFlash 2 and DSpine checkpoints
+[PASS] picking one sets XEN_DRAFTER_MODEL
+[PASS] the preview gains --drafter-model
+[PASS] Right cycles back to the MTP layer
+[PASS] launch blocked: a max context past the kernels' 1,048,576
+[PASS] p n saves a profile
+[PASS] the profile list shows server.env, the per-model files and the profile
+[PASS] switching back to a model reopens its own settings file
+[PASS] a model switch with unsaved changes asks: save, discard or cancel
+[PASS] discard and switch: the old model's file unchanged
+[PASS] Logs tab: no server yet
+[PASS] Benchmark tab: one Tab from the Logs tab, the hidden Chat tab skipped
+[PASS] Tab cycles back to Settings
+[PASS] r opens the launch checks
+[PASS] typed port accepted
+[PASS] q with unsaved changes asks
+[PASS] ? shows the keys
+[PASS] 70x22 draws the stacked layout
+[PASS] a tiny terminal gets a message, not garbage
+[PASS] experts: two fake qwen38 checkpoints of 2 layers x 4 experts
+[PASS] experts: auto resolves to <experts>/<model folder>/hot-rank.xrc
+[PASS] experts: a ranking of the model's shape, coverage 100 % ranked vs 50 % default at 2 hot
+[PASS] experts: a ranking of another shape is unusable, with the reason
+[FAIL] experts: a MoE model without a ranking yet: the card and the list say the server records it
+[PASS] experts: a ranking that does not exist yet is not a problem (the server records it)
+[PASS] experts: the script resolves auto to the model's ranking file even before it exists (the server creates it)
+[PASS] launch checks: the MoE ranking line
+[PASS] fake chat server starts
+[PASS] chat: the Chat tab renders (opened by number while hidden)
+[PASS] chat: idle frames sleep long
+[PASS] chat: Enter sends and the request runs
+[PASS] chat: streaming frames poll fast (smooth deltas)
+[PASS] chat: the stream finishes without an error
+[PASS] chat: idle again after the answer
+[PASS] chat: the answer accumulates the content deltas (reasoning kept apart)
+[PASS] chat: the transcript shows user, model and the dim reasoning
+[PASS] chat: completion tokens from the usage chunk
+[PASS] chat: the request carries the user turn and stream: true
+[PASS] chat: the second turn answers
+[PASS] chat: the second request re-sends the conversation (assistant turn included)
+[PASS] chat: F4 clears the conversation
+[PASS] chat: a refused connection fails and drops the partial answer
+[PASS] chat: the error is shown, the user turn stays
+[PASS] chat: the header has a Settings chip to aim at
+[PASS] chat: a left click on the header leaves the Chat tab
+[PASS] bench: 3 runs read from the runs dir (a results.json of another tool is skipped)
+[PASS] bench: grouped by model, the newest run's model first (beta 2026-02 before alpha 2026-01)
+[PASS] bench: key 3 opens the Benchmark tab (the digits name the shown tabs), runs grouped by model with a run count
+[PASS] bench: clicking the Logs chip in the header leaves the Benchmark tab
+[PASS] bench: clicking the Benchmark chip returns from Logs
+[PASS] bench: a run lists its decode, deepest prefill, decode at depth and widest concurrency
+[PASS] bench: esc in the list view is a no-op; the log panel shows the run's output (w = no wrap)
+[PASS] bench: the report shows the selected run's decode figure
+[PASS] bench: the selected run's decode value
+[PASS] bench: esc leaves the report, back to the list
+[PASS] bench: a run's report shows its summary (categories, prefill, decode at depth, concurrency), its notes and the report command
+[PASS] bench: the next run down is alpha's older one
+[PASS] bench: r opens the mode menu (standard / quick / full / long / load / agents / check / apps / decode / prefill / concurrency / streams)
+[PASS] bench: a mode picked without a ready server only warns
+[PASS] bench: the stream-count mode without a ready server warns instead of asking for counts
+[PASS] bench: m opens the mode menu on the Benchmark tab (easy by default), not the model list
+[PASS] bench: picking Hard sets the mode; the tab stays
+[PASS] bench: the menu marks the mode now in use
+[PASS] bench: picking Easy sets it back
+[PASS] bench: in a run's report m and r do nothing (no model list, no launch checks)
+[PASS] logs: m does nothing there (the model list is the Settings tab's key)
+[PASS] settings: m opens the model list
+[PASS] bench: stream counts are read from commas or spaces, sorted without repeats; empty, 0, past 256, not a number or 13 counts are refused
+[PASS] bench: the stream-count mode runs the concurrency scenario (its levels come from the input)
+[PASS] bench: a suite mode = --suite <its name>
+[PASS] bench: a scenario mode = --scenario <its name>
+[PASS] bench: every mode has its own tag
+[PASS] bench: launch notes = the launch.env's non-empty settings, unquoted, in key order
+[PASS] start-server: XEN_MODEL_ENV applies the model's file (its XEN_MODEL too)
+[PASS] start-server: a key in the settings file wins over the model's file
+[PASS] start-server: a key in the environment wins over the model's file
+[PASS] start-server: a model file of another checkpoint is not applied
+[PASS] start-server: XEN_MODEL_ENV= applies none
+[PASS] start-server: the caller's XEN_MODEL_ENV wins over the settings file's
+[PASS] start-server: the setup's file over the model's file (its setup key and checkpoint ignored)
+[PASS] start-server: the setup key unset = setup 2
+[PASS] start-server: the settings file wins over the setup's file
+[PASS] setup_env_path / is_setup_env / setup_key_of
+[PASS] find_model_env: by the file's XEN_MODEL
+[PASS] model_env_new_path / model_env_id
+[PASS] resolve_model_env: an id is <dir>/<id>.env
+[PASS] preset_env_path / user_env_path / readable_env_path
+[PASS] model_env_files: the user's files, then the presets no user file replaces (setup files never)
+[PASS] find_model_env: a preset is found by its XEN_MODEL; a replaced preset is not
+[PASS] resolve_model_env: an id or a path without a user file is its preset; a preset's path with a user file is the user's
+[PASS] model_env_new_path: a preset of another checkpoint holds its name
+[PASS] start-server: without a user file the preset applies (model and setup)
+[PASS] start-server: the user's setup file replaces the setup preset (the model's preset still applies)
+[PASS] start-server: the user's file replaces the preset, even named by the preset's path
+[PASS] start-server: the auto lookup still starts the checkpoint
+[PASS] launcher: a preset's values open (model and setup), the title marks the file as a preset
+[PASS] launcher: s writes the user's file, started from the preset's lines under a header of its own
+[PASS] launcher: s writes the user's setup file
+[PASS] launcher: the presets are byte for byte as shipped after a save
+[PASS] launcher: after the save the user's files are the ones edited
+FAIL: 2 failure(s)
+
+      Start 10: bench
+10/18 Test #10: bench ............................   Passed    3.00 sec
+      Start 11: quant-host
+11/18 Test #11: quant-host .......................   Passed    2.17 sec
+      Start 12: route-record
+12/18 Test #12: route-record .....................   Passed    0.06 sec
+      Start 13: moe-cpu-host
+13/18 Test #13: moe-cpu-host .....................   Passed    1.24 sec
+      Start 14: cards
+14/18 Test #14: cards ............................   Passed    0.00 sec
+      Start 15: image
+15/18 Test #15: image ............................   Passed    0.01 sec
+      Start 16: fetch
+16/18 Test #16: fetch ............................   Passed    2.02 sec
+      Start 17: video-host
+17/18 Test #17: video-host .......................   Passed    1.01 sec
+      Start 18: vision-host
+18/18 Test #18: vision-host ......................   Passed    0.01 sec
+
+94% tests passed, 1 tests failed out of 18
+
+Label Time Summary:
+host    =  27.35 sec*proc (18 tests)
+
+Total Test time (real) =  27.36 sec
+
+The following tests FAILED:
+	  9 - launch (Failed)
+Errors while running CTest

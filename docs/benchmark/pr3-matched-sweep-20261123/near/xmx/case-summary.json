@@ -1,0 +1,39 @@
+{
+  "arm": "xmx",
+  "case": "near",
+  "completion_tokens_total": 256,
+  "results_path": "/home/dan/agent-work/xenithium-pr3-cleanup-AZkL4v/pr3-timed-managed-window/ruby-resident-snap/near:xmx/results/20261123-181803-near-xmx/results.json",
+  "route_evidence": "separate diagnostic qualification; no route trace in timed server",
+  "rows": [
+    {
+      "cached_tokens": 0,
+      "decode_tok_s": 71.8325302765245,
+      "finish_reason": "length",
+      "http_all_done_s": 115.307678818,
+      "model_prefill_ms": null,
+      "prompt_tokens": 176073,
+      "reasoning_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "remaining_prompt_tokens": 176073,
+      "restore_ms": null,
+      "retrieval_exact": true,
+      "round": "cold",
+      "text_sha256": "157e2dca372d19d77ae09e00a5b18184bd3904060ea983bcc161f5bb1aef3832",
+      "ttft_ms": 113563.669589
+    },
+    {
+      "cached_tokens": 176000,
+      "decode_tok_s": 56.43134443192568,
+      "finish_reason": "length",
+      "http_all_done_s": 2.408796501,
+      "model_prefill_ms": null,
+      "prompt_tokens": 176073,
+      "reasoning_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "remaining_prompt_tokens": 73,
+      "restore_ms": null,
+      "retrieval_exact": true,
+      "round": "repeat",
+      "text_sha256": "8d55cb5ceeaf81fa6bf7865687bfbe98ec3d5e6c6faf9e4d9aa63fd1a3f9da89",
+      "ttft_ms": 187.808598
+    }
+  ]
+}
