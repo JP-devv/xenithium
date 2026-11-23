@@ -1,6 +1,6 @@
 # Opt-in trained K8V4 QSA for Swift
 
-Trained QSA selects which parts of the existing pooled `int8-v4` KV cache to read during speculative decode. It does not change the KV encoding, prefill attention, draft policy, or scheduler. An absent sidecar flag leaves stock dispatch and caching in place, with no trained allocations.
+Trained QSA selects which parts of the existing pooled `int8-v4` KV cache to read during speculative decode. It does not change the KV encoding, default prefill attention, draft policy, or scheduler. The separate XMX prefill option is documented in [trained QSA XMX prefill](trained-qsa-xmx-prefill.md). An absent sidecar flag leaves stock dispatch and caching in place, with no trained allocations.
 
 ## Configuration
 
@@ -30,6 +30,8 @@ Scores are causal and independent for each row: select up to 512 completed four-
 
 ## Qualification and remaining gaps
 
+For the change map, host regression coverage and adjacent-path test matrix, see [trained QSA validation](trained-qsa-validation.md). Repository benchmark reports and methodology remain under [benchmark](benchmark/README.md).
+
 The numbers below come from a matched downstream qualification build and its dense control, not from an end-to-end run of the public topic. Both arms used two Intel Arc Pro B60s, DSpine, a five-slot scheduler with stock admission, an 884,416-token pool (177,216 cap per request), and prefix caching with a 2 GiB budget. The candidate enabled tiled scoring and FP16 completed summaries. This patch keeps the qualified scoring, page walk and cache-safety code but does not include the downstream drafter changes or benchmark harness.
 
 Three distinct 8,007-token prompts, each cold then repeated with identical native IDs and a 128-token output budget, matched all six stock completion texts. Repeats restored 7,936 tokens on both arms.
@@ -45,4 +47,4 @@ The first candidate cold request waited about 1.05 s longer before model prefill
 
 In a mixed stock-scheduler burst, retrieval was exact for all four requests in both arms. The 36,864-token extension reused 7,936 short-prefix tokens and stayed dense for all 251 verifier steps. A separate repeated short request reused 7,936 tokens in a different slot via a copied snapshot and also stayed dense. Cold 28,672- and 30,720-token requests ran 58/102 and 39/94 sparse verifier steps respectively, with submissions on all 16 trained layers and both ranks. HTTP decode (stock → candidate, in prompt order) was 74.82 → 78.79, 52.38 → 52.34, 66.10 → 67.50, and 131.76 → 118.78 tok/s. These are individual staggered request rates, not joint throughput or a consistent per-request improvement.
 
-Earlier, separate synchronized long-context DSpine experiments measured 159.76 → 203.01 joint tok/s at 4 × 200,002 tokens (QSA mean/slowest 50.75/46.71), and 164.98 → 192.03 at 5 × 176,073 (38.41/36.52). Both arms retrieved all expected values; their full texts differed. These are benchmark-only workloads, not stock-scheduler or production throughput. They did not reach the near-max per-user targets, and the whole-selector five-user replay was about 15.5 ms for 16 layers per rank per verifier step vs. the 5 ms goal. A separate FP16 audit observed changed top-512 membership; retrieval checks do not establish general output parity. Trained sparse prefill, long restored-prefix sparse decode, and experimental threshold or XMX scoring are not included.
+Earlier, separate synchronized long-context DSpine experiments measured 159.76 → 203.01 joint tok/s at 4 × 200,002 tokens (QSA mean/slowest 50.75/46.71), and 164.98 → 192.03 at 5 × 176,073 (38.41/36.52). Both arms retrieved all expected values; their full texts differed. These are benchmark-only workloads, not stock-scheduler or production throughput. They did not reach the near-max per-user targets, and the whole-selector five-user replay was about 15.5 ms for 16 layers per rank per verifier step vs. the 5 ms goal. A separate FP16 audit observed changed top-512 membership; retrieval checks do not establish general output parity. The downstream measurements in this section do not include trained sparse prefill, long restored-prefix sparse decode, or experimental threshold/XMX decode scoring. The separate default-off XMX prefill extension and its limits are documented in [trained QSA XMX prefill](trained-qsa-xmx-prefill.md).
