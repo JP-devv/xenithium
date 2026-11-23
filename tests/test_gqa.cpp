@@ -1649,9 +1649,15 @@ void test_tree(xenithium::Fabric &f, const Model &m, k::QsaKv kv, int qk = 0, bo
           for (int h = 0; h < s.hkv(); ++h) {
             const size_t sl = (static_cast<size_t>(t / 64) * s.hkv() + h) * 64 + t % 64;
             const size_t kb = static_cast<size_t>(s.head_dim) * s.kv_elem();
+            const size_t vb = static_cast<size_t>(s.v_row_bytes());
+            const size_t vsc = static_cast<size_t>(s.v_scale_bytes()) / 4;
             bool same = std::equal(tree.k.begin() + static_cast<ptrdiff_t>(sl * kb), tree.k.begin() + static_cast<ptrdiff_t>((sl + 1) * kb), chain.k.begin() + static_cast<ptrdiff_t>(sl * kb)) &&
-                        std::equal(tree.v.begin() + static_cast<ptrdiff_t>(sl * kb), tree.v.begin() + static_cast<ptrdiff_t>((sl + 1) * kb), chain.v.begin() + static_cast<ptrdiff_t>(sl * kb));
-            if (kv != k::QsaKv::bf16) same = same && tree.ks[sl] == chain.ks[sl] && tree.vs[sl] == chain.vs[sl];
+                        std::equal(tree.v.begin() + static_cast<ptrdiff_t>(sl * vb), tree.v.begin() + static_cast<ptrdiff_t>((sl + 1) * vb), chain.v.begin() + static_cast<ptrdiff_t>(sl * vb));
+            if (kv != k::QsaKv::bf16) {
+              same = same && tree.ks[sl] == chain.ks[sl];
+              same = same && std::equal(tree.vs.begin() + static_cast<ptrdiff_t>(sl * vsc), tree.vs.begin() + static_cast<ptrdiff_t>((sl + 1) * vsc),
+                                        chain.vs.begin() + static_cast<ptrdiff_t>(sl * vsc));
+            }
             bad_mv += !same;
             ++moved;
           }
@@ -1672,6 +1678,97 @@ void test_tree(xenithium::Fabric &f, const Model &m, k::QsaKv kv, int qk = 0, bo
   free_card(f, cd);
 }
 
+// int8-v4 tree verify vs the int8 chain over the same rows (int8-fast, the served auto numerics).
+// V is int4 on one path and int8 on the other, so this is the file's rms-relative BoundCmp (1/2), not bit for bit.
+void test_tree_v4_vs_int8(xenithium::Fabric &f, const Model &m) {
+  const int H = m.s.hidden, cap = 2048, P = 1020;
+  const auto rope = k::qsa_rope_table(cap, 64, 1e7, k::QsaYarn{});
+  auto make = [&](k::QsaKv kv) {
+    Card cd = make_card(f, 0, m, kv, 1, cap, rope);
+    cd.s.dec_qk = 1;
+    cd.s.dec_p_lo = false;
+    return cd;
+  };
+  Card ci8 = make(k::QsaKv::i8), cv4 = make(k::QsaKv::i8v4);
+  std::vector<Card> cards_i8{ci8}, cards_v4{cv4};
+  Run run_i8{f, cards_i8}, run_v4{f, cards_v4};
+  std::mt19937 rng(234);
+  auto fill = [&](Run &run, std::vector<Card> &cards) {
+    int p = 0;
+    while (p < P) {
+      const int n = std::min(4, P - p);
+      auto x = upload_x(f, cards, rand_x(H, rng));
+      run.attn_rows = 0, run.attn_grf = 0, run.tree = false;
+      run.step(n, {p}, p + n, x);
+      f.release(x[0]);
+      cards[0].mem.erase(std::find(cards[0].mem.begin(), cards[0].mem.end(), static_cast<void *>(x[0])));
+      p += n;
+    }
+  };
+  fill(run_i8, cards_i8);
+  rng.seed(234);
+  fill(run_v4, cards_v4);
+  const std::vector<std::vector<int>> trees = {{-1, 0, 1, 2, 0, 4, 1, 6}, {-1, 0, 0, 2, 3, 3, 5, 5},
+                                               {-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}};
+  const size_t okb = static_cast<size_t>(cards_i8[0].s.o_k());
+  auto attn_of = [&](Card &cd, int rows) { return rd16(*cd.q, cd.sc.attn, static_cast<size_t>(rows) * okb); };
+  auto out_of = [&](Card &cd, int rows) { return rd16(*cd.q, cd.out, static_cast<size_t>(rows) * H); };
+  BoundCmp ba, bo;
+  int compared = 0;
+  for (const auto &par : trees) {
+    const int R = static_cast<int>(par.size());
+    uint64_t tw = k::kTreeFlag;
+    for (int j = 1; j < R; ++j) tw |= static_cast<uint64_t>(par[static_cast<size_t>(j)]) << (4 * j);
+    std::mt19937 xr(900 + R);
+    auto xb = rand_x(H, xr);
+    if (R > 8) {
+      const auto x2 = rand_x(H, xr);
+      xb.insert(xb.end(), x2.begin(), x2.end());
+    }
+    // int8 chain reference per row
+    std::vector<std::vector<float>> ref_attn(static_cast<size_t>(R)), ref_out(static_cast<size_t>(R));
+    for (int j = 0; j < R; ++j) {
+      std::vector<int> path;
+      for (int a = j; a >= 0; a = par[static_cast<size_t>(a)]) path.insert(path.begin(), a);
+      std::vector<uint16_t> xc(16ull * H, 0);
+      for (size_t i = 0; i < path.size(); ++i)
+        std::copy(xb.begin() + static_cast<ptrdiff_t>(path[i]) * H, xb.begin() + static_cast<ptrdiff_t>(path[i] + 1) * H,
+                  xc.begin() + static_cast<ptrdiff_t>(i) * H);
+      auto xcd = upload_x(f, cards_i8, xc);
+      run_i8.attn_rows = 1, run_i8.attn_grf = 128, run_i8.tree = false;
+      run_i8.step(static_cast<int>(path.size()), {P}, P + static_cast<int>(path.size()), xcd);
+      const auto a = attn_of(cards_i8[0], static_cast<int>(path.size())), o = out_of(cards_i8[0], static_cast<int>(path.size()));
+      ref_attn[static_cast<size_t>(j)].assign(a.end() - static_cast<ptrdiff_t>(okb), a.end());
+      ref_out[static_cast<size_t>(j)].assign(o.end() - H, o.end());
+      f.release(xcd[0]);
+      cards_i8[0].mem.erase(std::find(cards_i8[0].mem.begin(), cards_i8[0].mem.end(), static_cast<void *>(xcd[0])));
+    }
+    auto xv = upload_x(f, cards_v4, xb);
+    std::vector<int32_t> rec(k::kSegRec, 0);
+    rec[k::kSegPos] = P;
+    k::rec_word_set(rec.data(), k::kSegTree, k::kSegTreeHi, tw);
+    run_v4.attn_rows = 0, run_v4.attn_grf = 0, run_v4.tree = true;
+    run_v4.step(R, rec, P + R, xv, k::kSegRec, R);
+    run_v4.tree = false;
+    const auto a = attn_of(cards_v4[0], R), o = out_of(cards_v4[0], R);
+    f.release(xv[0]);
+    cards_v4[0].mem.erase(std::find(cards_v4[0].mem.begin(), cards_v4[0].mem.end(), static_cast<void *>(xv[0])));
+    for (int j = 0; j < R; ++j) {
+      ba.add_rowf(a.data() + static_cast<ptrdiff_t>(j) * static_cast<ptrdiff_t>(okb), ref_attn[static_cast<size_t>(j)].data(),
+                  static_cast<int>(okb));
+      bo.add_rowf(o.data() + static_cast<ptrdiff_t>(j) * H, ref_out[static_cast<size_t>(j)].data(), H);
+      ++compared;
+    }
+  }
+  // int4 V vs int8 V: rms-relative (BoundCmp), not a per-element 15% gate (tiny sign flips trip that at ~2.0
+  // even when the vectors correlate at 0.997). Same-format tree vs chain is already bit-identical in test_tree.
+  expect(ba.ok(1.0 / 2, 1.0) && bo.ok(1.0 / 2, 1.0),
+         "int8-v4 tree verify vs int8 chain (int8-fast, " + std::to_string(compared) + " rows): attn " + ba.text() +
+             "; out " + bo.text());
+  free_card(f, cards_i8[0]);
+  free_card(f, cards_v4[0]);
+}
+
 int main() {
   try {
     const auto loader = xenithium::l0::Loader::open();
@@ -1688,6 +1785,16 @@ int main() {
     test_long(f, m6, k::QsaKv::bf16);
     test_select(f, m6, k::QsaKv::i8);
     test_select(f, m6, k::QsaKv::bf16);
+    test_tree(f, m6, k::QsaKv::i8);  // DDTree
+    test_tree(f, m6, k::QsaKv::bf16);
+    test_tree(f, m6, k::QsaKv::i8v4);  // trees on int8 K + int4 V
+    test_tree(f, m6, k::QsaKv::i8, 1, false, "int8-fast");  // trees under the decode attention numerics
+    test_tree(f, m6, k::QsaKv::i8, 1, true, "int8");
+    test_tree(f, m6, k::QsaKv::i8, 2, false, "fast on int8");
+    test_tree(f, m6, k::QsaKv::i8, 0, false, "fast");
+    test_tree(f, m6, k::QsaKv::bf16, 0, false, "fast");
+    test_tree(f, m6, k::QsaKv::i8v4, 1, false, "int8-fast");
+    test_tree_v4_vs_int8(f, m6);
     for (const auto kv : {k::QsaKv::i8, k::QsaKv::bf16}) {
       test_rows(f, m6, kv, 1);
       if (two) test_rows(f, m6, kv, 2);
@@ -1696,13 +1803,6 @@ int main() {
     test_rows_select(f, m6, k::QsaKv::i8);  // page-selected prefill attention
     test_rows_select(f, m6, k::QsaKv::bf16);
     test_rows_select(f, m6, k::QsaKv::i8, 71680);  // a context of more pages than a select work-group's items
-    test_tree(f, m6, k::QsaKv::i8);  // DDTree
-    test_tree(f, m6, k::QsaKv::bf16);
-    test_tree(f, m6, k::QsaKv::i8, 1, false, "int8-fast");  // trees under the decode attention numerics
-    test_tree(f, m6, k::QsaKv::i8, 1, true, "int8");
-    test_tree(f, m6, k::QsaKv::i8, 2, false, "fast on int8");
-    test_tree(f, m6, k::QsaKv::i8, 0, false, "fast");
-    test_tree(f, m6, k::QsaKv::bf16, 0, false, "fast");
     // int8-v4 KV (K int8, V int4 + a bf16 scale per 32 dims), grp 6 (the dense 27B)
     test_decode(f, m6, k::QsaKv::i8v4, 1, "h 512, 12 q / 2 kv heads");
     if (two) test_decode(f, m6, k::QsaKv::i8v4, 2, "h 512, 12 q / 2 kv heads");

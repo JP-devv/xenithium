@@ -167,7 +167,7 @@ sycl::event attn_seg(sycl::queue &q, const GqaShape &s, int rows, const GqaCache
   constexpr bool V4 = KV == QsaKv::i8v4;  // K int8, V int4 codes + a bf16 scale per 32 dims (head_dim 256)
   constexpr bool I8 = KV != QsaKv::bf16;  // K int8 with a scale per token (and V int8 unless V4)
   static_assert(!V4 || D == 256, "int8-v4 KV: head_dim 256");
-  static_assert(!TR || (!V4 && !Sel && RM > 1), "the tree instance: int8 / bf16 KV, no selection, row groups (qwen38-27b round 89: any numerics)");
+  static_assert(!TR || (!Sel && RM > 1), "the tree instance: no selection, row groups of 2+ (int8 / int8-v4 / bf16 KV at head_dim 256)");
   constexpr int kD = D, kPartStride = D + 16;
   static_assert(D == 256 || D == 128, "head_dim 256 or 128");
   static_assert(QK == 0 || I8, "int8 q.k reads the int8 KV codes");
@@ -397,10 +397,9 @@ sycl::event attn_seg(sycl::queue &q, const GqaShape &s, int rows, const GqaCache
     };
     // int8-v4: this item's 16 tokens x 64 dims of V = 32 bytes per token of a 128-byte row; nibbles widened
     // exactly (|code| <= 7) into load_tile's [dc][16 tokens][16 dims] layout (dims 2j low nibble, 2j + 1 high)
-    auto load_v4 = [&](const uint8_t *base) SYCL_ESIMD_FUNCTION {
+    auto unpack_v4 = [&](esimd::simd<uint8_t, kTW * kDW / 2> raw) SYCL_ESIMD_FUNCTION {
       esimd::simd<bf16, kTW * kDW> out;
       if constexpr (V4) {
-        esimd::simd<uint8_t, kTW * kDW / 2> raw = esimd::load_2d<uint8_t, kDW / 2, kTW>(base, kD / 2 - 1, kPage - 1, kD / 2 - 1, dq * kDW / 2, tq * kTW);
         auto r2 = raw.template bit_cast_view<uint8_t, kTW, kDW / 2>();
 #pragma unroll
         for (int dc = 0; dc < kDc; ++dc) {
@@ -411,6 +410,27 @@ sycl::event attn_seg(sycl::queue &q, const GqaShape &s, int rows, const GqaCache
         }
       }
       return out;
+    };
+    auto load_v4 = [&](const uint8_t *base) SYCL_ESIMD_FUNCTION {
+      esimd::simd<bf16, kTW * kDW> out;
+      if constexpr (V4) {
+        esimd::simd<uint8_t, kTW * kDW / 2> raw = esimd::load_2d<uint8_t, kDW / 2, kTW>(base, kD / 2 - 1, kPage - 1, kD / 2 - 1, dq * kDW / 2, tq * kTW);
+        out = unpack_v4(raw);
+      }
+      return out;
+    };
+    auto overlay_v4_lane = [&](esimd::simd<bf16, kTW * kDW> &out, size_t ps, int tr) SYCL_ESIMD_FUNCTION {
+      if constexpr (V4) {
+        esimd::simd<uint8_t, kDW / 2> row =
+            esimd::block_load<uint8_t, kDW / 2>(vp + ps * (kD / 2) + dq * (kDW / 2));
+#pragma unroll
+        for (int dc = 0; dc < kDc; ++dc) {
+          const esimd::simd<int16_t, 8> b = esimd::simd<uint8_t, 8>(row.template select<8, 1>(dc * 8));
+          const esimd::simd<int16_t, 8> lo = (b & 15) - ((b & 8) << 1), hi = (b >> 4) - ((b & 128) >> 3);
+          out.template select<8, 2>(dc * 256 + tr * 16) = esimd::simd<float, 8>(lo);
+          out.template select<8, 2>(dc * 256 + tr * 16 + 1) = esimd::simd<float, 8>(hi);
+        }
+      }
     };
     const float kmul = kQkScale<D>;  // 1 / sqrt(D)
     esimd::simd<float, kDc * NH * 16> oa(0.f);  // [chunk][NH][16 dims]
@@ -516,33 +536,47 @@ sycl::event attn_seg(sycl::queue &q, const GqaShape &s, int rows, const GqaCache
                 }
               };
               load_rows(kp, kt);
-              load_rows(vp, vt);
+              if constexpr (V4) {
+                vt = load_v4(vp + slot * (kD / 2));
+#pragma unroll
+                for (int r = 0; r < kTW; ++r)
+                  if (static_cast<size_t>(sq[r]) != slot + static_cast<size_t>(tq * kTW + r))
+                    overlay_v4_lane(vt, static_cast<size_t>(sq[r]), r);
+              } else load_rows(vp, vt);
             }
           } else {
             kt = load_tile(kp + slot * kD * kEB);
             if constexpr (V4) vt = load_v4(vp + slot * (kD / 2));
             else vt = load_tile(vp + slot * kD * kEB);  // V issued with K: its latency hides behind the softmax
           }
-          if constexpr (!V4 && TR == 0) {
+          if constexpr (TR == 0) {
             // a side row's unit: its path's K / V rows into their virtual lanes of this item's quarter (the
-            // widening as load_tile's: int8 -> float -> bf16 exact, bf16 as is)
+            // widening as load_tile's: int8 -> float -> bf16 exact, bf16 as is; int8-v4 V at stride kD/2)
             for (int pi = ilo; pi < ihi; ++pi) {
               const int L = tp0 + pi - t0;
               if (L / kTW != tq || ((uanc >> (4 * pi)) & 15u) == static_cast<uint64_t>(pi)) continue;  // not mine / in place
               const size_t ps = path_slot(uanc, pi);
               const int tr = L % kTW;
-              esimd::simd<bf16, kDW> kr, vr;
+              esimd::simd<bf16, kDW> kr;
               if constexpr (I8) {
                 kr = esimd::simd<float, kDW>(esimd::block_load<int8_t, kDW>(reinterpret_cast<const int8_t *>(kp) + ps * kD + dq * kDW));
-                vr = esimd::simd<float, kDW>(esimd::block_load<int8_t, kDW>(reinterpret_cast<const int8_t *>(vp) + ps * kD + dq * kDW));
               } else {
                 kr = esimd::block_load<bf16, kDW>(reinterpret_cast<const bf16 *>(kp) + ps * kD + dq * kDW);
-                vr = esimd::block_load<bf16, kDW>(reinterpret_cast<const bf16 *>(vp) + ps * kD + dq * kDW);
               }
 #pragma unroll
-              for (int dc = 0; dc < kDc; ++dc) {
+              for (int dc = 0; dc < kDc; ++dc)
                 kt.template select<16, 1>(dc * 256 + tr * 16) = kr.template select<16, 1>(dc * 16);
-                vt.template select<16, 1>(dc * 256 + tr * 16) = vr.template select<16, 1>(dc * 16);
+              if constexpr (V4) {
+                overlay_v4_lane(vt, ps, tr);
+              } else {
+                esimd::simd<bf16, kDW> vr;
+                if constexpr (I8)
+                  vr = esimd::simd<float, kDW>(esimd::block_load<int8_t, kDW>(reinterpret_cast<const int8_t *>(vp) + ps * kD + dq * kDW));
+                else
+                  vr = esimd::block_load<bf16, kDW>(reinterpret_cast<const bf16 *>(vp) + ps * kD + dq * kDW);
+#pragma unroll
+                for (int dc = 0; dc < kDc; ++dc)
+                  vt.template select<16, 1>(dc * 256 + tr * 16) = vr.template select<16, 1>(dc * 16);
               }
             }
           }
@@ -570,14 +604,22 @@ sycl::event attn_seg(sycl::queue &q, const GqaShape &s, int rows, const GqaCache
               for (int r = 0; r < kTW; ++r) kr[r] = esimd::block_load<uint8_t, kDW>(kp + static_cast<size_t>(sq[r]) * kD + dq * kDW);
 #pragma unroll
               for (int r = 0; r < kTW; ++r) raw.template select<kDW, 1>(r * kDW) = kr[r];
-              esimd::simd<int8_t, kDW> vr[kTW];
+              if constexpr (V4) {
+                vt = load_v4(vp + slot * (kD / 2));
 #pragma unroll
-              for (int r = 0; r < kTW; ++r) vr[r] = esimd::block_load<int8_t, kDW>(reinterpret_cast<const int8_t *>(vp) + static_cast<size_t>(sq[r]) * kD + dq * kDW);
+                for (int r = 0; r < kTW; ++r)
+                  if (static_cast<size_t>(sq[r]) != slot + static_cast<size_t>(tq * kTW + r))
+                    overlay_v4_lane(vt, static_cast<size_t>(sq[r]), r);
+              } else {
+                esimd::simd<int8_t, kDW> vr[kTW];
 #pragma unroll
-              for (int r = 0; r < kTW; ++r) {
-                esimd::simd<bf16, kDW> w = esimd::simd<float, kDW>(vr[r]);
+                for (int r = 0; r < kTW; ++r) vr[r] = esimd::block_load<int8_t, kDW>(reinterpret_cast<const int8_t *>(vp) + static_cast<size_t>(sq[r]) * kD + dq * kDW);
 #pragma unroll
-                for (int dc = 0; dc < kDc; ++dc) vt.template select<16, 1>(dc * 256 + r * 16) = w.template select<16, 1>(dc * 16);
+                for (int r = 0; r < kTW; ++r) {
+                  esimd::simd<bf16, kDW> w = esimd::simd<float, kDW>(vr[r]);
+#pragma unroll
+                  for (int dc = 0; dc < kDc; ++dc) vt.template select<16, 1>(dc * 256 + r * 16) = w.template select<16, 1>(dc * 16);
+                }
               }
             }
           } else {
@@ -585,18 +627,22 @@ sycl::event attn_seg(sycl::queue &q, const GqaShape &s, int rows, const GqaCache
             if constexpr (V4) vt = load_v4(vp + slot * (kD / 2));
             else vt = load_tile(vp + slot * kD * kEB);
           }
-          if constexpr (!V4 && TR == 0) {
+          if constexpr (TR == 0) {
             // a side row's unit on the int8 q.k, as the bf16 branch above: its path's K codes
-            // (the raw bytes: the s8 operand's rows) and V rows (widened as load_tile's) into their virtual lanes
+            // (the raw bytes: the s8 operand's rows) and V rows (int8 widened, or int8-v4 at stride kD/2)
             for (int pi = ilo; pi < ihi; ++pi) {
               const int L = tp0 + pi - t0;
               if (L / kTW != tq || ((uanc >> (4 * pi)) & 15u) == static_cast<uint64_t>(pi)) continue;  // not mine / in place
               const size_t ps = path_slot(uanc, pi);
               const int tr = L % kTW;
               raw.template select<kDW, 1>(tr * kDW) = esimd::block_load<uint8_t, kDW>(kp + ps * kD + dq * kDW);
-              esimd::simd<bf16, kDW> vr = esimd::simd<float, kDW>(esimd::block_load<int8_t, kDW>(reinterpret_cast<const int8_t *>(vp) + ps * kD + dq * kDW));
+              if constexpr (V4) {
+                overlay_v4_lane(vt, ps, tr);
+              } else {
+                esimd::simd<bf16, kDW> vr = esimd::simd<float, kDW>(esimd::block_load<int8_t, kDW>(reinterpret_cast<const int8_t *>(vp) + ps * kD + dq * kDW));
 #pragma unroll
-              for (int dc = 0; dc < kDc; ++dc) vt.template select<16, 1>(dc * 256 + tr * 16) = vr.template select<16, 1>(dc * 16);
+                for (int dc = 0; dc < kDc; ++dc) vt.template select<16, 1>(dc * 256 + tr * 16) = vr.template select<16, 1>(dc * 16);
+              }
             }
           }
           auto r32 = raw.template bit_cast_view<uint32_t, kTW, kDW / 4>();
@@ -655,14 +701,12 @@ sycl::event attn_seg(sycl::queue &q, const GqaShape &s, int rows, const GqaCache
           }
         } else {
           ks = esimd::block_load<float, kTile>(ksp + slot);
-          if constexpr (!V4) vs = esimd::block_load<float, kTile>(vsp + slot);  // V4: the scales are folded in P . V
-          if constexpr (!V4) {
-            for (int pi = ilo; pi < ihi; ++pi) {  // a side row's path lanes (every item: the heads' owners read all)
-              if (((uanc >> (4 * pi)) & 15u) == static_cast<uint64_t>(pi)) continue;
-              const size_t ps = path_slot(uanc, pi);
-              ks[tp0 + pi - t0] = ksp[ps];
-              vs[tp0 + pi - t0] = vsp[ps];
-            }
+          if constexpr (!V4) vs = esimd::block_load<float, kTile>(vsp + slot);  // V4: V scales are folded in P . V
+          for (int pi = ilo; pi < ihi; ++pi) {  // a side row's path lanes (every item: the heads' owners read all)
+            if (((uanc >> (4 * pi)) & 15u) == static_cast<uint64_t>(pi)) continue;
+            const size_t ps = path_slot(uanc, pi);
+            ks[tp0 + pi - t0] = ksp[ps];
+            if constexpr (!V4) vs[tp0 + pi - t0] = vsp[ps];
           }
         }
       }
@@ -739,7 +783,11 @@ sycl::event attn_seg(sycl::queue &q, const GqaShape &s, int rows, const GqaCache
           // P x the token's scale of each 32-dim group (fp32, before the hi / lo split: qsa.cpp's fold); this item's
           // 64 dims are groups 2 dq (chunks 0-1) and 2 dq + 1 (chunks 2-3): dword dq of each token's 8 bf16 scales
           const esimd::simd<int32_t, 16> tk(0, 1);
-          const esimd::simd<uint32_t, 16> soff = (esimd::simd<uint32_t, 16>(tk) + static_cast<uint32_t>(slot + tq * kTW)) * 16u + static_cast<uint32_t>(dq * 4);
+          // side path: remapped slots; chains and the shared tree unit: the tile is contiguous (coalesced)
+          const esimd::simd<uint32_t, 16> soff =
+              pu >= 0 ? lane_slots(std::integral_constant<int, kTW>{}, tq * kTW) * 16u + static_cast<uint32_t>(dq * 4)
+                      : (esimd::simd<uint32_t, 16>(tk) + static_cast<uint32_t>(slot + tq * kTW)) * 16u +
+                            static_cast<uint32_t>(dq * 4);
           const esimd::simd<uint32_t, 16> sw2 = esimd::gather<uint32_t, 16>(reinterpret_cast<const uint32_t *>(vsp), soff);
 #pragma unroll
           for (int g2 = 0; g2 < 2; ++g2) {

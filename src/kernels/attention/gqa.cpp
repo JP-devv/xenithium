@@ -845,9 +845,9 @@ GqaEvents gqa_decode(sycl::queue &q, const GqaShape &s, int rows, const bf16 *x,
   }
   // tree segments (records' kSegTree) run on the dense group kernel, with the decode attention numerics too (the
   // chain instances' side-row units read their path's K codes / V rows)
-  if (step.tree && (step.stride < kSegRec || step.select > 0 || step.attn_rows < 0 || s.window > 0 || s.kv == QsaKv::i8v4 || s.head_dim != kD ||
+  if (step.tree && (step.stride < kSegRec || step.select > 0 || step.attn_rows < 0 || s.window > 0 || s.head_dim != kD ||
                     seg_size(rows, step.seg_rows) > kTreeRows))
-    throw std::invalid_argument("gqa_decode: a tree step runs on records, the dense group kernel, int8 / bf16 KV at head_dim 256, <= 16 rows per segment");
+    throw std::invalid_argument("gqa_decode: a tree step runs on records, the dense group kernel, int8 / int8-v4 / bf16 KV at head_dim 256, <= 16 rows per segment");
   // grid splits: the most any row can use (positions < pos_bound); idle work-groups return at once. Windowed: one per
   // tile slot (kGqaWinSplits)
   const int ns = s.window > 0 ? kGqaWinSplits : std::min(kGqaSplits, (step.pos_bound + kTile - 1) / kTile);
@@ -889,8 +889,8 @@ struct MoveBufs {
 }  // namespace
 
 sycl::event gqa_kv_move(sycl::queue &q, const GqaShape &s, const GqaCache *caches, int n_caches, int slot, int p0, const GqaMove &mv) {
-  if (n_caches < 1 || n_caches > kGqaMoveCaches || mv.n < 1 || mv.n > kTreeRows || s.kv == QsaKv::i8v4 || slot < 0)
-    throw std::invalid_argument("gqa_kv_move: 1..16 caches, 1..16 rows, int8 / bf16 KV");
+  if (n_caches < 1 || n_caches > kGqaMoveCaches || mv.n < 1 || mv.n > kTreeRows || slot < 0)
+    throw std::invalid_argument("gqa_kv_move: 1..16 caches, 1..16 rows, int8 / int8-v4 / bf16 KV");
   for (int i = 0; i < mv.n; ++i)
     if (mv.to[i] < 0 || mv.from[i] < mv.to[i] || mv.from[i] >= kTreeRows || (i > 0 && (mv.to[i] <= mv.to[i - 1] || mv.from[i] <= mv.from[i - 1])))
       throw std::invalid_argument("gqa_kv_move: ascending sources and destinations, each destination at or below its source");
@@ -900,7 +900,9 @@ sycl::event gqa_kv_move(sycl::queue &q, const GqaShape &s, const GqaCache *cache
     if (c.ring_pages > 0 || p0 < 0 || p0 + mv.from[mv.n - 1] >= c.max_tokens) throw std::invalid_argument("gqa_kv_move: no rings, rows inside the capacity");
     b.k[l] = c.k, b.v[l] = c.v, b.ks[l] = c.ks, b.vs[l] = c.vs, b.pages[l] = c.pages + static_cast<size_t>(slot) * c.slot_pages;
   }
-  const int hkv = s.hkv(), rowb = s.head_dim * s.kv_elem(), ch = rowb / 16;
+  const int hkv = s.hkv(), krow = s.head_dim * s.kv_elem(), vrow = s.v_row_bytes();
+  const int kch = krow / 16, vch = vrow / 16, ch = kch > vch ? kch : vch;
+  const int vsc = s.v_scale_bytes() / 4;  // floats per token-head: 1 (int8) or 4 (int8-v4: 8 bf16 scales)
   const bool scaled = qsa_kv_scaled(s.kv);
   return q.parallel_for<GqaKvMoveK>(sycl::range<3>(static_cast<size_t>(n_caches), static_cast<size_t>(hkv), static_cast<size_t>(ch)), [=](sycl::item<3> it) {
     const int l = static_cast<int>(it[0]), h = static_cast<int>(it[1]), c = static_cast<int>(it[2]);
@@ -908,9 +910,12 @@ sycl::event gqa_kv_move(sycl::queue &q, const GqaShape &s, const GqaCache *cache
     for (int i = 0; i < mv.n; ++i) {
       const size_t src = slot_of(p0 + mv.from[i]), dst = slot_of(p0 + mv.to[i]);
       if (src == dst) continue;
-      reinterpret_cast<sycl::uint4 *>(b.k[l] + dst * rowb)[c] = reinterpret_cast<const sycl::uint4 *>(b.k[l] + src * rowb)[c];
-      reinterpret_cast<sycl::uint4 *>(b.v[l] + dst * rowb)[c] = reinterpret_cast<const sycl::uint4 *>(b.v[l] + src * rowb)[c];
-      if (scaled && c == 0) b.ks[l][dst] = b.ks[l][src], b.vs[l][dst] = b.vs[l][src];
+      if (c < kch) reinterpret_cast<sycl::uint4 *>(b.k[l] + dst * krow)[c] = reinterpret_cast<const sycl::uint4 *>(b.k[l] + src * krow)[c];
+      if (c < vch) reinterpret_cast<sycl::uint4 *>(b.v[l] + dst * vrow)[c] = reinterpret_cast<const sycl::uint4 *>(b.v[l] + src * vrow)[c];
+      if (scaled && c == 0) {
+        b.ks[l][dst] = b.ks[l][src];
+        for (int j = 0; j < vsc; ++j) b.vs[l][dst * static_cast<size_t>(vsc) + j] = b.vs[l][src * static_cast<size_t>(vsc) + j];
+      }
     }
   });
 }
