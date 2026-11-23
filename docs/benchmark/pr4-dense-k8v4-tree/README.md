@@ -24,21 +24,22 @@ A user-supplied screenshot (`Screenshot_2026-11-23_at_11.53.55.png`, SHA-256 `1c
 
 The screenshot reports byte-identical **greedy visible replies only for short, 8K and 80K prompts**. It does not establish parity at 32K or 109K, complete generated token IDs, numerical parity, or parity across other configurations. It reports 3.20 versus 3.03 accepted tokens per step at 109K; its explanation of why tree checking is slower is a hypothesis, not a measured attribution. Do not generalize its suggested threshold or settings without the underlying evidence.
 
-The screenshot references two `results.html` reports, a summary and `~/experiments/xenithium-pr4-run`. The directory was absent in the accessible `ai01` home and local user home. The separately found `Downloads/results.html` is a 15-Nov BetterBench report marked `engine_rev: a9aa791-dirty`, `XEN_KV: int8`, `XEN_DRAFTER_TREE: 0`; it does not match the screenshot's int8-v4 comparison and is not used as its evidence. No unlisted host was contacted. Needed to verify the screenshot: both original HTML reports **and raw case rows**, exact source revisions/dirty diffs and server/runner binary hashes, GPU/driver/TP details, full launch and benchmark argv/environment, model/quantization and context/cache/slot settings, prompt and post-template token IDs, output text and token IDs for the parity cases, plus route and restoration receipts. Obtain these before deciding whether any targeted new GPU work is necessary.
+The screenshot references two `results.html` reports, a summary and `~/experiments/xenithium-pr4-run`. The directory was absent in the accessible `ai01` home and local user home. The separately found `Downloads/results.html` is a 15-Nov BetterBench report marked `engine_rev: a9aa791-dirty`, `XEN_KV: int8`, `XEN_DRAFTER_TREE: 0`; it does not match the screenshot's int8-v4 comparison and is not used as its evidence. No unlisted host was contacted. Needed to verify the screenshot: both original HTML reports **and raw case rows**, exact source revisions/dirty diffs and server/runner binary hashes, GPU/driver/TP details, full launch and benchmark argv/environment, model/quantization and context/cache/slot settings, prompt and post-template token IDs, output text and token IDs for the parity cases, plus route and restoration receipts. Seek these in parallel; their absence does not block independently required focused correctness tests once a safe GPU window is authorized.
 
 ## Evidence status
 
-**Revision boundary:** the host checks below ran on the original base `df5f761` and local candidate `a5d55e9`, before the merge with upstream `9e542a1`. They do not validate or measure the merged code; merged-head host and device qualification are separate.
+**Revision boundary:** the base and candidate host checks below ran on `df5f761` and `a5d55e9` before the upstream merge; the separate merged-head host check ran on `3bfc10e`. The historical external screenshot remains unverified and does not measure the merged code. Device correctness and performance qualification remain separate and pending.
 
 | Check | Status | Scope and limits |
 | --- | --- | --- |
 | Base and candidate Release/BMG GQA builds | **Completed offline, exit 0 each** | Base binary `1f80463f3cae2e53c0bcc723e49ed9fbf67a482a2c2e6e730396b66bfd467037`; test build `9d5a029da6a329dc7c2bf7705d2cef5a13100c7e0b3916a91968fee34cb04b82`. Compilation is not execution. |
 | Test fixture source comparison | **Completed offline** | The matched base and candidate `test_rows`, `make_model`, `make_card` and `rand_x` bodies are byte-identical. The overall harnesses differ in tree tests and order; runtime inputs/state have not been proven identical. |
 | Fixture, binaries, toolchain pins | **Completed offline** | Three request/ID files and their hashes, both test binaries/XL libraries and oneAPI 2025.3/BMG build settings were checked. Real base/head endpoint ID parity is **not** established. |
-| Host-only CTest suite | **Passed on base and candidate** | Unchanged host-labelled suite: 18/18 on each, with the verified revision-matched server-presence fixture. No differing failed assertions were reported. This is not device validation. |
+| Host-only CTest suite | **Passed on base, candidate and merge** | Unchanged host-labelled suite: 18/18 on each, using revision-matched server-presence fixtures. This is not device validation. |
 | Base and candidate unchanged broad `gqa` CTest | **Pending GPU** | Run both and preserve full exits/logs; failures are failures even if they match. A previous unmatched GQA run failed in oneDNN SDPA prefill with `could not create logical_tensor with property`; a matched base/head comparison is still required. |
-| Candidate-only `--tree-v4-partial` | **Pending GPU** | Require exit 0 and six positive assertions each in exact and int8-fast modes, including unchanged and poisoned bytes. |
-| Endpoint IDs, route qualification and 12-case sweep | **Pending GPU** | No measured result, output-token parity, tree route, speedup, cache ownership or concurrency claim. |
+| Candidate-only `--tree-v4-partial` | **Pending GPU / unverified** | Require exit 0 and six positive assertions each in exact and int8-fast modes, including unchanged and poisoned bytes. |
+| Mixed tree/chain continuation regression | **Pending GPU / unverified** | A separate local test-only probe is being built; neither per-slot continuation logits nor mixed device execution have passed. |
+| External performance screenshot, endpoint IDs, routes and optional sweep | **Unverified / pending GPU** | No verified merged-head performance result, output-token parity, tree route, speedup, cache ownership or concurrency claim. |
 
 ### Unchanged host-suite summaries
 
@@ -66,6 +67,17 @@ host    =  27.07 sec*proc (18 tests)
 Total Test time (real) =  27.07 sec
 ```
 
+Merged-head host check: the exact local merge commit was `3bfc10e9c84a7418fc6a152a24d696e27dc4ea86` (parents `db9d1ce` and upstream `9e542a1`). The Release/BMG server build exited 0 and the unchanged `ctest --test-dir <build> -L host --output-on-failure` suite exited 0. As with the earlier checks, the source-root server-presence fixture was a temporary link, here to the actual merged server; it was removed after the suite. Built server SHA-256 `8b1b39196fe1cf9ba8baa72e60f75fbd32a644f355ad0b7b36a0e7dd68fb2027`, XL library `21668ec86a1a29c91320b37b10737416ad76646ae7babfe87d2d4a8b78a93cab`. [Raw CTest output](host-merge-ctest.txt); terminal summary verbatim:
+
+```text
+100% tests passed, 0 tests failed out of 18
+
+Label Time Summary:
+host    =  27.63 sec*proc (18 tests)
+
+Total Test time (real) =  27.64 sec
+```
+
 The known authorized host has two B60s, both in use by production; no spare compatible device has been identified. No controller is armed. Use only a separately authorized exclusive window, actual shared lease, disconnect-safe managed controller, graceful shutdown and independently verified restoration. The earlier draft controller's forced-stop recovery and separate-owner takeover are **not qualified**. Do not execute the commands below on production or interpret them as authorization.
 
 ## Planned device regression commands
@@ -87,7 +99,7 @@ For broad CTest, identical failures at the same oneDNN check are an observed mat
 
 ## Optional gap-filling C1 sweep — commands, not results
 
-First obtain and assess the user's original benchmark reports and receipts above; do **not** duplicate its full sweep by default. The following matrix is a fallback plan for uncovered gaps only, subject to separate authorization and the stated gates.
+Seek the user's original benchmark reports and receipts in parallel; their absence does not block focused correctness tests in an authorized safe window. Do **not** duplicate the full sweep by default. The following matrix is a fallback plan for uncovered gaps only, subject to separate authorization and the stated gates.
 
 The preferred candidate setting for testing this feature is **head/tree7**; use it only after endpoint-ID and positive route qualification, not as an unqualified production recommendation. The separate baseline is **base/tree0**. The additional controls **base/tree7** (expected unsupported tree fallback, which must be observed) and **head/tree0** separate fallback and tree effects. All four arms use a fresh server for each of `short`, `middle`, `near`, then one cold and one repeat request at one active user / one configured slot. TP2, two B60s, context and KV pool 177216, int8-v4 KV, prefill chunk 2048, DSpine b16, prefix cache 2 GiB, `prefix-live 0`, attention/prefill page selection 0 and 128-token fixed reply are pinned in the archived argv and runner. Swift-1.5 Qwen3.8-27B compatible GPTQ W4/group-128 with BF16 bridge is the planned model. No trained QSA sidecar, profiling or replay override is used.
 
