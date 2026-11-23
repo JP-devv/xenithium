@@ -70,8 +70,9 @@ the full reference.
 | Model | Arch | Cards | Checkpoint (`~/models/...`) | Drafter (`~/models/...`) |
 | --- | --- | --- | --- | --- |
 | Qwen3.8 Flash-Next | `qwen38` | 4 / 2 / 1 | `qwen38-w4a16`, `qwen38-w4a16-intel` (W4A16): [Intel/Qwen3.8-Flash-Next-W4A16-AutoRound](https://huggingface.co/Intel/Qwen3.8-Flash-Next-W4A16-AutoRound) | `qwen38-flash-next-dflash2`: [incoai/Qwen3.8-Flash-Next-DFlash2](https://huggingface.co/incoai/Qwen3.8-Flash-Next-DFlash2) |
-| Qwen3.8-27B (Swift-1.5) | `qwen35` | 2 / 1 | `swift15-w4a16-autoround` (W4A16): [ukisai/Swift-1.5-Qwen3.8-27b-W4A16-AutoRound](https://huggingface.co/ukisai/Swift-1.5-Qwen3.8-27b-W4A16-AutoRound/tree/main) | `qwen38-27b-dspine-b16`: [tencent/Qwen3.8-27B-DSpine-b16](https://huggingface.co/tencent/Qwen3.8-27B-DSpine-b16)<br>`qwen38-27b-dflash2`: [incoai/Qwen3.8-27B-DFlash2](https://huggingface.co/incoai/Qwen3.8-27B-DFlash2) |
-| Qwen3.8-27B (W4A16 AutoRound) | `qwen35` | 2 / 1 | `Qwen3.8-27B-W4A16-AutoRound`: [dbirks/Qwen3.8-27B-W4A16-AutoRound](https://huggingface.co/dbirks/Qwen3.8-27B-W4A16-AutoRound) (a copy of the same export; Intel's repository is no longer public) | the same two as the row above |
+| Qwen3.8-27B (Swift-1.5) | `qwen35` | 2 / 1 | `swift15-w4a16-autoround` (W4A16): [ukisai/Swift-1.5-Qwen3.8-27b-W4A16-AutoRound](https://huggingface.co/ukisai/Swift-1.5-Qwen3.8-27b-W4A16-AutoRound/tree/main) | `qwen38-27b-dspine-b16`: [tencent/Qwen3.8-27B-DSpine-b16](https://huggingface.co/tencent/Qwen3.8-27B-DSpine-b16)<br>`qwen38-27b-dflash2`: [incoai/Qwen3.8-27B-DFlash2](https://huggingface.co/incoai/Qwen3.8-27B-DFlash2)<br>`qwen38-27b-dflash2-int4-gptq` (GPTQ int4): [Launch80/Qwen3.8-27B-DFlash2-Int4-baked-drafter](https://huggingface.co/Launch80/Qwen3.8-27B-DFlash2-Int4-baked-drafter) |
+| Qwen3.8-27B (W4A16 AutoRound) | `qwen35` | 2 / 1 | `Qwen3.8-27B-W4A16-AutoRound`: [dbirks/Qwen3.8-27B-W4A16-AutoRound](https://huggingface.co/dbirks/Qwen3.8-27B-W4A16-AutoRound) (a copy of the same export; Intel's repository is no longer public) | the same three as the row above |
+| Qwen3.8-27B (Swift-1.5 Uncensored, GPTQ int4 baked) | `qwen35` | 2 / 1| `swift15-27b-int4-baked` (GPTQ int4 g128, int4 head and MTP layer): [Launch80/Swift-1.5-Qwen3.8-27B-Uncensored-Int4-baked](https://huggingface.co/Launch80/Swift-1.5-Qwen3.8-27B-Uncensored-Int4-baked) | `qwen38-27b-dflash2-int4-gptq` or `qwen38-27b-dflash2` (DFlash 2 only: DSpine needs a bf16 head) |
 | Nanbeige4.3-33B | `llama` | 2 / 1 | `nanbeige43-33b-int4` (int4 g32 zero-point): [Nanbeige/Nanbeige4.3-33B-INT4](https://huggingface.co/Nanbeige/Nanbeige4.3-33B-INT4) | - |
 | Recursive Flint INT4 | `flint` | 2 / 1 | `flint-int4` (MLX affine int4, 8-bit embedding): [RecursiveSI/flint-int4](https://huggingface.co/RecursiveSI/flint-int4) | `flint-dflash2` |
 
@@ -79,9 +80,12 @@ What each model brings:
 
 - **Qwen3.8 Flash-Next** (MoE + Gated DeltaNet hybrid): MTP or DFlash 2 drafter, prefix cache, step graphs, KV
   lending, images.
-- **Qwen3.8-27B**, both checkpoints (dense, Gated DeltaNet hybrid): MTP layer + DSpine / DFlash 2 drafters, W4A8
+- **Qwen3.8-27B**, all three checkpoints (dense, Gated DeltaNet hybrid): MTP layer + DSpine / DFlash 2 drafters, W4A8
   prefill, prefix cache, page-selected attention, images. `models/presets/qwen38-27b-intel.env` starts the AutoRound
-  checkpoint.
+  checkpoint. The GPTQ int4 baked checkpoint (AutoGPTQ config, int4 `lm_head`) runs with its MTP layer or a DFlash 2
+  drafter with `XEN_SEG_ROWS` 8; DSpine b16 is refused at load (it needs a bf16 head). DFlash 2 drafters load as bf16
+  or as GPTQ int4 (4 bits, group 128, symmetric, no act order); the GPTQ drafter is a 1.4 GiB download instead of
+  3.6 GiB at the same speed.
 - **Nanbeige4.3-33B** (dense Llama): many-row prefill, prefix cache; no drafter in the checkpoint.
 - **Recursive Flint INT4** (MoE, 256 experts top-6, sliding-window + full attention with sinks): many-row int4
   prefill, prefix cache, DFlash 2 drafter, step graphs, chat, reasoning and tool calls.
