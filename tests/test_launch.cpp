@@ -429,10 +429,11 @@ void test_catalog(const std::string &root) {
     Values von = dv, voff = dv;
     von["XEN_VISION"] = "1", voff["XEN_VISION"] = "0";
     expect(vi && vp && vn && vi->def == "0" && vi->flag == "--vision" && vp->def == "1048576" && vp->flag == "--vision-max-pixels" && vn->def == "16" &&
-               vn->flag == "--vision-images" && unused_reason(*vi, "qwen38", voff).empty() && unused_reason(*vi, "qwen35", voff).empty() &&
+               vn->flag == "--vision-images" && vi->scope == Scope::Vision && scope_name(vi->scope).find("qwen35") != std::string::npos &&
+               unused_reason(*vi, "qwen38", voff).empty() && unused_reason(*vi, "qwen35", voff).empty() &&
                !unused_reason(*vi, "llama", voff).empty() && unused_reason(*vp, "qwen35", von).empty() &&
                !unused_reason(*vp, "qwen35", voff).empty() && !check_value(*vp, "1000", "qwen38", "").empty() && check_value(*vn, "64", "qwen38", "").empty(),
-           "image input (round 167): qwen38 / qwen35 only, defaults 0 / 1048576 / 16 and flags from the docs, size settings shown with it on");
+           "image input (round 167): qwen38 / qwen35 only (Scope::Vision, named so in the help), defaults 0 / 1048576 / 16 and flags from the docs, size settings shown with it on");
     const Spec *mu = cat.find("XEN_MEDIA_URLS"), *md = cat.find("XEN_MEDIA_DOMAINS"), *mt = cat.find("XEN_MEDIA_TIMEOUT");
     Values uoff = von;
     uoff["XEN_MEDIA_URLS"] = "0";
@@ -864,6 +865,16 @@ void test_app(const std::string &root) {
   expect(!app.dirty(), "nothing unsaved after open");
   expect(app.values().at("XEN_SERVED_NAME") == "moe-a", "the served name defaults to the checkpoint's folder name on open");
   expect(has(app.preview(), "--served-model-name moe-a"), "the preview carries the folder name as the served model");
+
+  // A search finds a setting that waits on another one (dimmed, n/a), not one of the other arch.
+  s = run({ch('/'), ch('h'), ch('t'), ch('t'), ch('p'), ch('s')});
+  expect(app.values().at("XEN_VISION") == "0" && has(s, "Images by http(s) link") && has(s, "n/a"),
+         "filter: / https finds Images by http(s) link while Image input is off (dimmed, n/a)");
+  run({Key::of(Key::Esc)});
+  s = run({ch('/'), ch('k'), ch('-'), ch('s'), ch('p'), ch('l'), ch('i'), ch('t')});
+  expect(!has(s, "W4 k-split target"), "filter: a qwen35-only setting stays hidden for a qwen38 model");
+  s = run({Key::of(Key::Esc)});
+  expect(!has(s, "find: "), "Esc clears the filter");
 
   // Find Slots, pick 2 from its popup.
   s = run({ch('/'), ch('s'), ch('l'), ch('o'), ch('t'), Key::of(Key::Enter)});

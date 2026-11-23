@@ -59,7 +59,8 @@ Four tabs, `1`-`4` or `Tab`; the Chat tab is hidden for now, so the header shows
   prompt processing and cache, numerics, queue, runtime, diagnostics. Only the settings the server reads for this model
   are listed (`a` shows the others, marked n/a): the other arch's settings, a setting whose switch is off (draft
   vocabulary with the drafter off, SJF aging unless the queue policy is sjf, ...), and with the stub engine on
-  everything the stub does not read. A launch passes the hidden ones at their default. A value that differs from the
+  everything the stub does not read. A search (`/`) also finds this model's settings whose switch is off, marked n/a
+  (`/ https` shows Images by http(s) link while Image input is off). A launch passes the hidden ones at their default. A value that differs from the
   default is orange, an invalid one red, and `●` marks a setting changed since the file was opened. The expert files
   show this model's state next to `auto` (`auto · ranked 2 h ago`, `auto · none yet`, `auto · server creates`).
 - the help panel: a problem with the value first (why it is refused), then what the selected setting does, laid out
@@ -176,7 +177,7 @@ A first start without a settings file opens a short welcome: pick a model, check
 | `d` / `D` | this setting / every setting back to the default of `start-server.sh` |
 | `u` | undo |
 | `i` | the problems of the current values; `Enter` goes to the setting |
-| `/` | find a setting by name, key or flag; with no name match it searches the help text |
+| `/` | find a setting by name, key or flag (this model's settings whose switch is off too, marked n/a); with no name match it searches the help text |
 | `m` | the model list (Settings tab; on Benchmark `m` picks the benchmark mode) |
 | `p` | settings files: `server.env`, the per-model files (`models/*.env` and the presets no file of yours replaces; opening one switches to its model) and the profiles; `n` saves the current values as a new profile, `x` deletes one |
 | `s` / `S` | save to the open file (the model's own file, and `server.env` then names it) / save as (the model's file, a profile, a new profile) |

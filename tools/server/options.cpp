@@ -75,7 +75,8 @@
 // --media-urls 0|1 [1] media parts may name http:// / https:// URLs, fetched by the server (https through the
 //   system's libssl.so.3 when present); 0 = data: URLs only --media-domains LIST [any] comma-separated host names a URL
 //   may name (every redirect hop too) --media-timeout S [30] one fetch
-// --vision-ffmpeg PATH [ffmpeg] video_url parts decoded by this ffmpeg (ffprobe beside it); empty or missing = video
+// --vision-ffmpeg PATH [ffmpeg] video_url parts decoded by this ffmpeg (ffprobe beside it; the default name is also
+//   looked up in util::ffmpeg_install_paths); empty or missing = video
 //   parts get 400 --video-max-pixels N [25165824] pixels over all sampled frames of a video --video-fps F [2] frames
 //   sampled per second
 // --warmup 0|1 [1] scratch requests before listening, so the first request pays no first-use costs

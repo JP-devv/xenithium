@@ -1467,6 +1467,13 @@ void Model::calib_logits(const int32_t *tokens, int m, const CalibState &in, con
 }
 
 // Image input (set_vision).
+void Model::set_vision(VisionStore *v) {
+  if (v && v->cards() < static_cast<int>(fab_.size()))
+    throw std::invalid_argument("qwen38 model: the image store holds rows on " + std::to_string(v->cards()) + " cards, the model gathers on " +
+                                std::to_string(fab_.size()));
+  vis_ = v;
+}
+
 const int32_t *Model::vis_map(const int32_t *tokens, int m, std::vector<int32_t> &buf) {
   if (!vis_) return tokens;
   buf.resize(static_cast<size_t>(m));

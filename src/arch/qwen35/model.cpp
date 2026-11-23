@@ -2266,6 +2266,9 @@ void Model::set_vision(VisionStore *store) {
   if (rope_host_.empty()) throw std::invalid_argument("qwen35 model: image input needs the interleaved M-RoPE config (mrope_section)");
   if (opt_.prefill_slices || opt_.prefill_attn_slices) throw std::invalid_argument("qwen35 model: image input runs the many-row prefill only");
   if (store->vocab() != cfg_.vocab) throw std::invalid_argument("qwen35 model: the image store's vocabulary differs");
+  if (store->cards() < static_cast<int>(cards_.size()))
+    throw std::invalid_argument("qwen35 model: the image store holds rows on " + std::to_string(store->cards()) + " cards, the model gathers on " +
+                                std::to_string(cards_.size()));
   vis_ = store;
   for (int i = 0; i < 3; ++i) mrope_.sec[i] = cfg_.mrope_section[static_cast<size_t>(i)];
   std::vector<const bf16 *> pools;

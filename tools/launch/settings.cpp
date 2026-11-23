@@ -920,6 +920,7 @@ const char *brief_of(std::string_view key) {
       {"XEN_VISION_FFMPEG",
        "With image input on: requests may also include videos (`video_url` parts: mp4, webm, mov, ... as `data:` or http(s) URLs). This ffmpeg program decodes them.\n"
        "\n"
+       "`ffmpeg`  the one on PATH, else the first of /usr/bin, /usr/local/bin, /opt/ffmpeg/bin, /snap/bin, ~/bin, ~/.local/bin, ~/.hermes/tools/*/bin\n"
        "`empty`  videos are refused; so is a program that is not found (the log says why)\n"
        "\n"
        "Needs: `ffprobe` beside it or on PATH."},
@@ -1454,11 +1455,11 @@ std::vector<Spec> schema() {
   }
   {  // Image input
     auto &s = add("XEN_VISION", "Image input", net, Kind::Bool);
-    s.scope = Scope::Qwen38;
+    s.scope = Scope::Vision;
   }
   {
     auto &s = add("XEN_VISION_MAX_PIXELS", "Image size cap", net, Kind::Int);
-    s.scope = Scope::Qwen38;
+    s.scope = Scope::Vision;
     s.lo = 65536;
     s.hi = 16777216;
     s.choices = {"262144", "1048576", "4194304"};
@@ -1466,30 +1467,30 @@ std::vector<Spec> schema() {
   }
   {
     auto &s = add("XEN_VISION_IMAGES", "Images kept encoded", net, Kind::Int);
-    s.scope = Scope::Qwen38;
+    s.scope = Scope::Vision;
     s.lo = 1;
     s.hi = 256;
     s.choices = {"4", "16", "64"};
   }
   {  // Media URLs
     auto &s = add("XEN_MEDIA_URLS", "Images by http(s) link", net, Kind::Bool);
-    s.scope = Scope::Qwen38;
+    s.scope = Scope::Vision;
   }
   {
     auto &s = add("XEN_MEDIA_DOMAINS", "Image link hosts", net, Kind::Text);
-    s.scope = Scope::Qwen38;
+    s.scope = Scope::Vision;
     s.allow_empty = true;
     s.names = {{"", "any host"}};
   }
   {  // Video input
     auto &s = add("XEN_VISION_FFMPEG", "Video decoder (ffmpeg)", net, Kind::Path);
-    s.scope = Scope::Qwen38;
+    s.scope = Scope::Vision;
     s.allow_empty = true;
     s.names = {{"", "off (no video)"}};
   }
   {
     auto &s = add("XEN_VIDEO_MAX_PIXELS", "Video pixel budget", net, Kind::Int);
-    s.scope = Scope::Qwen38;
+    s.scope = Scope::Vision;
     s.lo = 65536;
     s.hi = 268435456;
     s.choices = {"6291456", "25165824", "50331648"};
@@ -1497,7 +1498,7 @@ std::vector<Spec> schema() {
   }
   {
     auto &s = add("XEN_VIDEO_FPS", "Video frames per second", net, Kind::Float);
-    s.scope = Scope::Qwen38;
+    s.scope = Scope::Vision;
     s.lo = 0.01;
     s.hi = 30;
     s.choices = {"1", "2", "4"};
@@ -1505,7 +1506,7 @@ std::vector<Spec> schema() {
   }
   {
     auto &s = add("XEN_MEDIA_TIMEOUT", "Image download timeout", net, Kind::Float);
-    s.scope = Scope::Qwen38;
+    s.scope = Scope::Vision;
     s.lo = 0.1;
     s.hi = 600;
     s.choices = {"5", "30", "120"};
@@ -1970,6 +1971,7 @@ std::string scope_name(Scope s) {
     case Scope::Qwen38: return "qwen38 only";
     case Scope::Qwen35: return "qwen35 only";
     case Scope::MoE: return "MoE models only";
+    case Scope::Vision: return "qwen38 and qwen35 (the checkpoints with a vision tower)";
     default: return "every model";
   }
 }
@@ -2012,8 +2014,7 @@ bool applies(const Spec &s, std::string_view arch) {
   if (arch == "qwen38" && s.key == "XEN_DRAFTER_MTP_FROM") return true;  // Both drafters
   if (arch == "qwen38" && (s.key == "XEN_DRAFTER_TREE" || s.key == "XEN_DRAFTER_TREE_SEQS")) return true;  // DFlash trees
   if (arch == "qwen38" && s.key == "XEN_STEP_ROWS") return true;  // Qwen38's 32-row steps
-  if (s.key.rfind("XEN_VISION", 0) == 0 || s.key.rfind("XEN_MEDIA", 0) == 0 || s.key.rfind("XEN_VIDEO", 0) == 0)
-    return arch.empty() || arch == "qwen38" || arch == "qwen35";  // The checkpoints with a tower
+  if (s.scope == Scope::Vision) return arch.empty() || arch == "qwen38" || arch == "qwen35";
   if (arch.empty() || s.scope == Scope::All) return true;
   return (s.scope == Scope::Qwen38 && arch == "qwen38") || (s.scope == Scope::MoE && arch == "qwen38") ||
          (s.scope == Scope::Qwen35 && (arch == "qwen35" || arch == "llama" || arch == "flint"));
@@ -2434,14 +2435,8 @@ std::vector<std::string> ffmpeg_candidates() {
     const std::string real = std::filesystem::canonical(vt.ffmpeg, ec).string();
     if (seen.insert(ec ? vt.ffmpeg : real).second) out.push_back(vt.ffmpeg);
   };
-  take("ffmpeg");
-  for (const char *d : {"/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/opt/ffmpeg/bin/ffmpeg", "/snap/bin/ffmpeg"}) take(d);
-  if (const char *h = std::getenv("HOME")) {  // static builds unpacked under ~/.hermes/tools/<name>/bin or ~/bin
-    take(std::string(h) + "/bin/ffmpeg");
-    take(std::string(h) + "/.local/bin/ffmpeg");
-    std::error_code ec;
-    for (const auto &e : std::filesystem::directory_iterator(std::string(h) + "/.hermes/tools", ec)) take((e.path() / "bin" / "ffmpeg").string());
-  }
+  take(std::string(xenithium::util::kDefaultFfmpeg));  // PATH (else the first install place the server would pick)
+  for (const std::string &p : xenithium::util::ffmpeg_install_paths()) take(p);
   return out;
 }
 

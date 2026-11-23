@@ -98,15 +98,15 @@ struct MemPlan {
 };
 std::string plan_json(const MemPlan &p);
 
-// --vision 1: the tower's per-card bytes (weights + scratch at the largest image) and the image rows of a load
-// on `cards` cards; on = false with --vision 0. Throws OptionError when the checkpoint has no vision tower.
+// --vision 1: the tower's per-card bytes (weights + scratch at the largest image) plus the image rows every card holds,
+// for a load on `cards` cards; on = false with --vision 0. Throws OptionError when the checkpoint has no vision tower.
 struct VisionPlan {
   bool on = false;
   model::VisionConfig vc;
   int max_patches = 0;
   int64_t rows = 0;
-  double gib[2] = {0, 0};
-  double max_gib() const { return gib[0] > gib[1] ? gib[0] : gib[1]; }
+  std::vector<double> gib;  // per card
+  double max_gib() const { return gib.empty() ? 0.0 : *std::max_element(gib.begin(), gib.end()); }
 };
 VisionPlan vision_plan(const Options &o, const model::ModelConfig &cfg, int cards);
 // The tower + store of a plan on the fabric (after the model loaded), the store's cap set, the load line logged.
@@ -117,7 +117,7 @@ std::unique_ptr<arch::VisionStore> load_vision(Fabric &fab, const Options &o, co
 // running requests hold every row).
 std::unique_ptr<server::MediaHook> make_vision_hook(arch::VisionStore &store, const Options &o);
 // "server: vision..." the load line of an arch that loaded its tower.
-void log_vision(const arch::VisionStore &store, double gib_card0, double gib_card1, double load_s);
+void log_vision(const arch::VisionStore &store, const std::vector<double> &gib_per_card, double load_s);
 
 // ---- helpers shared by the backends (src/serve/backend.cpp) ----------------------------------------------------------
 

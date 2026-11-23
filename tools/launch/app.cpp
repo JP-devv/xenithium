@@ -1226,6 +1226,15 @@ struct App::Impl {
     return hay.find(f) != std::string::npos;
   }
 
+  // A row is listed when the model uses the setting, when `a` shows the unused ones, or when a filter is typed and the
+  // setting applies to this model's arch but waits on another one (Images by http(s) link while Image input is off): a
+  // search finds it dimmed with its reason instead of answering "no setting matches". Settings of another arch stay
+  // hidden until `a`.
+  bool listed(const Spec &s) const {
+    if (show_na || unused_reason(s, model.arch, vals).empty()) return true;
+    return !filter.s.empty() && applies(s, model.arch);
+  }
+
   void rebuild_rows() {
     std::string keep;
     if (sel >= 0 && sel < static_cast<int>(rows.size())) keep = rows[sel].group ? "#" + rows[sel].name : (rows[sel].spec >= 0 ? spec(rows[sel].spec).key : "");
@@ -1235,7 +1244,7 @@ struct App::Impl {
     if (!filter.s.empty()) {
       bool any = false;
       for (const auto &sp : cat.specs)
-        if ((unused_reason(sp, model.arch, vals).empty() || show_na) && sp.key != "XEN_MODEL" && matches_filter(sp)) any = true;
+        if (listed(sp) && sp.key != "XEN_MODEL" && matches_filter(sp)) any = true;
       help_search = !any;
     }
     for (const auto &g : cat.groups) {
@@ -1243,7 +1252,7 @@ struct App::Impl {
       for (size_t i = 0; i < cat.specs.size(); ++i) {
         const Spec &s = cat.specs[i];
         if (s.group != g || s.key == "XEN_MODEL") continue;
-        if (!unused_reason(s, model.arch, vals).empty() && !show_na) {
+        if (!listed(s)) {
           ++hidden;
           continue;
         }

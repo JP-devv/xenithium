@@ -574,8 +574,8 @@ class Model {
   void set_gdn_scan(bool on) { opt_.gdn_scan = on; }
   // Image input. Prompt ids >= the vocabulary name image rows of the store (arch::VisionStore): prefill calls map them
   // for the device (encoding images on first use) and the embedding gathers read those rows; the PLE n-grams see the
-  // image token there. nullptr = text only.
-  void set_vision(VisionStore *v) { vis_ = v; }
+  // image token there. nullptr = text only. Throws when the store has no image rows on one of the model's cards.
+  void set_vision(VisionStore *v);
   bool moe_tp() const { return ms_.shape.tp; }
   StepProfile profile() const;
   // The decode step's module times under graph replay. XEN_DEC_PROFILE set (1): every recorded step graph carries a

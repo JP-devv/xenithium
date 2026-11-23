@@ -271,8 +271,8 @@ VisionPlan vision_plan(const Options &o, const model::ModelConfig &cfg, int card
   const int64_t pp = static_cast<int64_t>(v.vc.patch) * v.vc.patch, mm = static_cast<int64_t>(v.vc.merge) * v.vc.merge;
   v.max_patches = static_cast<int>(o.vision_max_pixels / pp / mm * mm);
   v.rows = static_cast<int64_t>(o.vision_images) * (v.max_patches / mm);
-  for (int c = 0; c < cards && c < 2; ++c)
-    v.gib[c] = static_cast<double>(arch::VisionTower::bytes_on(v.vc, v.max_patches, cards, c) + arch::VisionStore::pool_bytes(v.vc, v.rows)) / 1073741824.0;
+  for (int c = 0; c < cards; ++c)  // the tower on the first cards, the image rows on all
+    v.gib.push_back(static_cast<double>(arch::VisionTower::bytes_on(v.vc, v.max_patches, cards, c) + arch::VisionStore::pool_bytes(v.vc, v.rows)) / 1073741824.0);
   return v;
 }
 
@@ -282,7 +282,7 @@ std::unique_ptr<arch::VisionStore> load_vision(Fabric &fab, const Options &o, co
   auto tower = std::make_unique<arch::VisionTower>(fab, ck, vp.vc, vp.max_patches);
   auto store = std::make_unique<arch::VisionStore>(fab, std::move(tower), vp.vc, vocab, vp.rows);
   store->max_pixels = o.vision_max_pixels;
-  log_vision(*store, vp.gib[0], vp.gib[1], std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+  log_vision(*store, vp.gib, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
   return store;
 }
 
@@ -297,14 +297,20 @@ std::unique_ptr<server::MediaHook> make_vision_hook(arch::VisionStore &store, co
   return hook;
 }
 
-void log_vision(const arch::VisionStore &store, double gib_card0, double gib_card1, double load_s) {
+void log_vision(const arch::VisionStore &store, const std::vector<double> &gib_per_card, double load_s) {
   const model::VisionConfig &vc = store.config();
   const int64_t px = store.max_pixels, max_tokens = px / (static_cast<int64_t>(vc.patch) * vc.patch * vc.merge * vc.merge);
+  std::string gib;  // "1.489 / 1.467 / 0.112 / 0.112"
+  for (const double g : gib_per_card) {
+    char b[32];
+    std::snprintf(b, sizeof b, "%s%.3f", gib.empty() ? "" : " / ", g);
+    gib += b;
+  }
   std::fprintf(stderr,
                "server: vision on: tower %d blocks (hidden %d, %d heads) loaded in %.1f s; images up to %lld pixels (~%lld tokens each), "
-               "%lld image rows (%.3f / %.3f GiB on the cards); image_url / input_image parts take PNG / JPEG\n",
+               "%lld image rows on each of %d cards (%s GiB per card); image_url / input_image parts take PNG / JPEG\n",
                vc.depth, vc.hidden, vc.heads, load_s, static_cast<long long>(px), static_cast<long long>(max_tokens), static_cast<long long>(store.rows()),
-               gib_card0, gib_card1);
+               store.cards(), gib.c_str());
 }
 
 }  // namespace xenithium:serve
