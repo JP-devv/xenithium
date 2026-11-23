@@ -5,6 +5,8 @@ A native C++20 LLM inference engine and OpenAI-compatible server for Intel Arc P
 directly; the two-card tensor-parallel exchange is the engine's own (no oneCCL). Tokenizer, chat-template renderer
 (an in-engine Jinja interpreter), reasoning / tool-call parsers and sampling are all native C++: no Python at runtime.
 
+**[Benchmark results and recommended settings](docs/benchmark/pr4-dense-k8v4-tree/README.md)** — PR #4 review and planned qualification; GPU results are pending.
+
 ## Supported models
 
 | Model | Checkpoint (`~/models/...`) | Download | Drafter download (`~/models/...`) | Arch | Type | Cards | Notes |
