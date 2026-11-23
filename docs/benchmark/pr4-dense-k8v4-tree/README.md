@@ -108,7 +108,7 @@ In **each of two clean shells**, configure machine-local paths. The immutable `t
 ```bash
 cd /path/to/Xenithium/docs/benchmark/pr4-dense-k8v4-tree
 export BASE_SERVER=/path/to/base-server-build/xenithium-server
-export HEAD_SERVER=/path/to/exact-pr4-head-server-build/xenithium-server
+export HEAD_SERVER=/path/to/3bfc10e-merged-server-build/xenithium-server
 export RUNNER=/path/to/pinned-6c28382/xenithium-bench
 export INPUTS=/path/to/pinned-sweep-inputs
 export FIXTURE_DIR="$INPUTS"
@@ -125,7 +125,11 @@ Use `env -i HOME="$HOME" USER="$USER" LOGNAME="$USER" PATH=/usr/bin:/bin /usr/bi
 | --- | --- | --- |
 | Baseline: base/tree0 | `bash ./reproduce-server.sh base 0` | `bash ./reproduce-bench.sh "$case_name" base-tree0` |
 | Base fallback control: base/tree7 | `bash ./reproduce-server.sh base 7` | `bash ./reproduce-bench.sh "$case_name" base-tree7` |
-| Head chain control: head/tree0 | `bash ./reproduce-server.sh head 0` | `bash ./reproduce-bench.sh "$case_name" head-tree0` |
-| Preferred feature evaluation: head/tree7 | `bash ./reproduce-server.sh head 7` | `bash ./reproduce-bench.sh "$case_name" head-tree7` |
+| Head chain control: head/tree0 | `bash ./reproduce-server.sh head-merged 0` | `bash ./reproduce-bench.sh "$case_name" head-tree0` |
+| Preferred feature evaluation: head/tree7 | `bash ./reproduce-server.sh head-merged 7` | `bash ./reproduce-bench.sh "$case_name" head-tree7` |
+
+Offline handoff check: `bash -n` passed for both scripts. `--check-only` passed for base, historical head and merged head with each of tree0/tree7; merged mode rejected the historical server and, separately, the historical XL paired with the merged server. The ambiguous `head` mode was also rejected. These checks made no GPU launch.
+
+The `head-merged` mode requires the exact server and XL hashes recorded above for source `3bfc10e9c84a7418fc6a152a24d696e27dc4ea86`; `569347a` changed only documentation, and later handoff corrections do not change that tested source. For historical reproduction only, `head-historical` instead requires the original public `f0e84a98` server and XL hashes; never substitute it for merged-head validation. `head` alone is rejected. To verify pins without sourcing oneAPI or launching a server, add `--check-only` after the tree argument; this does not validate a device, endpoint, or model identity.
 
 Route evidence must be positive, request-correlated and collected separately from unmodified timed binaries. Matching visible text or retrieval is not output token-ID/numerical parity; a reported prefix hit is not proof of selector-history or full-cache prefill skip. Report HTTP TTFT, decode and total separately; no isolated model-prefill or restore time is assumed. One observation per cell would not establish scaling or a speedup distribution.
