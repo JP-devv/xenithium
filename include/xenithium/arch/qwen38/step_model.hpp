@@ -19,8 +19,8 @@ class StepModelAdapter final : public core::StepModel {
   int64_t vocab() const override { return m_.config().vocab; }
   int max_rows() const override { return step_rows_; }
   // With 32-row steps (XEN_STEP_ROWS 32) a step of fewer than kRows32From sequences keeps the 16-row budget: its drafts
-  // per sequence and layouts are the 16-row step's, so it runs the 16-row shape. With 64-row steps (XEN_STEP_ROWS 64) a
-  // step of fewer than kRows64From sequences keeps the 32-row budget and its rule.
+  // per sequence and layouts are the 16-row step's, so it runs the 16-row shape. With 64-row steps (XEN_STEP_ROWS 64,
+  // the four-card default) a step of fewer than kRows64From sequences keeps the 32-row budget and its rule.
   int step_rows_at(int sequences) const override {
     if (step_rows_ <= kernels::kStepRows16) return step_rows_;
     if (sequences < kRows32From) return kernels::kStepRows16;
@@ -28,8 +28,9 @@ class StepModelAdapter final : public core::StepModel {
   }
   // Sequences from which a step takes the 32-row budget (step_rows_at).
   static constexpr int kRows32From = 6;
-  // Sequences from which a step takes the 64-row budget (step_rows_at).
-  static constexpr int kRows64From = 13;
+  // Sequences from which a step takes the 64-row budget (step_rows_at): served, 9 / 10 / 12 streams decode +3 / +3 /
+  // +19 % per stream on it, 7 and 8 streams lose (their steps grow by more than their tokens).
+  static constexpr int kRows64From = 9;
   // Rows a decode step may carry: 64 (the 64-row shape, where the model was loaded with ModelOptions::step_rows_cap
   // 64), 32 (the 32-row shape, `XEN_STEP_ROWS`), 16 (the 16-row shape), 8 or 4. Sets the drafters' depth per request
   // count below.
@@ -130,7 +131,9 @@ class StepModelAdapter final : public core::StepModel {
   static double shape32_ms(int rows) { return rows > 16 ? kShape32Ms + kRow32Ms * (rows - 16) : 0.0; }
   // Past 32 rows the 64-row shape (XEN_STEP_ROWS 64): over the 32-row line above, + kShape64Ms and kRow64Ms per row
   // past 32.
-  static constexpr double kShape64Ms = 5.1, kRow64Ms = 0.11;
+  // Fitted to the probe's 12 x 4 and 16 x 4 steps in the fit's units: past 32 rows a row costs less than the 32-row
+  // line's (kRow64Ms < 0), after one step up.
+  static constexpr double kShape64Ms = 7.8, kRow64Ms = -0.14;
   static double shape64_ms(int rows) { return rows > 32 ? kShape64Ms + kRow64Ms * (rows - 32) : 0.0; }
   static constexpr double kDfPassMs = 1.6, kDfCtxMs = 0.05;  // a DFlash pass / a deferred context pass
   // For A/B gates (probe serve --two-deep 1): 2 sequences at MTP-3 each in the 8-row shape.
@@ -184,7 +187,7 @@ class StepModelAdapter final : public core::StepModel {
   bool dev_lp_ = true;
   bool rows_lp_ = true;
   bool kv_only_ = true;
-  int step_rows_ = kernels::kStepRows16;  // 32 by XEN_STEP_ROWS (set_step_rows)
+  int step_rows_ = kernels::kStepRows16;  // set_step_rows: XEN_STEP_ROWS, or the setup's default (serve.cpp)
   bool two_deep_ = false;
   // merge the two cards' records of row r (rec = [card][n][kLpRec]) into out
   void merge_row(const std::vector<float> &rec, int n, int r, float xt, int top_n, core::TokenLogprob &out) const;

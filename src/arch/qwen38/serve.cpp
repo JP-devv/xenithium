@@ -30,6 +30,13 @@ namespace {
 
 constexpr int kDenseOneDnnRows = 1024;  // rows per call from which the int8 trunk runs on oneDNN
 
+// The rows a decode step may carry when --step-rows is 0 (the model's default). Four cards take the 64-row shape: the
+// budget follows the stream count (StepModelAdapter::step_rows_at: 16 rows below 6 streams, 32 from 6, 64 from 9), so
+// few streams keep their narrow steps. Its cost is the 64-row step's scratch (plan(): 0.42 GiB per card, 3-4 % of the
+// KV pool's tokens). One and two cards keep 16 (their wider steps are opt-in).
+constexpr int kDefaultStepRows = kernels::kStepRows16, kDefaultStepRowsTp4 = kernels::kMaxRows;
+int step_rows_of(const serve::Options &o) { return o.step_rows_or(o.tp == 4 ? kDefaultStepRowsTp4 : kDefaultStepRows); }
+
 // --vision 1 (serve::vision_plan): the tower's VRAM kept free through the reserve while the hot experts fill the cards;
 // the tower loads after the model.
 serve::VisionPlan vision_plan(const serve::Options &o, const model::ModelConfig &cfg) { return serve::vision_plan(o, cfg, o.tp); }
@@ -39,7 +46,7 @@ ModelOptions model_options(const serve::Options &o, const model::ModelConfig &cf
     throw serve::OptionError("--prefill-gemm onednn-all: every int4 prefill GEMM on oneDNN is built for the dense 27B (qwen35); arch qwen38 takes onednn|esimd");
   ModelOptions mo;
   mo.slots = o.slots;
-  mo.step_rows_cap = o.step_rows > kernels::kStepRows32 ? kernels::kMaxRows : 0;  // --step-rows 64 (four cards)
+  mo.step_rows_cap = step_rows_of(o) > kernels::kStepRows32 ? kernels::kMaxRows : 0;  // 64-row steps (four cards)
   mo.context = o.context;
   mo.yarn_tiers = o.yarn_tiers == "on";  // YaRN per request past the trained positions
   mo.kv = o.kv == "bf16" ? kernels::QsaKv::bf16 : o.kv == "int8-v4" ? kernels::QsaKv::i8v4 : kernels::QsaKv::i8;
@@ -123,7 +130,7 @@ std::string plan(const serve::Options &o, const model::ModelConfig &cfg, std::st
   constexpr double kDFlashGiB = 0.37;  // the DFlash drafter (no KV pages in the pool)
   const int chunk_rows = o.prefill_chunk > 0 ? o.prefill_chunk : 4096;
   // + the 64-row step's scratch (--step-rows 64: the MoE's per-slot partials at 64 rows)
-  const double kRuntimeGiB = 1.153 + 0.0525 * o.slots + 0.000533 * std::max(0, chunk_rows - 512) + (o.step_rows > 32 ? 0.42 : 0.0);
+  const double kRuntimeGiB = 1.153 + 0.0525 * o.slots + 0.000533 * std::max(0, chunk_rows - 512) + (step_rows_of(o) > kernels::kStepRows32 ? 0.42 : 0.0);
   serve::Options oo = o;
   oo.hot_rank.clear();  // the ranking does not move the counts
   const ModelOptions mo = model_options(oo, cfg);
@@ -218,8 +225,7 @@ class Backend final : public serve::Backend {
     std::fprintf(stderr, "server: KV lending %s\n", ls.kv_lend.c_str());  // --kv-lend
     adapter_ = std::make_unique<StepModelAdapter>(*model_);
     adapter_->set_depth(o_.mtp_depth);
-    // 16 (the default), 32 or 8 (--step-rows / XEN_STEP_ROWS)
-    adapter_->set_step_rows(o_.step_rows_or(16));
+    adapter_->set_step_rows(step_rows_of(o_));  // --step-rows / XEN_STEP_ROWS, 0 = this setup's default
     std::fprintf(stderr, "server: steps of up to %d rows\n", adapter_->max_rows());
     std::fprintf(stderr, "server: KV %s, %lld tokens (%.2f / %.2f GiB on the cards); one request up to %lld tokens (max_model_len)\n",
                  m.kv_shared() ? "pool shared by the slots" : "fixed per slot", static_cast<long long>(m.kv_pool_tokens()), m.kv_bytes(0) / 1073741824.0,

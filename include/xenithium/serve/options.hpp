@@ -104,7 +104,8 @@ struct Options {
   // entries and "" keep the default table 7,7,4,3,1,1,1,1,0..); each <= seg_rows - 1, n x (depth + 1) <= step_rows;
   // drafter_wide: with seg_rows 16, one stream drafts 15 (a 16-row tree of drafter_tree_wide nodes, or a chain without
   // trees) after a verify that accepted this many drafts or more, else the table's pick (0 = the table only).
-  // step_rows 0 = the model's default (qwen35 32; qwen38 16, its 32-row steps are opt-in); step_rows_or(d) reads it
+  // step_rows 0 = the model's default (qwen35 32; qwen38 16, on four cards 64 with the budget by stream count);
+  // step_rows_or(d) reads it
   int step_rows = 0;  // llama / flint run 8 at any setting above 8
   int step_rows_or(int def) const { return step_rows > 0 ? step_rows : def; }
   int seg_rows = 16;  // llama / flint run 8 at any setting

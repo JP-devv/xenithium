@@ -360,7 +360,7 @@ int validate(const serve::Options &o) {
   if (o.drafter_int4 != 0 && o.drafter_int4 != 1) return bad("--drafter-int4 takes 0 or 1");
   {  // Step rows
     std::vector<int> dd;
-    // 0 = the model's default (qwen35 32, qwen38 16); the checks below take qwen35's 32 (qwen38 reads no
+    // 0 = the model's default (qwen35 32; qwen38 16, 64 on four cards); the checks below take qwen35's 32 (qwen38 reads no
     // seg rows or draft depths)
     const int step = o.step_rows_or(32);
     // 64 (qwen38 on four cards: the model refuses it elsewhere)

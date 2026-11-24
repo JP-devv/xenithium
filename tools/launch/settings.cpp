@@ -340,15 +340,16 @@ const char *brief_of(std::string_view key) {
       {"XEN_STEP_ROWS",
        "The most rows one decode step runs over all streams. A row is one token being checked.\n"
        "\n"
-       "`0`  the model's: 32 on qwen35, 16 on qwen38\n"
-       "`64`  qwen38 on four cards only: 13 and more streams guess deeper in one 64-row step\n"
-       "`32`  5-16 streams guess deeper in one wider step\n"
+       "`0`  the default: the model's. 32 on qwen35. qwen38: 64 on four cards, 16 on one or two\n"
+       "`64`  qwen38 on four cards only: 9 and more streams guess deeper in one 64-row step\n"
+       "`32`  6-16 streams guess deeper in one wider step\n"
        "`16`  narrow steps\n"
        "`8`  every step on the 8-row kernels; needs `XEN_SLOTS` 8 or fewer\n"
        "\n"
        "Gives (wider): + tokens per second in all from about 6 streams. Few streams run the narrow steps either way.\n"
-       "Takes (wider): - VRAM for the step's buffers (`64`: about 0.4 GiB more per card).\n"
-       "qwen38: with `32`, 1-5 streams keep the 16-row steps and 6-16 streams take the 32-row ones. The TP4 preset sets `32`; the TP2 preset keeps 16.\n"
+       "Takes (wider): - VRAM for the step's buffers (`64`: about 0.4 GiB more per card, so a slightly smaller KV pool).\n"
+       "qwen38 on four cards: 1-5 streams run the 16-row steps, 6-8 streams the 32-row ones, 9 and more the 64-row ones.\n"
+       "Tip: `32` on four cards gives the KV pool that memory back; 9 and more streams then decode slower.\n"
        "Output: the same.\n"
        "Note: llama and flint always run 8."},
       {"XEN_SEG_ROWS",
@@ -1211,7 +1212,7 @@ std::vector<Spec> schema() {
     auto &s = add("XEN_STEP_ROWS", "Step rows (all sequences)", spec, Kind::Choice);
     s.scope = Scope::Qwen35;
     s.choices = {"0", "32", "16", "8", "64"};  // 32 0 = the model's 64
-    s.names = {{"0", "the model's (qwen35 32, qwen38 16)"}, {"32", "32 (8 for llama / flint)"}, {"16", "16 (8 for llama / flint)"}, {"8", "8 (slots <= 8)"},
+    s.names = {{"0", "the model's (qwen35 32; qwen38 16, 64 on four cards)"}, {"32", "32 (8 for llama / flint)"}, {"16", "16 (8 for llama / flint)"}, {"8", "8 (slots <= 8)"},
                {"64", "64 (qwen38, four cards)"}};
   }
   {
