@@ -262,6 +262,9 @@ class DFlash {
     float *brms = nullptr, *bproj = nullptr, *bpacked = nullptr;
     bf16 *bcode = nullptr, *bmsg = nullptr;
     kernels::PairWire wire;
+    // four cards: the pass's sums of kOwnerSumRows rows and more as an owner sum + a share by copies (dflash.cpp, submit)
+    kernels::PairWire own_wire;
+    kernels::OwnerShare own_share;
     kernels::DfTopkWire tw;
     // the deferred context: feature rows [slots][ctx_defer][F], the flush's own scratch and wire
     bf16 *backlog = nullptr, *fl_t = nullptr, *fl_tn = nullptr;

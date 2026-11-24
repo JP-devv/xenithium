@@ -38,6 +38,10 @@ void need(bool ok, const std::string &what) {
 }
 
 // pinned host words (DFlash::host_): block ids, records, anchors, drafts
+// Four cards: a pass's sums of this many rows and more go as an owner sum + a share by copies (DFlash::submit).
+// Served (qwen38 TP4, round 286): the update gap -0.35 ms at 12 streams and -0.38 at 16 (32-64 rows a sum); from 24
+// rows instead (6 / 7 streams) -0.1 / 0.0 ms, inside the spread, so 32.
+constexpr int kOwnerSumRows = 32;
 constexpr int kIdsOff = 0, kRecOff = k::kMaxRows, kAnchorOff = kRecOff + k::kMaxSegs * k::kSegRec, kDraftOff = kAnchorOff + k::kMaxSegs;
 constexpr int kPfRecOff = kDraftOff + k::kMaxSegs * k::kMaxRows;
 constexpr int kKeysOff = (kPfRecOff + k::kSegRec + 1) / 2 * 2;  // the block rows' top-16 keys (uint64, 8-byte aligned)
@@ -384,6 +388,42 @@ DFlash::DFlash(Fabric &fab, const std::string &dir, const std::string &target_di
         k::pair_rows_wire_init(fab.compute(static_cast<size_t>(c)), opt.ctx_defer, H, cd.fl_wire.inbox, C).wait();
       }
     }
+    // The pass's sums of kOwnerSumRows rows and more (submit): an owner sum and a share by copies. One use each for the
+    // whole pass: its sums alternate their parity, so a card's sum after next cannot land in a receive region its peer
+    // still reads, and every card sends once per exchange, so the counts agree.
+    auto zeroed = [&](int c, size_t bytes, bool mailbox) {
+      bytes = std::max<size_t>(bytes, 4096);
+      void *p = mailbox ? fab.alloc_mailbox(static_cast<size_t>(c), bytes) : fab.alloc(static_cast<size_t>(c), bytes);
+      cards_[static_cast<size_t>(c)].mem.push_back(p);
+      fab.compute(static_cast<size_t>(c)).memset(p, 0, bytes).wait();
+      return p;
+    };
+    k::OwnerMail sum_mail, share_mail;
+    std::array<uint32_t *, k::kWireCardsMax> sum_lines{}, share_lines{};
+    std::array<float *, k::kWireCardsMax> recv{};
+    for (int c = 0; c < C; ++c) {
+      const size_t sc = static_cast<size_t>(c);
+      sum_mail.inbox[sc] = static_cast<uint32_t *>(zeroed(c, k::owner_sum_words(H) * 4, true));
+      share_mail.inbox[sc] = static_cast<uint32_t *>(zeroed(c, k::owner_share_words(H) * 4, true));
+      k::owner_mail_init(fab.compute(sc), sum_mail.inbox[sc], k::owner_sum_words(H)).wait();
+      k::owner_mail_init(fab.compute(sc), share_mail.inbox[sc], k::owner_share_words(H)).wait();
+      sum_lines[sc] = static_cast<uint32_t *>(zeroed(c, k::kOwnerCopyLineBytes, true));
+      share_lines[sc] = static_cast<uint32_t *>(zeroed(c, k::kOwnerCopyLineBytes, true));
+      recv[sc] = static_cast<float *>(zeroed(c, k::owner_sum_copy_elems(H) * sizeof(float), false));
+    }
+    for (int c = 0; c < C; ++c) {
+      Card &cd = cards_[static_cast<size_t>(c)];
+      cd.own_wire = cd.wire;
+      cd.own_wire.owner = sum_mail;
+      cd.own_wire.owner.card = c;
+      cd.own_wire.copy.recv = recv;
+      cd.own_wire.copy.flags.lines = sum_lines;
+      cd.own_wire.copy.flags.count = static_cast<uint32_t *>(zeroed(c, k::kOwnerCopyCountBytes, false));
+      cd.own_share = k::OwnerShare{share_mail, cd.wire.error, cd.wire.wait_cycles};
+      cd.own_share.mail.card = c;
+      cd.own_share.copy.flags.lines = share_lines;
+      cd.own_share.copy.flags.count = static_cast<uint32_t *>(zeroed(c, k::kOwnerCopyCountBytes, false));
+    }
   }
   host_ = static_cast<int32_t *>(fab.alloc_host(kHostWords * 4));
   std::memset(host_, 0, kHostWords * 4);
@@ -609,6 +649,21 @@ void DFlash::submit(int ns, int ctx_rows, int block_rows, int ctx_row0, int tree
   const size_t C = cards_.size();
   const float eps = static_cast<float>(cfg_.eps);
   auto wire_of = [&](Card &cd) -> const k::PairWire * { return C > 1 ? &cd.wire : nullptr; };  // TP1: no two-card sum
+  // A sum of the pass: every card ends with every row. Four cards, from kOwnerSumRows rows: each row is summed by its
+  // owner (the partials go there by copies) and the owners share their rows by copies, instead of two hops of every
+  // row's fp32 partial through the mailboxes; the same bits ((p0 + p1) + (p2 + p3) either way). A card writes its rows
+  // into its peers' `out`: safe by the pass's order, because the next sum into the same buffer completes on a card only
+  // after every peer sent the partial of that sum, and a peer's GEMM that makes it is queued behind its readers of `out`.
+  auto reduce = [&](Card &cd, sycl::queue &q, int rows, int parity, bf16 *Card::*out) {
+    if (C != 4 || rows < kOwnerSumRows) {
+      k::pair_reduce(q, rows, H, cd.part, wire_of(cd), parity, cd.*out);
+      return;
+    }
+    k::pair_reduce(q, rows, H, cd.part, &cd.own_wire, parity, cd.*out);
+    k::OwnerShare share = cd.own_share;
+    for (size_t i = 0; i < C; ++i) share.copy.buf[i] = cards_[i].*out;
+    k::owner_share(q, rows, H, cd.*out, share, parity);
+  };
   int32_t *ids = host_ + kIdsOff, *rec = host_ + kRecOff, *anc = host_ + kAnchorOff;
   // every pair_reduce on the wire alternates its parity: draw one only for a sum that runs
   const int pc = rc > 0 ? wire_parity() : 0;  // the fc sum (context rows)
@@ -633,7 +688,7 @@ void DFlash::submit(int ns, int ctx_rows, int block_rows, int ctx_row0, int tree
     if (rb > 0 && cfg_.kind == DFlashConfig::Kind::dspine) q.memcpy(cd.anchors, anc, static_cast<size_t>(ns) * 4);
     if (rc > 0) {
       k::dense_gemm(q, rc, cd.feat_step + static_cast<size_t>(ctx_row0) * fcols_, cd.fc, cd.part);
-      k::pair_reduce(q, rc, H, cd.part, wire_of(cd), pc, cd.t);
+      reduce(cd, q, rc, pc, &Card::t);
       k::rms_norm_plain(q, rc, H, cd.t, nullptr, cd.hnorm, eps, cd.tn);
     }
     if (rb > 0) {
@@ -680,7 +735,7 @@ void DFlash::submit(int ns, int ctx_rows, int block_rows, int ctx_row0, int tree
       });
       each(5, [&](Card &cd, const Layer &ly, sycl::queue &q) {
         lm_gemm(q, rb, cd.attn, ly.o, cd.part);
-        k::pair_reduce(q, rb, H, cd.part, wire_of(cd), pa, cd.mix);
+        reduce(cd, q, rb, pa, &Card::mix);
       });
       each(6, [&](Card &cd, const Layer &ly, sycl::queue &q) { k::rms_norm_plain(q, rb, H, cd.res, cd.mix, ly.post_ln, eps, cd.xn); });
       each(7, [&](Card &cd, const Layer &ly, sycl::queue &q) {
@@ -688,7 +743,7 @@ void DFlash::submit(int ns, int ctx_rows, int block_rows, int ctx_row0, int tree
       });
       each(8, [&](Card &cd, const Layer &ly, sycl::queue &q) {
         lm_gemm(q, rb, cd.h, ly.down, cd.part);
-        k::pair_reduce(q, rb, H, cd.part, wire_of(cd), pm, cd.mlp);
+        reduce(cd, q, rb, pm, &Card::mlp);
         // the bridge: raw = res + mlp -> codes -> the predecessor message -> res = raw + rms delta (rows past the anchor)
         k::ds_bridge_in(q, rb, H, cd.res, cd.mlp, beps, cd.brms, cd.xc);
         k::dense_gemm(q, rb, cd.xc, ly.bread, cd.bproj);
@@ -716,7 +771,7 @@ void DFlash::submit(int ns, int ctx_rows, int block_rows, int ctx_row0, int tree
     });
     each(5, [&](Card &cd, const Layer &ly, sycl::queue &q) {
       lm_gemm(q, rb, cd.attn, ly.o, cd.part);
-      k::pair_reduce(q, rb, H, cd.part, wire_of(cd), pa, cd.mix);
+      reduce(cd, q, rb, pa, &Card::mix);
       k::df_conv(q, rb, block_rows, H, cfg_.conv_group, cd.mix, cd.dyn, pn, 1, ly.abase + 2 * H, cd.xc);
     });
     // MLP sublayer
@@ -730,7 +785,7 @@ void DFlash::submit(int ns, int ctx_rows, int block_rows, int ctx_row0, int tree
     });
     each(8, [&](Card &cd, const Layer &ly, sycl::queue &q) {
       lm_gemm(q, rb, cd.h, ly.down, cd.part);
-      k::pair_reduce(q, rb, H, cd.part, wire_of(cd), pm, cd.mix);
+      reduce(cd, q, rb, pm, &Card::mix);
       k::df_conv(q, rb, block_rows, H, cfg_.conv_group, cd.mix, cd.dyn, pn, 1, ly.mbase + 2 * H, cd.mlp);
     });
   }
