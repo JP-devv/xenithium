@@ -113,6 +113,7 @@ XEN_KV_LEND_KEEP=${XEN_KV_LEND_KEEP:-32768}
 XEN_KV_LEND_PARK_S=${XEN_KV_LEND_PARK_S:-300}
 XEN_KV_LEND_PRESSURE=${XEN_KV_LEND_PRESSURE:-kv}
 XEN_KV_LEND_GRACE_S=${XEN_KV_LEND_GRACE_S:-60}
+XEN_EXPERT_EXCHANGE=${XEN_EXPERT_EXCHANGE:-on}
 XEN_SAMPLE_THREADS=${XEN_SAMPLE_THREADS:-4}
 # the sampling of requests that send no value of their own (empty = the checkpoint's generation_config.json)
 XEN_TEMPERATURE=${XEN_TEMPERATURE:-}
@@ -200,7 +201,7 @@ cmd=(./build/xenithium-server --model "$XEN_MODEL" --host "$XEN_HOST" --port "$X
      --queue-aging "$XEN_QUEUE_AGING" --queue-timeout "$XEN_QUEUE_TIMEOUT" --idle-timeout "$XEN_IDLE_TIMEOUT"
      --log-interval "$XEN_LOG_INTERVAL" --drafter "$XEN_DRAFTER" --draft-vocab "$XEN_DRAFT_VOCAB" --drafter-defer "$XEN_DRAFTER_DEFER" --drafter-cut "$XEN_DRAFTER_CUT" --drafter-tree "$XEN_DRAFTER_TREE" --drafter-tree-seqs "$XEN_DRAFTER_TREE_SEQS" --step-rows "$XEN_STEP_ROWS" --seg-rows "$XEN_SEG_ROWS" --drafter-wide "$XEN_DRAFTER_WIDE" --drafter-tree-wide "$XEN_DRAFTER_TREE_WIDE" --drafter-mtp-from "$XEN_DRAFTER_MTP_FROM" --drafter-int4 "$XEN_DRAFTER_INT4" --wire "$XEN_WIRE" --prefill-wire "$XEN_PREFILL_WIRE" --yarn-tiers "$XEN_YARN_TIERS" --tp "$tp" --card "$card" --emu-card "$XEN_EMU_CARD" --w4-items "$XEN_W4_ITEMS" --attn-select "$XEN_ATTN_SELECT" --prefill-select "$XEN_PREFILL_SELECT" --decode-attn "$XEN_DECODE_ATTN" --decode-w4 "$XEN_DECODE_W4"
      --prefill-attn "$XEN_PREFILL_ATTN" --prefill-w4 "$XEN_PREFILL_W4" --prefill-gemm "$XEN_PREFILL_GEMM" --attn-tail "$XEN_ATTN_TAIL" --prefill-short "$XEN_PREFILL_SHORT" --prefill-a8-body "$XEN_PREFILL_A8_BODY" --lm-head "$XEN_LM_HEAD" --lm-head-tiles "$XEN_LM_HEAD_TILES" --draft-head "$XEN_DRAFT_HEAD"
-     --prefill-gemm-rows "$XEN_PREFILL_GEMM_ROWS" --kv-lend "$XEN_KV_LEND" --kv-lend-keep "$XEN_KV_LEND_KEEP" --kv-lend-park-s "$XEN_KV_LEND_PARK_S" --kv-lend-pressure "$XEN_KV_LEND_PRESSURE" --kv-lend-grace-s "$XEN_KV_LEND_GRACE_S" --prefix-cache "$XEN_PREFIX_CACHE" --prefix-cache-gib "$XEN_PREFIX_CACHE_GIB" --prefix-mark-min "$XEN_PREFIX_MARK_MIN" --prefix-live "$XEN_PREFIX_LIVE"
+     --prefill-gemm-rows "$XEN_PREFILL_GEMM_ROWS" --kv-lend "$XEN_KV_LEND" --kv-lend-keep "$XEN_KV_LEND_KEEP" --kv-lend-park-s "$XEN_KV_LEND_PARK_S" --kv-lend-pressure "$XEN_KV_LEND_PRESSURE" --kv-lend-grace-s "$XEN_KV_LEND_GRACE_S" --expert-exchange "$XEN_EXPERT_EXCHANGE" --prefix-cache "$XEN_PREFIX_CACHE" --prefix-cache-gib "$XEN_PREFIX_CACHE_GIB" --prefix-mark-min "$XEN_PREFIX_MARK_MIN" --prefix-live "$XEN_PREFIX_LIVE"
      --adaptive-depth "$XEN_ADAPTIVE_DEPTH" --unequal-segments "$XEN_UNEQUAL_SEGMENTS" --lookup "$XEN_LOOKUP" --mtp-depth "$XEN_MTP_DEPTH" --chat-template "${XEN_CHAT_TEMPLATE/#\~/$HOME}"
      --vision "$XEN_VISION" --vision-max-pixels "$XEN_VISION_MAX_PIXELS" --vision-images "$XEN_VISION_IMAGES"
      --media-urls "$XEN_MEDIA_URLS" --media-timeout "$XEN_MEDIA_TIMEOUT"

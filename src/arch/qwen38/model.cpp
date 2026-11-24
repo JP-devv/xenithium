@@ -284,7 +284,7 @@ Model::Model(const l0::Loader &loader, Fabric &fab, const std::string &dir, cons
     K.msc.logits = static_cast<float *>(dev(R8 * ms_.w[c][0].router.n * 4));
     // One routing record per layer: the step's routing stays readable after it (no extra launch).
     K.msc.route = static_cast<k::MoeRoute *>(dev(sizeof(k::MoeRoute) * static_cast<size_t>(L)));
-    if (c == 0 && !opt.rank_file.empty()) {  // the decode reads per (layer, expert), card 0 (both route alike)
+    if (c == 0 && (!opt.rank_file.empty() || opt.exchange)) {  // the decode reads per (layer, expert), card 0 (both route alike)
       hits_ = static_cast<uint32_t *>(dev(static_cast<size_t>(L) * cfg_.experts * 4));
       hits_seen_.assign(static_cast<size_t>(L) * cfg_.experts, 0u);
     }
@@ -764,6 +764,15 @@ Model::Model(const l0::Loader &loader, Fabric &fab, const std::string &dir, cons
     return;
   }
 
+  // ---- the live exchange's spare VRAM blobs: before the hot count, so they come out of the hot experts ----
+  if (opt.exchange && opt.moe_tp && opt.moe_cpu.mode == "off" && opt.exchange_spares > 0)
+    for (int c = 0; c < nc_; ++c)
+      for (int i = 0; i < opt.exchange_spares; ++i) {
+        auto *p = static_cast<uint8_t *>(fab.alloc(c, stride));
+        x_spare_mem_[c].push_back(p);
+        x_spare_[c].push_back(p);
+      }
+
   // ---- routed experts: whatever VRAM is left ----
   ExpertStoreOptions so;
   so.pack_threads = opt.threads;
@@ -869,6 +878,7 @@ Model::Model(const l0::Loader &loader, Fabric &fab, const std::string &dir, cons
   }
   setup_moe_cpu(opt);
   lend_setup(opt, so.rank);
+  exchange_setup(opt, so.rank);
   dsprof_ = util::env_flag("XEN_DEC_PROFILE");
   if (dsprof_)
     for (int c = 0; c < nc_; ++c) {
@@ -885,6 +895,15 @@ Model::Model(const l0::Loader &loader, Fabric &fab, const std::string &dir, cons
 
 Model::~Model() {
   for (size_t c = 0; c < cards_.size(); ++c) fab_.compute(c).wait();
+  if (xpl_) {
+    for (int c = 0; c < nc_; ++c) fab_.copy(static_cast<size_t>(c)).wait();
+    std::fprintf(stderr, "qwen38: expert exchange: %lld experts moved in %lld rounds (%lld put off), %.1f ms of host time\n",
+                 static_cast<long long>(x_st_.swaps), static_cast<long long>(x_st_.rounds), static_cast<long long>(x_st_.deferred), x_st_.host_ms);
+  }
+  for (int c = 0; c < kMaxCards; ++c) {
+    for (void *p : x_spare_mem_[c]) fab_.release(p);
+    if (x_upd_[c]) fab_.release(x_upd_[c]);
+  }
   if (cpu_on_) {
     const auto st = moe_cpu_stats();
     std::fprintf(stderr, "qwen38: MoE CPU path: %llu requests, %llu experts (%.1f us per request)%s\n", static_cast<unsigned long long>(st.requests),
@@ -1481,6 +1500,7 @@ void Model::verify_batch(const std::vector<SeqRows> &segs) {
   t_.submit = std::chrono::duration<double, std::milli>(t2 - t1).count();
   t_.wait = since_ms(t2);
   if (rec_ && rec_->due()) save_ranking();  // once a period, the step done (a ~0.1 MB copy + the file)
+  exchange_tick();  // the live expert exchange's next stage (between steps: nothing reads a blob now)
   if (cpu_on_ && !cpu_timeout_seen_)  // a card gave up waiting for the pool (two host words per step)
     for (int c = 0; c < nc_; ++c)
       if (__atomic_load_n(&cpu_link_[c].mail->timeouts, __ATOMIC_RELAXED) != 0u && !cpu_timeout_seen_) {
@@ -2311,6 +2331,187 @@ void Model::route_ids(int rows, std::vector<int32_t> &ids) {
   for (int l = 0; l < L; ++l)
     for (int r = 0; r < rows; ++r)
       for (int j = 0; j < K; ++j) ids[(static_cast<size_t>(l) * rows + r) * K + j] = rec[static_cast<size_t>(l)].ids[r][j];
+}
+
+// ---- the live expert exchange (ModelOptions::exchange) ------------------------------------------------------------
+// Every stage runs at a step boundary: the step before is done on both cards and none runs, so no kernel reads a blob
+// or a table entry while it changes (a split prompt call in flight would: the stage waits for its end). The copies go
+// on the copy queues and are not waited for: a stage that finds them running tries again at the next boundary.
+
+void Model::exchange_setup(const ModelOptions &opt, const std::vector<double> *rank) {
+  ls_.exchange = "off";
+  auto refuse = [&](const std::string &why) {
+    ls_.exchange = "off (" + why + ")";
+    for (int c = 0; c < nc_; ++c) {
+      for (void *p : x_spare_mem_[c]) fab_.release(p);
+      x_spare_mem_[c].clear();
+      x_spare_[c].clear();
+    }
+  };
+  if (!opt.exchange) return refuse("--expert-exchange off");
+  if (!opt.moe_tp || !experts_) return refuse("needs the expert TP layout");
+  if (cpu_on_ || opt.moe_cpu.mode != "off") return refuse("the MoE CPU path is on");
+  if (ls_.cold[0] == 0) return refuse("every expert is in VRAM");
+  if (!hits_ || x_spare_[0].empty()) return refuse("no spare VRAM blobs");
+  const int L = cfg_.layers, E = cfg_.experts, per = experts_->per_card();
+  if (per != E) return refuse("needs every expert on every card");
+  std::vector<uint8_t> hot(static_cast<size_t>(L) * E, 0);
+  for (int l = 0; l < L; ++l)
+    for (int e = 0; e < E; ++e) {
+      bool h = false;
+      experts_->blob(l, e, &h, 0);
+      hot[static_cast<size_t>(l) * E + e] = h ? 1 : 0;
+    }
+  model::PlacementOptions po;
+  po.budget = opt.exchange_budget;
+  po.max_swaps = static_cast<int>(x_spare_[0].size());
+  po.decay = opt.exchange_decay;
+  const bool prior = rank && rank->size() == hot.size();
+  xpl_ = std::make_unique<model::Placement>(L, E, std::move(hot), prior ? rank : nullptr, po);
+  lend_pos_.assign(static_cast<size_t>(L) * per, -1);
+  for (size_t k = 0; k < lend_cand_.size(); ++k)
+    lend_pos_[static_cast<size_t>(lend_cand_[k].first) * per + lend_cand_[k].second] = static_cast<int>(k);
+  x_seen_.assign(static_cast<size_t>(L) * E, 0u);
+  fab_.compute(0).memcpy(x_seen_.data(), hits_, x_seen_.size() * 4).wait();
+  for (int c = 0; c < nc_; ++c) x_upd_[c] = static_cast<XUpd *>(fab_.alloc_host(2 * x_spare_[c].size() * sizeof(XUpd)));
+  x_st_.on = true;
+  char b[200];
+  std::snprintf(b, sizeof b, "on: %zu spare blobs per card, a round every %d decode steps (up to %d per layer, %zu in all)", x_spare_[0].size(),
+                opt.exchange_period, opt.exchange_budget, x_spare_[0].size());
+  ls_.exchange = b;
+}
+
+void Model::exchange_apply(int c, const XUpd *u, int n) {
+  if (n <= 0) return;
+  Card &K = *cards_[static_cast<size_t>(c)];
+  const uint8_t **tab = K.tab;
+  uint8_t *cold = K.cold;
+  fab_.compute(static_cast<size_t>(c)).parallel_for(sycl::range<1>(static_cast<size_t>(n)), [=](sycl::id<1> i) {
+    const XUpd x = u[i];
+    tab[x.idx] = x.ptr;
+    if (cold) cold[x.idx] = static_cast<uint8_t>(x.flag);
+  });
+}
+
+void Model::exchange_tick() {
+  if (!xpl_) return;
+  const auto t0 = std::chrono::steady_clock::now();
+  ++x_step_;
+  const int per = experts_->per_card();
+  const size_t S = experts_->stride(), spares = x_spare_mem_[0].size();
+  auto copies_done = [&] {
+    for (int c = 0; c < nc_; ++c)
+      if (!fab_.copy(static_cast<size_t>(c)).done()) return false;
+    return true;
+  };
+  auto lent_at = [&](int k, int c) -> uint8_t * {
+    const auto &sl = lend_.slots()[static_cast<size_t>(k)];
+    return lend_buf_[c][static_cast<size_t>(sl.buf)] + sl.off;
+  };
+  if (xr_stage_ == 0) {
+    if (x_step_ % std::max(1, opt_.exchange_period) != 0) return;
+    if (pf_run_slot() >= 0) {
+      ++x_st_.deferred;
+      return;
+    }
+    // the reads since the last round (card 0's counters; the steps before are done)
+    std::vector<uint32_t> now(x_seen_.size());
+    fab_.compute(0).memcpy(now.data(), hits_, now.size() * 4).wait();
+    if (learn_) {
+      std::vector<double> delta(now.size());
+      for (size_t i = 0; i < now.size(); ++i) delta[i] = static_cast<double>(now[i] - x_seen_[i]);  // uint32 wrap-safe
+      xpl_->add_counts(delta);
+    }
+    x_seen_ = std::move(now);
+    // a lent expert is in VRAM already: it does not enter
+    std::vector<uint8_t> lent;
+    if (lend_n_ > 0) {
+      lent.assign(x_seen_.size(), 0);
+      for (int k = 0; k < lend_n_; ++k) lent[static_cast<size_t>(lend_cand_[static_cast<size_t>(k)].first) * per + lend_cand_[static_cast<size_t>(k)].second] = 1;
+    }
+    auto sw = xpl_->round(lent.empty() ? nullptr : &lent);
+    while (sw.size() > x_spare_[0].size()) xpl_->undo(sw.back()), sw.pop_back();
+    if (!sw.empty()) {
+      std::vector<std::vector<l0::Queue::CopyOp>> ops(static_cast<size_t>(nc_));
+      xr_.clear();
+      for (const auto &w : sw) {
+        XSwap x{w.layer, w.hot, w.cold, {}, {}, {}};
+        for (int c = 0; c < nc_; ++c) {
+          x.spare[c] = x_spare_[c].back();
+          x_spare_[c].pop_back();
+          x.host[c] = experts_->where(w.layer, w.cold, c);
+          x.vram[c] = experts_->where(w.layer, w.hot, c);
+          ops[static_cast<size_t>(c)].push_back({x.spare[c], x.host[c], S});
+        }
+        xr_.push_back(x);
+      }
+      for (int c = 0; c < nc_; ++c) fab_.copy(static_cast<size_t>(c)).copy_batch(ops[static_cast<size_t>(c)], false);
+      xr_stage_ = 1;
+    }
+  } else if (xr_stage_ == 1) {
+    if (pf_run_slot() >= 0 || !copies_done()) {
+      ++x_st_.deferred;
+      return;
+    }
+    // the cold experts enter: their entries to the spares
+    for (int c = 0; c < nc_; ++c) {
+      XUpd *u = x_upd_[c];
+      int m = 0;
+      for (const XSwap &x : xr_) {
+        const size_t e = static_cast<size_t>(x.layer) * per + x.cold;
+        u[m++] = {x.spare[c], static_cast<uint32_t>(e), 0u};
+        experts_->relocate(c, x.layer, x.cold, x.spare[c], true);
+        if (!tab_host_[c].empty()) tab_host_[c][e] = x.spare[c];
+        if (!cold_host_[c].empty()) cold_host_[c][e] = 0, cold_orig_[c][e] = 0;
+      }
+      exchange_apply(c, u, m);
+    }
+    // the hot experts leave: their blobs to the host slots the cold ones left (and to a lent slot the cold one held:
+    // it takes the cold one's place in the lending order; on the compute queue, behind the entries that left it)
+    std::vector<std::vector<l0::Queue::CopyOp>> back(static_cast<size_t>(nc_));
+    for (const XSwap &x : xr_) {
+      const size_t ec = static_cast<size_t>(x.layer) * per + x.cold, eh = static_cast<size_t>(x.layer) * per + x.hot;
+      const int k = lend_pos_[ec];
+      if (k >= 0) {
+        lend_cand_[static_cast<size_t>(k)] = {x.layer, x.hot};
+        lend_pos_[eh] = k;
+        lend_pos_[ec] = -1;
+      }
+      for (int c = 0; c < nc_; ++c) {
+        if (k >= 0 && k < lend_n_) fab_.compute(static_cast<size_t>(c)).memcpy(lent_at(k, c), x.vram[c], S);
+        back[static_cast<size_t>(c)].push_back({x.host[c], x.vram[c], S});
+      }
+    }
+    for (int c = 0; c < nc_; ++c) fab_.copy(static_cast<size_t>(c)).copy_batch(back[static_cast<size_t>(c)], false);
+    xr_stage_ = 2;
+  } else {
+    if (pf_run_slot() >= 0 || !copies_done()) {
+      ++x_st_.deferred;
+      return;
+    }
+    // the hot experts' entries to their host slots (or their lent slot), their VRAM slots to the spares
+    for (int c = 0; c < nc_; ++c) {
+      XUpd *u = x_upd_[c] + spares;
+      int m = 0;
+      for (const XSwap &x : xr_) {
+        const size_t e = static_cast<size_t>(x.layer) * per + x.hot;
+        const int k = lend_pos_[e];
+        const bool lent = k >= 0 && k < lend_n_;
+        uint8_t *at = lent ? lent_at(k, c) : x.host[c];
+        u[m++] = {at, static_cast<uint32_t>(e), lent ? 0u : 1u};
+        experts_->relocate(c, x.layer, x.hot, x.host[c], false);
+        if (!tab_host_[c].empty()) tab_host_[c][e] = at;
+        if (!cold_host_[c].empty()) cold_host_[c][e] = lent ? 0 : 1, cold_orig_[c][e] = 1;
+        x_spare_[c].push_back(x.vram[c]);
+      }
+      exchange_apply(c, u, m);
+    }
+    ++x_st_.rounds;
+    x_st_.swaps += static_cast<int64_t>(xr_.size());
+    xr_.clear();
+    xr_stage_ = 0;
+  }
+  x_st_.host_ms += since_ms(t0);
 }
 
 // ---- the hot-expert ranking recorded while serving ---------------------------------------------------------------

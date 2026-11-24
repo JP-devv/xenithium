@@ -70,6 +70,7 @@ ModelOptions model_options(const serve::Options &o, const model::ModelConfig &cf
   mo.decode_moe_a8 = o.decode_moe == "auto" ? -1 : o.decode_moe == "w4a8" ? 1 : 0;
   mo.prefill_cold_stage = o.prefill_cold_stage;
   mo.kv_lend = o.kv_lend == "on", mo.kv_lend_keep = o.kv_lend_keep;
+  mo.exchange = o.expert_exchange == "on";
   mo.gdn_w4 = o.gdn_w4 == "int4" ? 3 : o.gdn_w4 == "int4-qkvz" ? 1 : 0;
   mo.threads = o.threads;
   mo.mtp_dir = o.mtp;
@@ -223,6 +224,7 @@ class Backend final : public serve::Backend {
     serve::log_ranking(m.ranking(), o_.hot_rank);
     std::fprintf(stderr, "server: MoE CPU path %s\n", ls.moe_cpu.c_str());  // --moe-cpu
     std::fprintf(stderr, "server: KV lending %s\n", ls.kv_lend.c_str());  // --kv-lend
+    std::fprintf(stderr, "server: expert exchange %s\n", ls.exchange.c_str());  // --expert-exchange
     adapter_ = std::make_unique<StepModelAdapter>(*model_);
     adapter_->set_depth(o_.mtp_depth);
     adapter_->set_step_rows(step_rows_of(o_));  // --step-rows / XEN_STEP_ROWS, 0 = this setup's default

@@ -70,6 +70,8 @@
 //   stay); lru = parked prefixes above the keep are dropped first, least recently used first; idle = only those parked
 //   at least --kv-lend-grace-s
 // --kv-lend-grace-s S [60] see --kv-lend-pressure idle
+// --expert-exchange on|off [on] qwen38 with cold experts: the hot set follows the decode traffic while serving
+//   (exchanges between VRAM and pinned host memory on the copy engines; the same output)
 // --prefill-part-ms MS [-1] while requests decode, a prompt that fits one prefill call runs it in parts of about this
 //   long (whole layers), a decode step between them (0 = whole calls; -1 = the arch's: qwen38 12, qwen35 25 with every
 //   call in parts)
@@ -254,6 +256,7 @@ std::vector<Flag> flags(serve::Options &o, std::string &kv_pool) {
       {"--kv-lend-park-s", "S", f64(o.kv_lend_park_s)},
       {"--kv-lend-pressure", "kv|lru|idle", str(o.kv_lend_pressure)},
       {"--kv-lend-grace-s", "S", f64(o.kv_lend_grace_s)},
+      {"--expert-exchange", "on|off", str(o.expert_exchange)},
       // weights
       {"--lm-head", "auto|int8|int4|int4-rescore", str(o.lm_head)},
       {"--lm-head-tiles", "1..32", i32(o.lm_head_tiles)},
@@ -351,8 +354,9 @@ int validate(const serve::Options &o) {
       o.prefill_chunk < 0 || o.prefill_chunk % 4 || o.draft_vocab < 0 || o.draft_vocab % 32 || !one_of(o.prefill_moe, {"w4a8", "w4a16"}) ||
       !one_of(o.prefill_dense, {"w8a8", "w8a8-row", "w8a16"}) || !one_of(o.decode_moe, {"w4a8", "w4a16", "auto"}) || !one_of(o.gdn_w4, {"int8", "int4", "int4-qkvz"}) ||
       !one_of(o.kv_lend, {"on", "off"}) || o.kv_lend_keep < 0 || o.kv_lend_park_s < 0 || o.kv_lend_grace_s < 0 ||
-      !one_of(o.kv_lend_pressure, {"kv", "lru", "idle"}) || !one_of(o.kv_split, {"heads", "tokens"}))
-    return bad("--kv-split heads|tokens, --kv-lend on|off, --kv-lend-keep N >= 0, --kv-lend-park-s / --kv-lend-grace-s S >= 0, --kv-lend-pressure kv|lru|idle, --slots takes 1..16 (qwen38 on four cards 1..64, llama / flint 1..8), --kv int8|bf16|int8-v4 (int8-v4: qwen38 and the dense 27B), --wire bf16|fp32|int8, --prefill-wire auto|bf16|fp32, --w4-items 512|1024, --prefill-attn auto|exact|fast|int8|int8-fast|onednn (int8* need --kv int8 | int8-v4), --prefill-w4 exact|dequant|a8, --prefill-gemm onednn|onednn-all|esimd, --prefill-a8-body auto|slm|direct, --lm-head auto|int8|int4|int4-rescore, --lm-head-tiles 1..32, --draft-head auto|int8|int4, --prefill-chunk a multiple of 4 (0 = the arch's), --prefill-moe w4a8|w4a16, --decode-moe auto|w4a8|w4a16, --prefill-dense w8a8|w8a8-row|w8a16, --gdn-w4 int8|int4|int4-qkvz, --draft-vocab a multiple of 32");
+      !one_of(o.kv_lend_pressure, {"kv", "lru", "idle"}) || !one_of(o.kv_split, {"heads", "tokens"}) ||
+      !one_of(o.expert_exchange, {"on", "off"}))
+    return bad("--kv-split heads|tokens, --kv-lend on|off, --kv-lend-keep N >= 0, --kv-lend-park-s / --kv-lend-grace-s S >= 0, --kv-lend-pressure kv|lru|idle, --expert-exchange on|off, --slots takes 1..16 (qwen38 on four cards 1..64, llama / flint 1..8), --kv int8|bf16|int8-v4 (int8-v4: qwen38 and the dense 27B), --wire bf16|fp32|int8, --prefill-wire auto|bf16|fp32, --w4-items 512|1024, --prefill-attn auto|exact|fast|int8|int8-fast|onednn (int8* need --kv int8 | int8-v4), --prefill-w4 exact|dequant|a8, --prefill-gemm onednn|onednn-all|esimd, --prefill-a8-body auto|slm|direct, --lm-head auto|int8|int4|int4-rescore, --lm-head-tiles 1..32, --draft-head auto|int8|int4, --prefill-chunk a multiple of 4 (0 = the arch's), --prefill-moe w4a8|w4a16, --decode-moe auto|w4a8|w4a16, --prefill-dense w8a8|w8a8-row|w8a16, --gdn-w4 int8|int4|int4-qkvz, --draft-vocab a multiple of 32");
   if (o.drafter_defer < 0 || (o.drafter_defer > 0 && o.drafter_defer < 8) || o.drafter_defer > 512 || !(o.drafter_cut >= 0 && o.drafter_cut < 1) ||
       o.drafter_mtp_from < 0 || o.drafter_mtp_from > 64 || o.drafter_tree < 0 || o.drafter_tree > 7 ||
       o.drafter_tree_seqs < 1 || o.drafter_tree_seqs > 8 || o.drafter_wide < 0 || o.drafter_wide > 15 || o.drafter_tree_wide < 1 || o.drafter_tree_wide > 15)

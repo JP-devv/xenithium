@@ -776,6 +776,16 @@ const char *brief_of(std::string_view key) {
        "`idle`  only cached conversations idle longer than the grace time (`XEN_KV_LEND_GRACE_S`)"},
       {"XEN_KV_LEND_GRACE_S",
        "qwen38, lending pressure `idle`: how long a cached conversation is safe from being dropped for the experts."},
+      {"XEN_EXPERT_EXCHANGE",
+       "qwen38 with experts that do not all fit in VRAM (TP1 / TP2): the experts kept in VRAM follow what is being generated now. Every few decode steps "
+       "the most-read experts left in host memory change places with the least-read ones in VRAM, copied in the background while the cards generate.\n"
+       "\n"
+       "`on`  the VRAM set follows the traffic\n"
+       "`off`  the set placed at load (from the recorded ranking) stays\n"
+       "\n"
+       "Gives: + decode speed when the traffic differs from what the ranking was recorded on, more with more streams.\n"
+       "Takes: - 32 experts' worth of VRAM per card (the spare slots the copies land in), - a little PCIe traffic beside the cold reads.\n"
+       "Output: identical. Off by itself on four cards (every expert in VRAM) and with the MoE CPU path."},
       {"XEN_KV_LEND_KEEP",
        "With KV lending: tokens of KV kept free below the lent pages. Each time a conversation grows past it, more of what the pages hold is given back."},
       {"XEN_PREFILL_COLD_STAGE",
@@ -1559,6 +1569,11 @@ std::vector<Spec> schema() {
     s.hi = 86400;
     s.choices = {"30", "60", "300"};
     s.unit = "s";
+  }
+  {
+    auto &s = add("XEN_EXPERT_EXCHANGE", "Hot experts follow the traffic", cap, Kind::Choice);
+    s.scope = Scope::Qwen38;
+    s.choices = {"on", "off"};
   }
   {
     auto &s = add("XEN_PREFILL_COLD_STAGE", "Cold-expert staging", pf, Kind::Int);

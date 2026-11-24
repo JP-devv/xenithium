@@ -289,6 +289,15 @@ void Queue::settle() {
   }
 }
 
+bool Queue::done() {
+  if (!pending_) return true;
+  const ze_result_t r = zeCommandQueueSynchronize(queue_, 0);
+  if (r == ZE_RESULT_NOT_READY) return false;
+  check(r, "zeCommandQueueSynchronize");
+  pending_ = false;
+  return true;
+}
+
 void Queue::submit(bool blocking) {
   check(zeCommandListClose(list_), "zeCommandListClose");
   check(zeCommandQueueExecuteCommandLists(queue_, 1, &list_, nullptr), "zeCommandQueueExecuteCommandLists");

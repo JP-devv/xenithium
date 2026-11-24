@@ -123,6 +123,8 @@ class Queue {
   void fill(void *dst, uint8_t value, size_t bytes, bool blocking);
   void wait();
   bool pending() const { return pending_; }
+  // Non-blocking: true when nothing submitted is still running (then the queue is settled).
+  bool done();
 
   // Timed copies, in microseconds, best of `iters` runs (event-to-event).
   double time_copy(void *dst, const void *src, size_t bytes, int iters = 20);

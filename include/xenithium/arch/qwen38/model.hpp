@@ -46,6 +46,7 @@
 #include "xenithium/load/dense_store.hpp"
 #include "xenithium/model/checkpoint.hpp"
 #include "xenithium/model/kv_lend.hpp"
+#include "xenithium/model/placement.hpp"
 #include "xenithium/model/kv_pages.hpp"
 #include "xenithium/rt/fabric.hpp"
 
@@ -285,6 +286,17 @@ struct ModelOptions {
   // back (its flag 2 again).
   bool kv_lend = false;
   int64_t kv_lend_keep = 32768;
+  // The live expert exchange (model/placement.hpp): the hot set follows the decode traffic while serving. Every
+  // exchange_period decode steps a round reads the cards' expert reads, and up to exchange_spares cold experts whose
+  // decayed score beats the weakest hot one of their layer change places with it (each layer keeps its hot count): the
+  // cold blob is copied into a spare VRAM blob on the copy queue, then the tables switch at a step boundary and the hot
+  // blob goes back to the host slot the cold one left (its VRAM slot is the next spare). Needs expert TP and cold
+  // experts, not the MoE CPU path; outputs are bit-identical to off (the same blobs, other addresses).
+  bool exchange = false;
+  int exchange_spares = 32;     // spare VRAM blobs per card: the most exchanges per round
+  int exchange_period = 4;      // decode steps between rounds
+  int exchange_budget = 16;     // exchanges per layer per round
+  double exchange_decay = 0.98;  // score decay per round
   // Pinned host memory for the prefix cache's snapshots (GiB over both cards; 0 = none). One snapshot = a slot's state
   // outside its KV pages: snap_bytes.
   double snap_gib = 0;
@@ -302,6 +314,7 @@ struct ModelLoadStats {
   int64_t hot_asked = -1;             // a pinned --hot past the VRAM left (minus the reserve): the count asked; -1 = not cut
   std::string moe_cpu;  // the CPU path's state line ("off", "on: avx512-bf16, 8 threads ...", or why not)
   std::string kv_lend;  // "off", "off (why)" or the lend state at load
+  std::string exchange;  // the live expert exchange: "off", "off (why)" or its setup
   int64_t lent = 0;  // cold experts lent into the KV pool at load (per card)
   int64_t blob_mismatches = -1;       // -1 = not verified
   int bf16_overrides = 0;             // plan matrices switched int8 -> bf16 by ModelOptions::bf16_tensors
@@ -409,6 +422,14 @@ class Model {
   bool kv_blocks_lend(int slot) const;
   bool kv_reserve_lends(int slot, int64_t tokens) const;
   LendStats lend_stats() const;
+  // The live expert exchange (ModelOptions::exchange): rounds that moved experts, experts moved, rounds put off (a split
+  // prompt call in flight or the copies not done at a step boundary), host time in the step tail.
+  struct ExchangeStats {
+    bool on = false;
+    int64_t rounds = 0, swaps = 0, deferred = 0;
+    double host_ms = 0;
+  };
+  ExchangeStats exchange_stats() const { return x_st_; }
   void kv_trim(int slot, int64_t tokens);  // keep the pages of positions [0, tokens) only
   // ---- the prefix cache (ModelOptions:snap_gib) ----
   // A snapshot is what a slot's sequence holds outside its KV pages, at its position right after a prefill call: every
@@ -916,6 +937,32 @@ class Model {
   int lend_n_ = 0, lend_keep_pages_ = 0, lend_refill_run_ = 0;
   uint64_t lend_ev_seen_ = 0;  // evictions already logged
   LendStats lend_st_;
+  // The live expert exchange (model.cpp, exchange_*). A round's exchanges go through three step boundaries: 1 the cold
+  // blobs to spares (copy queue), 2 the cold experts' entries to the spares + the hot blobs to the host slots the cold
+  // ones left (copy queue; a lent slot gets the hot blob too, on the compute queue), 3 the hot experts' entries to their
+  // host slot (or lent slot) and their VRAM slots to the spares. lend_pos_ = lend_cand_'s index of a blob, -1 none.
+  struct XSwap {
+    int layer, hot, cold;
+    uint8_t *spare[kMaxCards], *host[kMaxCards], *vram[kMaxCards];
+  };
+  struct XUpd {  // one table entry (pinned; read by the update launch)
+    const uint8_t *ptr;
+    uint32_t idx;
+    uint32_t flag;
+  };
+  void exchange_setup(const ModelOptions &opt, const std::vector<double> *rank);
+  void exchange_tick();
+  void exchange_apply(int c, const XUpd *u, int n);  // the entries (and cold flags) on card c's compute queue
+  std::unique_ptr<model::Placement> xpl_;
+  std::vector<XSwap> xr_;
+  int xr_stage_ = 0;
+  int64_t x_step_ = 0;
+  std::vector<uint8_t *> x_spare_[kMaxCards];
+  std::vector<uint8_t *> x_spare_mem_[kMaxCards];  // the spares' own allocations (released at exit)
+  XUpd *x_upd_[kMaxCards] = {};  // pinned [2][spares]: stage 2's and stage 3's entries
+  std::vector<uint32_t> x_seen_;
+  std::vector<int> lend_pos_;
+  ExchangeStats x_st_;
   // The snapshot store (host buffers allocated on first use and kept), a device staging buffer per card, the fork's
   // page pairs per card.
   struct SnapRec {

@@ -42,7 +42,7 @@ xenithium_host(xenithium_eval)
 target_link_libraries(xenithium_eval PUBLIC xenithium_util)
 
 add_library(xenithium_model STATIC
-  model/checkpoint.cpp model/bulk_read.cpp model/row_reader.cpp model/route_counts.cpp model/route_record.cpp model/config.cpp model/registry.cpp model/vision.cpp
+  model/checkpoint.cpp model/bulk_read.cpp model/row_reader.cpp model/route_counts.cpp model/route_record.cpp model/placement.cpp model/config.cpp model/registry.cpp model/vision.cpp
   ${XENITHIUM_ARCH_HOST})
 xenithium_host(xenithium_model)
 target_link_libraries(xenithium_model PUBLIC xenithium_util xenithium_pack Threads::Threads)

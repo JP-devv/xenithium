@@ -59,6 +59,7 @@ struct Options {
   double kv_lend_park_s = 300;  // qwen38: a parked prefix above the keep is dropped after this long (0 = never)
   std::string kv_lend_pressure = "kv";  // qwen38: kv | lru | idle (core:BatchConfig:lend_pressure)
   double kv_lend_grace_s = 60;  // qwen38: with idle, parked at least this long
+  std::string expert_exchange = "on";  // qwen38: the hot experts follow the decode traffic while serving (on|off)
 
   // ---- weights ----
   std::string lm_head = "auto";  // auto | int8 | int4 | int4-rescore

@@ -18,6 +18,7 @@ target_compile_definitions(xenithium-test-launch PRIVATE XEN_SOURCE_DIR="${PROJE
 xenithium_test(bench LIBS xenithium_bench)  # the benchmark tool: decoders, corpus pin, suites, run file, a local endpoint end to end
 xenithium_test(quant-host LIBS xenithium_quant)
 xenithium_test(route-record LIBS xenithium_model)  # the hot-expert ranking recorded while serving
+xenithium_test(placement LIBS xenithium_model)  # the live expert exchange's policy
 xenithium_test(moe-cpu-host LIBS xenithium_pack)  # the decode MoE's CPU path (ISAs bit-equal, reference, pool)
 xenithium_test(cards LIBS xenithium_util)  # B60 / B65 support: the card table, identification, XEN_EMU_CARD
 xenithium_test(image LIBS xenithium_util)  # data URLs, the PNG / JPEG decoders vs the reference's pixels
