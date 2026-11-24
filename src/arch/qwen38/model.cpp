@@ -1516,8 +1516,10 @@ void Model::verify_batch(const std::vector<SeqRows> &segs) {
 // dec_ple_combine), for a drafter feature (the streams' mean: dec_feature) and at the step's end (dec_final_mix:
 // lm_head, the MTP layer and the probes read every row on every card). Each row runs the same kernels on the same
 // values in the same order: the same bits.
-// The mode is a function of the step's rows alone, so a step graph's key does not change, and every launch is a
-// mailbox kernel (its words are their own flags), so a recorded graph replays it.
+// The mode is a function of the step's rows alone, so a step graph's key does not change, and a recorded graph
+// replays every launch: below kernels::kOwnerCopyMinRows rows each is a mailbox kernel (its words are their own flags),
+// from there the sums and the mixers' shares go by peer copies whose flags count in device words (the copy path,
+// comm/wire.hpp: -0.7 % of a 24-row step, -1.2 % of a 32-row one, -3.1 % of a 64-row one).
 namespace {
 // The residual streams' mailbox carries two messages a step: before the PLE block and after the final mixer.
 constexpr int kDecResParityPle = 0, kDecResParityEnd = 1;
@@ -1561,13 +1563,60 @@ void Model::dec_owner_init() {
     K.own.mw.owner = on_card(moe_sum);
     K.own.xa = share(xa), K.own.xm = share(xm), K.own.out = share(out), K.own.feat = share(feat), K.own.res = share(res), K.own.sel = share(sel);
   }
+  // The copy path (kernels::OwnerFlags; steps of kOwnerCopyMinRows rows and more): per use every card's flag lines
+  // (mailbox memory) and its count line, zeroed.
+  auto zeroed = [&](int c, size_t bytes, bool mailbox = false) {
+    bytes = std::max<size_t>(bytes, 4096);
+    void *p = mailbox ? fab_.alloc_mailbox(static_cast<size_t>(c), bytes) : fab_.alloc(static_cast<size_t>(c), bytes);
+    cards_[static_cast<size_t>(c)]->mem.push_back(p);
+    fab_.compute(c).memset(p, 0, bytes).wait();
+    return p;
+  };
+  auto flags = [&]() {
+    std::array<k::OwnerFlags, k::kWireCardsMax> fl{};
+    std::array<uint32_t *, k::kWireCardsMax> lines{};
+    for (int c = 0; c < nc_; ++c) lines[static_cast<size_t>(c)] = static_cast<uint32_t *>(zeroed(c, k::kOwnerCopyLineBytes, true));
+    for (int c = 0; c < nc_; ++c) {
+      fl[static_cast<size_t>(c)].lines = lines;
+      fl[static_cast<size_t>(c)].count = static_cast<uint32_t *>(zeroed(c, k::kOwnerCopyCountBytes));
+    }
+    return fl;
+  };
+  // The mixer outputs' shares. The buffers are named per call (dec_mixer). Writing into a peer's buffer is safe by the
+  // step's order: a card's next share into xa (xm) follows its attention (MoE) owner sum of the layer, which needs every
+  // peer's partials, and a peer sends those after its kernels that read xa (xm).
+  for (k::OwnerShare Card::Own::*use : {&Card::Own::xa, &Card::Own::xm}) {
+    const auto fl = flags();
+    for (int c = 0; c < nc_; ++c) (cards_[static_cast<size_t>(c)]->own.*use).copy.flags = fl[static_cast<size_t>(c)];
+  }
+  // The owner sums: every card's receive buffer of the use; the MoE's also takes its rows' fp32 sums (MoeScratch::acc).
+  auto sum_copy = [&]() {
+    std::array<k::OwnerSumCopy, k::kWireCardsMax> cp{};
+    const auto fl = flags();
+    std::array<float *, k::kWireCardsMax> recv{};
+    for (int c = 0; c < nc_; ++c) recv[static_cast<size_t>(c)] = static_cast<float *>(zeroed(c, k::owner_sum_copy_elems(H) * sizeof(float)));
+    for (int c = 0; c < nc_; ++c) cp[static_cast<size_t>(c)].recv = recv, cp[static_cast<size_t>(c)].flags = fl[static_cast<size_t>(c)];
+    return cp;
+  };
+  const auto attn_copy = sum_copy(), moe_copy = sum_copy();
+  for (int c = 0; c < nc_; ++c) {
+    Card &K = *cards_[static_cast<size_t>(c)];
+    K.own.pw.copy = attn_copy[static_cast<size_t>(c)];
+    K.own.mw.copy = moe_copy[static_cast<size_t>(c)];
+    K.msc.acc = static_cast<float *>(zeroed(c, static_cast<size_t>(k::kMoeRows) * H * sizeof(float)));
+  }
 }
 
 k::HcEvents Model::dec_mixer(int c, int rows, const DecMixer &m) {
   auto &q = fab_.compute(c);
   if (!dec_by_owner(rows)) return k::hc_mixer(q, hs_.shape, rows, head_->state(c), m.block, *m.weights, head_->scratch(c), m.out);
   k::HcEvents e = k::hc_mixer_at(q, hs_.shape, k::owner_rows(c, rows), head_->state(c), m.block, *m.weights, head_->scratch(c), m.out);
-  e.up = k::owner_share(q, rows, cfg_.hidden, m.out, *m.share, m.parity);
+  k::OwnerShare share = *m.share;
+  if (share.copy.on()) {  // the copy path's buffers: every card's xa, or every card's xm
+    const bool xa = m.out == cards_[static_cast<size_t>(c)]->xa;
+    for (int d = 0; d < nc_; ++d) share.copy.buf[static_cast<size_t>(d)] = xa ? cards_[static_cast<size_t>(d)]->xa : cards_[static_cast<size_t>(d)]->xm;
+  }
+  e.up = k::owner_share(q, rows, cfg_.hidden, m.out, share, m.parity);
   return e;
 }
 

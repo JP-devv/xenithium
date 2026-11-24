@@ -159,6 +159,7 @@ struct MoeScratch {
   uint32_t *hits = nullptr;  // optional: device [experts] += 1 per expert a decode step reads (the ranking)
   moe_bf16 *h = nullptr;  // [shape x topk + 1][shape][max(inter, shared_inter)], sized at the capacity
   float *partial = nullptr;  // [shape x topk + 1][shape][hidden], sized at the capacity
+  float *acc = nullptr;  // [kMoeRows][hidden]: the combine's rows as fp32, for the owner sum by copies (MoeWire::copy); null = none
   moe_bf16 *xr = nullptr;  // [8][hidden]: the rotated x (MoeShape:rot only)
   // MoeShape:a8 only: int8 x [8][hidden] + scales [8][hidden / 128]; int8 h laid out as h
   // (moe_h_elems bytes) + scales [shape x topk x shape][inter_local / 64] (moe_hs_elems).
@@ -195,6 +196,9 @@ struct MoeWire {
   // On = the combine as an owner sum (comm/wire.hpp, rows by owner; it rules over quad): out gets
   // this card's own rows only. Each inbox: owner_sum_words(hidden), owner_mail_init. rows >= kOwnerMinRows.
   OwnerMail owner{};
+  // On (with owner): the owner sum of steps of kOwnerCopyMinRows rows and more goes by copies (comm/wire.hpp): the
+  // combine writes every row's fp32 sum to MoeScratch::acc and kernels::pair_reduce's copy path sums the owner's rows.
+  OwnerSumCopy copy{};
 };
 size_t moe_wire_words(const MoeShape &s);
 sycl::event moe_wire_init(sycl::queue &q, const MoeShape &s, uint32_t *inbox);

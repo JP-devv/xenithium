@@ -72,6 +72,40 @@ struct OwnerMail {
   }
 };
 
+// ---- the copy path of the owner sums and shares ---------------------------------------------------------------------
+// From kOwnerCopyMinRows rows an exchange moves faster as copies than through a mailbox (512-byte stores per item):
+// a card copies the rows another card needs straight into that card's memory (three peer copies on its queue), one
+// launch then stores its send count to its flag line on each of them, and one one-item launch waits until this
+// card's three lines hold its own send count (every card sends once per exchange of a use, so the counts agree). The
+// count is a device word, so a recorded step replays the launches; the lines are mailbox memory.
+// Rows that arrived through the link are not in this card's L1 caches' view (a core may still hold the bytes it read
+// there before): a kernel reads them past L1 once - the sum itself, or the share's take launch, which stores them
+// back so every later reader sees them.
+struct OwnerFlags {  // one use's
+  std::array<uint32_t *, kWireCardsMax> lines{};  // every card's flag lines: kOwnerCopyLineBytes of mailbox memory, zeroed once
+  uint32_t *count = nullptr;  // this card: kOwnerCopyCountBytes of device memory, zeroed once (its sends)
+  bool on() const { return count != nullptr; }
+};
+// Measured in the step (round 282): 16 rows +0.2 %, 20 rows -0.3 %, 24 rows -0.7 %, 28 rows -1.2 %, 64 rows -3.1 %.
+inline constexpr int kOwnerCopyMinRows = 24;
+inline constexpr size_t kOwnerCopyLineBytes = kWireCardsMax * 64, kOwnerCopyCountBytes = 64;
+// A share by copies. The owner writes its rows into the same rows of every other card's buffer, so the caller's order
+// must keep a card from writing while a peer still reads the last share: between two shares into one buffer every card
+// finishes an exchange that blocks on every peer after that peer's readers of it (the owner sum of the module that
+// reads the buffer). Off by default.
+struct OwnerCopy {
+  std::array<sycl::ext::oneapi::bfloat16 *, kWireCardsMax> buf{};  // this call: every card's buffer, this card's included
+  OwnerFlags flags{};
+  bool on() const { return flags.on(); }
+};
+// An owner sum by copies: each card copies its partial's rows of another owner into that owner's receive buffer (a
+// region per parity and source card: a card's next sum cannot land where its peer still reads), the owner sums its own
+// rows with the three received ones in the mailbox's order: the same bits. Off by default.
+struct OwnerSumCopy {
+  std::array<float *, kWireCardsMax> recv{};  // every card's receive buffer of this use: owner_sum_copy_elems(n_max) fp32
+  OwnerFlags flags{};
+  bool on() const { return flags.on(); }
+};
 struct PairWire {
   uint32_t *inbox = nullptr;       // this card's (peer-written), 2 x 8 x n_max words
   uint32_t *peer_inbox = nullptr;  // the other card's
@@ -90,6 +124,7 @@ struct PairWire {
   // On = the owner sum (above; it rules over quad): out gets this card's own rows only. fp32 partials
   // (bf16 / i8 refused); rows >= 4, so every card owns one. Each inbox: owner_sum_words(n_max), owner_mail_init.
   OwnerMail owner{};
+  OwnerSumCopy copy{};  // on (with owner): sums of kOwnerCopyMinRows rows and more go by copies
 };
 // words of one card's inbox for `cards` cards (pair_wire_init fills them)
 size_t pair_wire_words(int n_max, int cards = 2);
@@ -105,11 +140,13 @@ inline constexpr int kOwnerRowsMax = (kPairRows + kWireCardsMax - 1) / kWireCard
 // words of one card's inbox for an owner sum of up to n_max columns / for shared rows of up to n_max bf16 values
 size_t owner_sum_words(int n_max);
 size_t owner_share_words(int n_max);
+size_t owner_sum_copy_elems(int n_max);  // fp32 elements of an owner sum's receive buffer (OwnerSumCopy::recv)
 sycl::event owner_mail_init(sycl::queue &q, uint32_t *inbox, size_t words);
 struct OwnerShare {
   OwnerMail mail;             // inboxes of owner_share_words(n_max) each
   uint32_t *error = nullptr;  // device word, 1 after a timed-out wait
   uint64_t wait_cycles = 2800000000ull;
+  OwnerCopy copy{};           // on: shares of kOwnerCopyMinRows rows and more go by copies (the mailbox is not touched)
 };
 // buf bf16 [rows][n] on every card: this card's own rows (owner_rows) go to the other cards, their rows arrive in buf.
 // rows kOwnerMinRows..kPairRows, n % 128 == 0. parity: alternate per call on the same mailbox (or leave a sum between two

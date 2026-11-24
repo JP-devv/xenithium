@@ -276,6 +276,9 @@ static void test_quad_split(const xenithium::l0::Loader &loader) {
 // on one parity (as the model's once-a-step mailboxes use it); row counts with unequal owners (5, 9, 30); n 2,560 and
 // 10,240 (the widest items), 1,152 (the share's narrowest) and 1,088 (the sum's narrowest; no share: n % 128). Row
 // counts under kOwnerMinRows, the bf16 / int8 wires and an incomplete mailbox are refused.
+// The copy path (OwnerSumCopy / OwnerCopy on the same wires): the same checks from kOwnerCopyMinRows rows (24) up to
+// kPairRows, where the sums and shares go by peer copies (the widths it does not take fall back to the mailbox), and
+// below it (16, 23), where the mailbox still runs with the copy path armed.
 static void test_owner(const xenithium::l0::Loader &loader) {
   constexpr int kC = 4, kNMax = 10240, kCalls = 3;
   constexpr uint16_t kSentinel = 0x1234;
@@ -284,6 +287,24 @@ static void test_owner(const xenithium::l0::Loader &loader) {
   bf16 *out[kC];
   uint32_t *err[kC];
   k::OwnerMail sum_mail, share_mail;
+  // the copy path's memory: per use every card's flag lines (mailbox memory) and count line, the sum's receive buffers
+  k::OwnerFlags sum_flags[kC], share_flags[kC];
+  float *recv[kC];
+  std::vector<void *> copy_mem;
+  auto zeroed = [&](int c, size_t bytes, bool mailbox) {
+    bytes = std::max<size_t>(bytes, 4096);
+    void *p = mailbox ? f.alloc_mailbox(c, bytes) : f.alloc(c, bytes);
+    f.compute(c).memset(p, 0, bytes).wait();
+    copy_mem.push_back(p);
+    return p;
+  };
+  for (k::OwnerFlags *use : {sum_flags, share_flags}) {
+    std::array<uint32_t *, kC> lines{};
+    for (int c = 0; c < kC; ++c) lines[static_cast<size_t>(c)] = static_cast<uint32_t *>(zeroed(c, k::kOwnerCopyLineBytes, true));
+    for (int c = 0; c < kC; ++c) use[c].lines = lines, use[c].count = static_cast<uint32_t *>(zeroed(c, k::kOwnerCopyCountBytes, false));
+  }
+  for (int c = 0; c < kC; ++c) recv[c] = static_cast<float *>(zeroed(c, k::owner_sum_copy_elems(kNMax) * 4, false));
+  bool copy = false;  // the wires below carry the copy path
   for (int c = 0; c < kC; ++c) {
     auto &q = f.compute(c);
     part[c] = static_cast<float *>(f.alloc(c, size_t(k::kPairRows) * kNMax * 4));
@@ -299,12 +320,20 @@ static void test_owner(const xenithium::l0::Loader &loader) {
     k::PairWire w;
     w.error = err[c];
     w.owner = sum_mail, w.owner.card = c;
+    if (copy) {
+      w.copy.flags = sum_flags[c];
+      for (int d = 0; d < kC; ++d) w.copy.recv[static_cast<size_t>(d)] = recv[d];
+    }
     return w;
   };
   auto share_of = [&](int c) {
     k::OwnerShare s;
     s.mail = share_mail, s.mail.card = c;
     s.error = err[c];
+    if (copy) {
+      s.copy.flags = share_flags[c];
+      for (int d = 0; d < kC; ++d) s.copy.buf[static_cast<size_t>(d)] = out[d];
+    }
     return s;
   };
   bool inverse = true;  // owner_rows and row_owner agree for every row count
@@ -319,9 +348,13 @@ static void test_owner(const xenithium::l0::Loader &loader) {
   std::mt19937 rng(23);
   std::normal_distribution<float> nd(0.f, 1.f);
   int parity = 0;
+  for (const bool with_copy : {false, true})
   for (const bool same_parity : {false, true})
     for (const int n : {2560, 10240, 1152, 1088})
-      for (const int rows : {4, 5, 8, 9, 16, 17, 30, 32}) {
+      for (const int rows : {4, 5, 8, 9, 16, 17, 23, 24, 30, 32, 33, 47, 48, 63, 64}) {
+        // armed: the mailbox still runs below kOwnerCopyMinRows (16, 23), the copies from it (24 .. 64)
+        if (with_copy ? rows != 16 && rows < 23 : rows > 32 || rows == 23 || rows == 24) continue;
+        copy = with_copy;
         size_t bad_sum = 0, touched = 0, bad_share = 0;
         for (int call = 0; call < kCalls; ++call) {
           std::vector<float> h[kC];
@@ -370,7 +403,7 @@ static void test_owner(const xenithium::l0::Loader &loader) {
           e |= x;
         }
         expect(bad_sum == 0 && touched == 0 && bad_share == 0 && e == 0,
-               std::string("owner sum") + (n % 128 == 0 ? " + owner_share" : "") + ", n " + std::to_string(n) + ", " + std::to_string(rows) + " rows, " +
+               std::string(with_copy ? "copy path armed: " : "") + "owner sum" + (n % 128 == 0 ? " + owner_share" : "") + ", n " + std::to_string(n) + ", " + std::to_string(rows) + " rows, " +
                    std::to_string(kCalls) + " calls" + (same_parity ? " on one parity" : "") +
                    ": own rows == host (p0 + p1) + (p2 + p3), other rows untouched" + (n % 128 == 0 ? ", every row on every card after the share" : "") +
                    (bad_sum ? " (" + std::to_string(bad_sum) + " sum elements differ)" : "") + (touched ? " (" + std::to_string(touched) + " foreign elements written)" : "") +
@@ -409,6 +442,23 @@ static void test_owner(const xenithium::l0::Loader &loader) {
            k::owner_share(f.compute(0), 8, 2560, out[0], s, 0);
          }),
          "owner sum / owner_share: a mailbox without every card's inbox is refused");
+  copy = true;
+  expect(refuses([&] {
+           k::PairWire w = sum_wire(0);
+           w.copy.recv[1] = nullptr;
+           k::pair_reduce(f.compute(0), 64, 2560, part[0], &w, 0, out[0]);
+         }) && refuses([&] {
+           k::OwnerShare s = share_of(0);
+           s.copy.buf[0] = out[1];
+           k::owner_share(f.compute(0), 64, 2560, out[0], s, 0);
+         }) && refuses([&] {
+           k::OwnerShare s = share_of(0);
+           s.copy.flags.lines[2] = nullptr;
+           k::owner_share(f.compute(0), 64, 2560, out[0], s, 0);
+         }),
+         "copy path: a missing receive buffer or flag line, or another buffer named for this card, is refused");
+  for (int c = 0; c < kC; ++c) f.compute(c).wait();
+  for (void *p : copy_mem) f.release(p);
   for (int c = 0; c < kC; ++c) {
     f.compute(c).wait();
     f.release(sum_mail.inbox[c]), f.release(share_mail.inbox[c]);
