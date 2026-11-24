@@ -198,6 +198,14 @@ struct GqaStep {
   // its ancestors attends to, bit for bit (gqa_seg.hpp: the context tiles shared by the group, a side row's tiles from
   // p0 on gathered in path order). The group kernel only (exact numerics, int8 / bf16 KV, no selection, no window).
   bool tree = false;
+  // Opt-in eager K8V4 trained-QSA handoff (trained_qsa_pages.hpp). Device
+  // arrays from one plan for these segment records, kept live through merge.
+  // One selection per query row, shared slot record for a verification chain.
+  // Leave both null for an all-visible plan when the caller knows it.
+  struct {
+    const int32_t *entries = nullptr;  // [rows][kTrainedQsaPages]
+    const int32_t *counts = nullptr;   // [rows][local_kv_heads], 0 = dense row
+  } trained_qsa;
 };
 
 void gqa_set_prep(int esimd);  // the decode steps' ESIMD prep (D 128) on / off (tests)
@@ -230,6 +238,18 @@ sycl::event gqa_attn_seg_xl(sycl::queue &q, const GqaShape &s, int rows, const G
 // gqa_kv_move: the page's keys are final).
 sycl::event gqa_attn_seg_sel_xl(sycl::queue &q, const GqaShape &s, int rows, const GqaCache &c, const int32_t *rec, int stride, int seg_rows,
                                 const gqa_bf16 *qb, float *part, int ns, int rm, const int32_t *sel, const int32_t *sel_n, bool pf = false);
+// Diagnostic: rerun just the native trained attention and gated merge on already prepared Q/K/V.
+sycl::event gqa_replay_trained_attention(sycl::queue &,const GqaShape &,int rows,const GqaCache &,
+                                        const GqaStep &,const GqaWeights &,const GqaScratch &);
+sycl::event gqa_attn_seg_trained_xl(sycl::queue &q, const GqaShape &s, int rows, const GqaCache &c, const GqaStep &step,
+                                   const gqa_bf16 *qb, float *part, int ns);
+// Adapt native qsa_select's device buffers (ascending IDs [rows][512]) in the
+// same in-order queue. Unscored below-budget rows may have undefined IDs.
+// status[r] is the page count (0 dense), or -1 for invalid native selection.
+// The producer must guarantee valid inputs; do not use a malformed plan.
+sycl::event gqa_pack_trained_qsa(sycl::queue &q, int rows, int hkv, const GqaStep &step,
+                                const int32_t *sel, const int32_t *sel_n,
+                                int32_t *entries, int32_t *counts, int32_t *status, uint32_t dense_rows = 0, bool gather = false);
 sycl::event gqa_bounds_page(sycl::queue &q, const GqaShape &s, const GqaCache *caches, int n_caches, int slot, int page);
 sycl::event gqa_bounds_range(sycl::queue &q, const GqaShape &s, const GqaCache &c, int pos0, int m);
 sycl::event gqa_select(sycl::queue &q, const GqaShape &s, int rows, const GqaCache &c, const int32_t *rec, int stride, int seg_rows, const gqa_bf16 *qb,
@@ -247,7 +267,7 @@ GqaEvents gqa_decode(sycl::queue &q, const GqaShape &s, int rows, const gqa_bf16
 // After a tree step, the accepted path's K / V rows to their final slots. In each listed cache (one
 // card's attention layers), for every kv head, the token at slot position p0 + from[i] moves to p0 + to[i], i ascending
 // (to[i] = i < from[i]: a path's depth i; a source slot is never a destination written before it). Byte copies of the
-// K / V codes and their scales (int8 / bf16 KV). One launch for up to kGqaMoveCaches caches.
+// K / V codes and their scales (int8 / int8-v4 / bf16 KV; int8-v4 V is half the K row, with 8 bf16 scales). One launch for up to kGqaMoveCaches caches.
 inline constexpr int kGqaMoveCaches = 16;
 struct GqaMove {
   int n = 0;
@@ -262,6 +282,14 @@ sycl::event gqa_kv_move(sycl::queue &q, const GqaShape &s, const GqaCache *cache
 // a page's score = the largest over the block's rows' q heads). The K / V of the call's rows, and every later layer's
 // input, are then built on the selected attention. A block whose context is `select` pages or fewer keeps them all,
 // and a call that ends under the budget runs the dense body, bit for bit.
+// Trained prefill: sorted union of logical pages per FA row group, with a
+// separate 16-bit block mask for every (query row, logical page).
+struct GqaTrainedPrefill {
+  const int32_t *pages = nullptr, *counts = nullptr;
+  const uint16_t *masks = nullptr;
+  int pitch = 0, rows_per_group = 0;
+  const uint32_t *subtiles = nullptr; // low 4 group bits, then 4 per bundle of eight rows; indexed by union walk
+};
 struct GqaRowsSelect {
   int pages = 0;  // pages per (row block, kv head) once the call's context passes that many; 0 = dense
   // The block holding the call's last row keeps every page. For the call that ends a prompt: its last rows produce the
@@ -324,7 +352,8 @@ struct GqaRowsScratch {
 inline constexpr int kGqaAttnBatch = 0, kGqaAttnBlock = 1, kGqaAttnStaged = 2, kGqaAttnFa = 3, kGqaAttnSdpa = 4;
 GqaEvents gqa_rows(sycl::queue &q, const GqaShape &s, int m, const gqa_bf16 *x, const GqaWeights &w, const GqaCache &c, const gqa_bf16 *rope,
                    const int32_t *pos4, int pos0, const GqaRowsScratch &sc, const PairRowsWire *wire, int wire_parity, gqa_bf16 *out,
-                   int attn = kGqaAttnFa, int rows_per_group = 0, bool p_lo = true, int qk = 0, const GqaRowsSelect &select = {});
+                   int attn = kGqaAttnFa, int rows_per_group = 0, bool p_lo = true, int qk = 0, const GqaRowsSelect &select = {},
+                   const GqaTrainedPrefill *trained = nullptr);
 // gqa_rows' last stage alone: the o projection of sc.attn's m rows into sc.partial and the
 // two-card sum (or, wire->split, the partial left for the caller). One prefill call that carries the rows of several
 // sequences runs gqa_rows per sequence with sc.o_later (its own cache and positions, its rows of y / attn at their
@@ -377,6 +406,8 @@ sycl::event gqa_attn_fa(sycl::queue &q, const GqaShape &s, int m, const GqaCache
                         const GqaPageSets *page_sets = nullptr);
 // The rows per work-group gqa_attn_fa runs for rows_per_group (0 = the shape's default): the row block that shares a page set.
 int gqa_attn_fa_rows(const GqaShape &s, int rows_per_group);
+sycl::event gqa_attn_fa_trained(sycl::queue &q, const GqaShape &s, int m, const GqaCache &c, const int32_t *pos_word,
+                               const float *y, int ldy, const gqa_bf16 *qb, gqa_bf16 *attn, const GqaTrainedPrefill &plan);
 // gqa_attn_sdpa (gqa_sdpa.cpp, oneDNN Graph): the prefill attention on oneDNN's fused GQA kernel
 // (`sdpa,ocl:micro`), one kv head per call: gather the head's context [0, pos0 + m) from the pages into contiguous f16
 // K | V (int8: f16(code x scale); bf16: f16(value)), q to f16, then softmax(q . K^T / 16) . V with oneDNN's bottom-right

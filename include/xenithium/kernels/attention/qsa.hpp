@@ -263,6 +263,19 @@ QsaEvents qsa_rows(sycl::queue &q, const QsaShape &s, int m, const qsa_bf16 *x, 
                    const int32_t *words, int word_stride, int64_t pos0, const QsaScratch &sc, const QsaRowsScratch &rs, const PairRowsWire *wire,
                    int wire_parity, qsa_bf16 *out);
 
+// Prefill-only experimental native XMX score: 8 queries x 16 keys,
+// with BF16 operands, FP32 accumulation and no post-scale. The caller
+// provides round-up-to-16 K panels and round-up-to-8 Q panels (128 dims,
+// four heads). Only complete causal IDs enter the existing top-k.
+sycl::event qsa_trained_xmx_pack_k(sycl::queue &q, const float *pool, int nkeys, qsa_bf16 *packed);
+sycl::event qsa_trained_xmx_pack_k(sycl::queue &q, const sycl::half *pool, int nkeys, sycl::ext::oneapi::bfloat16 *packed);
+sycl::event qsa_trained_xmx_pack_q(sycl::queue &q, const float *query, int rows, qsa_bf16 *packed);
+// xq.11 (qsa.cpp): trained QSA decode tree scores on fp16 DPAS; see there.
+sycl::event qsa_trained_dec_xmx_score(sycl::queue &q, const float *query, const sycl::half *pool16, const int32_t *rec, int stride,
+                                      int layout, int rows, int pitch, int bound, uint32_t *scores, int32_t *eligible);
+sycl::event qsa_trained_xmx_score(sycl::queue &q, const qsa_bf16 *query, const qsa_bf16 *keys, int rows, int pos, int nkeys,
+                                 uint32_t *score, int pitch, int32_t *eligible);
+
 // The select stage alone (tests): rows' keys in score [rows][stride], nblk[r] keys per row (device
 // words), top-512 -> sel / sel_n (candidate buffers sized for `rows`). bound = the largest nblk (grid size).
 sycl::event qsa_select(sycl::queue &q, int rows, const uint32_t *score, int stride, const int32_t *nblk, int bound, const QsaScratch &sc,

@@ -34,8 +34,6 @@ serve::Options resolve(serve::Options o, std::string_view arch_id) {
     throw serve::OptionError("--kv int8-v4: oneDNN's attention (--prefill-attn onednn) takes int8|bf16 KV");
   if (o.kv == "int8-v4" && o.attn_select > 0)
     throw serve::OptionError("--kv int8-v4: page-selected attention (--attn-select) takes int8|bf16 KV");
-  if (o.kv == "int8-v4" && o.prefill_select > 0)
-    throw serve::OptionError("--kv int8-v4: page-selected prefill (--prefill-select) takes int8|bf16 KV");
   const bool pf_attn_auto = o.prefill_attn == "auto";
   if (pf_attn_auto) o.prefill_attn = kv8 ? "int8-fast" : "fast";
   // the page-selected prefill attention is built in the exact numerics and in what auto serves
@@ -43,17 +41,11 @@ serve::Options resolve(serve::Options o, std::string_view arch_id) {
   if (o.prefill_select > 0 && o.prefill_attn != "exact" && o.prefill_attn != (kv8 ? "int8-fast" : "fast"))
     throw serve::OptionError("--prefill-select: page-selected prefill runs with --prefill-attn auto, exact or " + std::string(kv8 ? "int8-fast" : "fast") +
                              " on this KV (not " + o.prefill_attn + ")");
-  // Draft trees (--drafter-tree with a block drafter on the dense 27B) verify on dense attention over an int8 or bf16 KV:
-  // kernels::gqa_decode refuses a tree step on the int8-v4 KV. A KV the settings name wins over the tree count (a
-  // default): the trees go, said once. (Tree steps run under every decode attention numerics, and with page selection
-  // too for the steps under its page budget: the model drafts chains once a sequence of the step passes it,
-  // Model::selects_pages.)
+  // Draft trees (--drafter-tree with a block drafter on the dense 27B) verify on dense attention over an int8, int8-v4,
+  // or bf16 KV (tree-masked group attention; int8-v4 reads int4 V and its bf16 scales). Tree steps run under every
+  // decode attention numerics, and with page selection too for the steps under its page budget: the model drafts chains
+  // once a sequence of the step passes it, Model::selects_pages.
   const bool trees = !llama && !flint && o.drafter != 0 && !o.drafter_model.empty() && o.drafter_tree > 0;
-  if (trees && o.kv == "int8-v4") {
-    std::fprintf(stderr, "server: draft trees off (--drafter-tree %d not used): a tree step verifies on the int8 or bf16 KV, not int8-v4; the drafter drafts chains\n",
-                 o.drafter_tree);
-    o.drafter_tree = 0;
-  }
   if (trees && o.attn_select > 0)
     std::fprintf(stderr, "server: draft trees for steps under the page budget (--attn-select %d pages); a sequence past it, and the ones decoding beside it, draft chains\n",
                  o.attn_select);
@@ -174,6 +166,12 @@ ModelOptions model_options(const serve::Options &o, bool flint) {
     mo.mtp_from = o.drafter_mtp_from;  // both drafters
     mo.dflash_dense_bytes = o.drafter_int4 != 0 ? 4 : 1;  // q, o, gate | up, down as int4 (RTN at load)
   }
+  // Depth 4..6 needs a 5- to 7-row verify: raise the GDN pending logs to 8 rows. DFlash / DSpine already do.
+  if (o.drafter != 0 && o.drafter_model.empty() && o.mtp_depth > 3) mo.rows8 = true;
+  std::vector<int> want;
+  if (o.drafter != 0 && o.drafter_model.empty() && serve::parse_draft_depths(o.draft_depths, want))
+    for (int x : want)
+      if (x > 3) mo.rows8 = true;
   return mo;
 }
 
@@ -352,6 +350,15 @@ class Backend final : public serve::Backend {
     }
     adapter_ = std::make_unique<StepModelAdapter>(*model_);
     adapter_->set_wide_from(o_.drafter != 0 && !o_.drafter_model.empty() ? o_.drafter_wide : 0);
+    if (model_->drafter()) {
+      if (o_.mtp_depth < 1 || o_.mtp_depth > StepModelAdapter::kDepth)
+        throw serve::OptionError("--mtp-depth takes 1.." + std::to_string(StepModelAdapter::kDepth) +
+                                 " (the MTP depth of one decoding sequence)");
+      if (o_.draft_depths.empty() && o_.mtp_depth != 3) {
+        if (model_->dflash()) adapter_->set_mtp_depth_from(o_.mtp_depth, model_->mtp_from());
+        else adapter_->set_mtp_depth(o_.mtp_depth);
+      }
+    }
     std::vector<int> dd;  // XEN_DRAFT_DEPTHS over the built-in table (validated with the options)
     if (serve::parse_draft_depths(o_.draft_depths, dd) && !dd.empty()) adapter_->set_depths(dd);
     if (model_->has_drafter()) {  // the step rows and the depth table in effect
@@ -404,9 +411,12 @@ class Backend final : public serve::Backend {
                      ? ", one stream drafts 16 rows (" + (o_.drafter_tree > 0 ? "trees of " + std::to_string(o_.drafter_tree_wide) + " nodes" : std::string("chains")) +
                            ") after " + std::to_string(o_.drafter_wide) + "+ accepted drafts"
                      : std::string()) +
-                (m.dual_drafters() ? " + the MTP layer for steps of " + std::to_string(m.mtp_from()) + "+ sequences" : std::string());
+                (m.dual_drafters() ? " + the MTP layer (depth " + std::to_string(o_.mtp_depth) + ") for steps of " +
+                                         std::to_string(m.mtp_from()) + "+ sequences"
+                                   : std::string());
     else if (m.has_drafter())
-      drafter = "MTP drafter (draft vocabulary " + std::to_string(m.drafter()->draft_vocab()) + ")";
+      drafter = "MTP drafter (depth " + std::to_string(o_.mtp_depth) + ", draft vocabulary " +
+                 std::to_string(m.drafter()->draft_vocab()) + ")";
     const char *what = arch_ == "llama" ? "llama (dense, qwen35 runtime)" : arch_ == "flint" ? "flint (MoE, qwen35 runtime, step graphs)" : "qwen35";
     std::fprintf(stderr, "server: %s model loaded in %.1f s (%s); %d slots x %lld tokens, KV %s, prefill chunk %d (attention %s, W4 %s), lm_head %s, W4 split %d items; %s\n",
                  what, m.load_seconds(), tp_desc.c_str(), m.slots(), static_cast<long long>(m.capacity()), o_.kv.c_str(), m.prefill_chunk(), o_.prefill_attn.c_str(),

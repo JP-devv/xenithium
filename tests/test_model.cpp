@@ -26,12 +26,15 @@
 #include "xenithium/arch/llama/arch.hpp"
 #include "xenithium/arch/qwen35/arch.hpp"
 #include "xenithium/arch/qwen38/experts.hpp"
+#include "xenithium/arch/common/dflash_plan.hpp"
+#include "xenithium/arch/common/dspine_head.hpp"
 #include "xenithium/arch/qwen38/mtp.hpp"
 #include "xenithium/kernels/pack.hpp"
 #include "xenithium/model/arch.hpp"
 #include "xenithium/model/bulk_read.hpp"
 #include "xenithium/model/checkpoint.hpp"
 #include "xenithium/model/kv_lend.hpp"
+#include "xenithium/serve/options.hpp"
 #include "xenithium/model/kv_pages.hpp"
 
 namespace fs = std::filesystem;
@@ -970,6 +973,122 @@ void dflash_gptq_plan() {
   expect(threw, "dflash plan: a layer count past the checkpoint throws");
 }
 
+// A gptq checkpoint may omit quantization_config.format (a baked GPTQ Swift-1.5 27B). Missing is treated as gptq;
+// any other value is still refused.
+
+// DSpine's TG build needs bf16 lm_head rows; a GPTQ int4 head is dequantised as scale x (code - 8).
+void dspine_gptq_lm_head() {
+  const int n = 16, k = 128;
+  std::vector<uint32_t> qw(static_cast<size_t>(k / 8) * n);
+  std::vector<uint16_t> scales(static_cast<size_t>(n));
+  auto f32_to_f16 = [](float v) -> uint16_t {
+    uint32_t u;
+    std::memcpy(&u, &v, 4);
+    const uint32_t s = (u >> 16) & 0x8000u, e = (u >> 23) & 0xffu, m = u & 0x7fffffu;
+    if (e == 0) return static_cast<uint16_t>(s);
+    if (e == 255) return static_cast<uint16_t>(s | 0x7c00u | (m ? 0x200u : 0));
+    const int ne = static_cast<int>(e) - 127 + 15;
+    if (ne <= 0) return static_cast<uint16_t>(s);
+    if (ne >= 31) return static_cast<uint16_t>(s | 0x7c00u);
+    return static_cast<uint16_t>(s | (static_cast<uint32_t>(ne) << 10) | (m >> 13));
+  };
+  auto bf16_to_f32 = [](uint16_t b) -> float {
+    uint32_t u = static_cast<uint32_t>(b) << 16;
+    float f;
+    std::memcpy(&f, &u, 4);
+    return f;
+  };
+  for (int col = 0; col < n; ++col) {
+    scales[static_cast<size_t>(col)] = f32_to_f16(0.25f * static_cast<float>(col + 1));
+    for (int word = 0; word < k / 8; ++word) {
+      uint32_t w = 0;
+      for (int b = 0; b < 8; ++b) {
+        const int q = (col + word * 8 + b) % 16;
+        w |= static_cast<uint32_t>(q) << (4 * b);
+      }
+      qw[static_cast<size_t>(word) * n + col] = w;
+    }
+  }
+  std::vector<uint16_t> out(static_cast<size_t>(4) * k);
+  xenithium::arch::dflash::dequant_gptq_cols_bf16(qw.data(), scales.data(), n, k, 3, 4, out.data());
+  size_t bad = 0;
+  for (int c = 0; c < 4; ++c) {
+    const int col = 3 + c;
+    const float s = 0.25f * static_cast<float>(col + 1);
+    for (int kk_ = 0; kk_ < k; ++kk_) {
+      const uint32_t word = qw[static_cast<size_t>(kk_ / 8) * n + col];
+      const int q = static_cast<int>((word >> (4 * (kk_ % 8))) & 15u);
+      const float want = s * static_cast<float>(q - 8);
+      const float got = bf16_to_f32(out[static_cast<size_t>(c) * k + kk_]);
+      if (std::fabs(got - want) > 0.02f * std::max(1.f, std::fabs(want))) ++bad;
+    }
+  }
+  expect(bad == 0, "dspine gptq lm_head: dequant_gptq_cols_bf16 is scale x (code - 8) (" + std::to_string(bad) + " off)");
+
+  const char *real = std::getenv("XEN_TEST_MODEL");
+  const std::string dir = real && *real ? real : (std::string(std::getenv("HOME") ? std::getenv("HOME") : "") + "/models/swift15-xen");
+  if (dir.empty() || !std::filesystem::exists(dir + "/model-bake-int4.safetensors")) {
+    std::printf("dspine gptq lm_head: skip real bake catalog (no %s)\n", dir.c_str());
+    return;
+  }
+  const auto ck = xenithium::model::Checkpoint::open(dir);
+  expect(ck.find("lm_head.qweight") && ck.find("lm_head.scales"), "dspine gptq lm_head: bake has lm_head.qweight / scales");
+  const int H = 5120, V = 248320;
+  std::vector<uint16_t> rows(static_cast<size_t>(3) * H);
+  xenithium::arch::dflash::read_lm_head_rows_bf16(ck, V, H, 0, 3, rows.data());
+  size_t finite = 0;
+  double acc = 0;
+  for (uint16_t b : rows) {
+    const float x = bf16_to_f32(b);
+    if (std::isfinite(x)) {
+      ++finite;
+      acc += static_cast<double>(x) * x;
+    }
+  }
+  expect(finite == rows.size() && acc > 0, "dspine gptq lm_head: three bake rows are finite and nonzero");
+}
+
+
+void qwen35_gptq_format() {
+  const char *env = std::getenv("XEN_TEST_MODEL_SWIFT15_BAKED");
+  const char *home = std::getenv("HOME");
+  const std::string baked = env ? env : std::string(home ? home : "") + "/models/swift15-27b-int4-baked";
+  if (!fs::exists(baked + "/config.json")) {
+    std::printf("[SKIP] qwen35 gptq format: %s not present\n", baked.c_str());
+    return;
+  }
+  const auto cfg = m::ModelConfig::load(baked);
+  const auto arch = m::open_arch(cfg);
+  expect(arch->id() == "qwen35", "qwen35 gptq format: the baked GPTQ config (format omitted) selects arch qwen35");
+  const auto parsed = xenithium::arch::qwen35::Config::parse(cfg);
+  expect(parsed.w_method == "gptq" && parsed.w_format == "gptq" && parsed.w_gptq(),
+         "qwen35 gptq format: missing format is treated as gptq (method " + parsed.w_method + ", format '" + parsed.w_format + "')");
+
+  const char *tmp = std::getenv("TMPDIR");
+  const fs::path dir = fs::path(tmp ? tmp : "/tmp") / ("xen-test-q35-fmt-" + std::to_string(::getpid()));
+  fs::remove_all(dir);
+  fs::create_directories(dir);
+  const std::string src = (fs::path(baked) / "config.json").string();
+  std::ifstream in(src);
+  std::string json((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  const std::string needle = "\"quant_method\": \"gptq\"";
+  const std::string alt = "\"quant_method\":\"gptq\"";
+  std::string key = json.find(needle) != std::string::npos ? needle : alt;
+  if (json.find(key) == std::string::npos) {
+    expect(false, "qwen35 gptq format: baked config.json has no quant_method gptq");
+    fs::remove_all(dir);
+    return;
+  }
+  auto write_and_parse = [&](const std::string &body) {
+    std::ofstream(dir / "config.json") << body;
+    return xenithium::arch::qwen35::Config::parse(m::ModelConfig::load(dir.string()));
+  };
+  std::string msg;
+  const bool bad = throws([&] { write_and_parse(json.substr(0, json.find(key)) + "\"quant_method\": \"gptq\", \"format\": \"pack-quantized\"" + json.substr(json.find(key) + key.size())); }, &msg);
+  expect(bad && msg.find("want gptq") != std::string::npos, "qwen35 gptq format: a format other than gptq is still refused (" + msg + ")");
+  fs::remove_all(dir);
+}
+
 void mtp35_plan() {
   using R = std::vector<std::pair<int64_t, int64_t>>;
   const R ranges{{0, 98304}, {248000, 248128}};
@@ -1337,8 +1456,16 @@ void seq_reader() {
   }
 }
 
+
+void mtp_depth_cap() {
+  std::vector<int> d;
+  expect(xenithium::serve::parse_draft_depths("6,6,6,6", d) && d.size() == 4 && d[0] == 6 && d[3] == 6,
+         "draft-depths accepts a table of 6");
+  expect(xenithium::serve::parse_draft_depths("16", d) == false, "draft-depths still rejects 16 (max 15)");
+}
 int main() {
   try {
+    mtp_depth_cap();
     bf16_round();
     w4_rtn();
     synthetic();
@@ -1349,7 +1476,9 @@ int main() {
     real_model_llama();
     real_model_flint();
     real_model_qwen35_gptq();
+    qwen35_gptq_format();
     dflash_gptq_dequant();
+    dspine_gptq_lm_head();
     dflash_gptq_plan();
     mtp35_plan();
     select_share();

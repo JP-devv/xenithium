@@ -294,6 +294,8 @@ struct PfProfile {
   double split = 0;           // wall ms of the split two-card sums (pair_split_rows), the producers synced first
 };
 
+namespace trained_qsa { class Device; }
+
 class Model {
  public:
   static constexpr int kRows = kernels::kGdnRows;  // rows per sequence in a step (a step: up to kStepRows32 in all)
@@ -429,6 +431,11 @@ class Model {
   static constexpr int k_page_tokens = model::KvPages::kPageTokens;
 
   void reset();                             // a fresh sequence at position 0
+  void note_prefill_probe_prompt(int slot,bool match) {
+    if(match) pf_probe_slot_=slot;
+    else if(pf_probe_slot_==slot) pf_probe_slot_=-1;
+  }
+  void note_prompt(int slot,int64_t total,int64_t restored);
   void step(const int32_t *ids, int rows);  // rows tokens at position(); waits for the cards
   void accept(int n);                       // keep the last step's first n rows (1..rows)
   // A step whose rows are a draft tree (the current slot; DFlash's 8-row verify): parent[r] = row r's parent row
@@ -572,7 +579,11 @@ class Model {
   // the rows the step buffers hold (head, MLP, mixers, drafters): pass_rows() or the load's prefill_short, whichever is
   // more (16 unless 32-row steps or 17-32-row short prefill calls)
   int rows_cap() const { return rows_cap_; }
-  // the most drafts one draft call returns: MTP 3 (passes), DFlash the checkpoint's block - 1 (7)
+  // One MTP layer reused recursively: pass 1 plus further chained passes, up to this many drafts.
+  // DFlash / DSpine still cap at the checkpoint's block - 1 (7 or 15).
+  static constexpr int kMtpDepthMax = 6;
+  static_assert(kMtpDepthMax >= 6 && kMtpDepthMax <= 15, "qwen35 MTP depth 6 fits a segment and kDepthMax 15");
+  // the most drafts one draft call returns: MTP kMtpDepthMax, DFlash the checkpoint's block - 1
   int draft_depth_max() const;
   // both drafters loaded (ModelOptions:mtp_from); which one drafts a call for `seqs` sequences (true: MTP), and
   // the most drafts it returns then
@@ -718,7 +729,7 @@ class Model {
   std::vector<uint8_t> batch_tree_;  // per segment of the last step, its rows were a tree
   std::vector<std::vector<int>> draft_par_;  // per slot, draft_parents()
   void note_tree(int slot, size_t drafts, int seg = 0);  // the last DFlash pass's tree (its segment seg) for the slot's drafts
-  void accept_counts(const std::vector<int> &n);  // accept_batch's counts (no tree check)
+  void accept_counts(const std::vector<int> &n, const std::vector<const int *> *paths=nullptr);  // paths already validated
   void accept_paths(const std::vector<int> &n, const std::vector<const int *> &paths);  // accept_batch(n, paths) before close_pages
   // One card's KV caches of the attention layers (the accept's launches run over all of them), and the first of those
   // layers: they share attn_.shape_of(card, layer0).
@@ -737,6 +748,18 @@ class Model {
   uint32_t pend_seq_ = 0; // a split sum whose peer rows the consumer has not waited for yet (0: none)
   double load_s_ = 0;
   std::unique_ptr<load::DenseStore> dense_;
+  std::unique_ptr<trained_qsa::Device> trained_qsa3_;  // bank (legacy environment can limit this to layer 3)
+  int pf_probe_slot_=-1;
+  bool pf_probe_done_=false;
+  int trained_qsa_prefill_min_ = 0;  // opt-in XMX selector for cold, contiguous text history
+  std::vector<int> trained_qsa_layer_;  // model layer -> bank index; -1 is stock dispatch
+  static constexpr int kTrainedQsaShort=8192;
+  std::vector<int64_t> qsa_covered_;  // contiguous logical token count; -1 means disabled/incomplete
+  void qsa_invalidate_snapshots(int slot,int64_t retained=-1);
+  uint32_t qsa_stage_rows_=0;
+  bool qsa_step_sparse_=false;      // some segment of the step runs the trained sparse walk
+  uint32_t qsa_dense_rows_=0;       // rows of the step kept on the dense walk (plan count 0)
+  uint64_t qsa_sparse_slots_=0;     // slots whose segment is sparse this step (route log)
   std::unique_ptr<Head> head_;
   std::unique_ptr<HeadCands> cands_;  // the sampling candidates (logits_cands)
   std::unique_ptr<Mlp> mlp_;
@@ -803,6 +826,7 @@ class Model {
   // the snapshot store (host buffers allocated on first use, kept for reuse)
   struct SnapRec {
     int64_t pos = 0;
+    int qsa_owner=-1;  // exact complete groups still resident in this logical slot
     int64_t rope_delta = 0;
     int parity = 0;
     bool used = false;
@@ -824,6 +848,7 @@ class Model {
   std::vector<uint16_t> pf_rope_host_;
   std::vector<int32_t> vis_ids_;
   int64_t capt_rope_ = 0;
+  bool capt_qsa_ = false;  // the captured call appended trained-QSA keys from its start (covered==pos)
   void pf_rope_rows(const int32_t *ids, int m);  // pf_start: pf_.rope_rows / snap_rope, pf_rope_host_, the slot's delta
   int snap_cap_ = 0;
   std::vector<int32_t *> fork_pages_;  // [card] device: a fork's page pairs [src slot_pages][dst slot_pages]

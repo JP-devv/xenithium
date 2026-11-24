@@ -352,6 +352,147 @@ class QsaSelMergeK;
 class QsaSelNK;
 }  // namespace
 
+// The same native BF16 DPAS instruction as QsaScoreK, but transpose the
+// operands: A is 8 prompt queries for one head, B is 16 adjacent pooled
+// keys. Keep B for all four heads, then apply the trained scorer's ReLU
+// and head sum (no scale). One K pack per prompt chunk, Q pack per tile.
+template<class T> static sycl::event trained_xmx_pack_k(sycl::queue &q,const T *pool,int nkeys,bf16 *packed) {
+  constexpr int K=16,D=128,panel=K*D;
+  return q.parallel_for(sycl::range<1>(size_t((nkeys+K-1)/K)*panel),[=](sycl::id<1> id) {
+    const size_t i=id[0]; const int elem=i%panel, col=(elem/2)%K, dim=(elem/(2*K))*2+elem%2;
+    const int b=(i/panel)*K+col;
+    packed[i]=b<nkeys?bf16(static_cast<float>(pool[size_t(b)*D+dim])):bf16(0.f);
+  });
+}
+sycl::event qsa_trained_xmx_pack_k(sycl::queue &q,const float *pool,int nkeys,bf16 *packed) {
+  return trained_xmx_pack_k(q,pool,nkeys,packed);
+}
+sycl::event qsa_trained_xmx_pack_k(sycl::queue &q,const sycl::half *pool,int nkeys,bf16 *packed) {
+  return trained_xmx_pack_k(q,pool,nkeys,packed);
+}
+sycl::event qsa_trained_xmx_pack_q(sycl::queue &q,const float *query,int rows,bf16 *packed) {
+  constexpr int R=8,H=4,D=128,S=16,panel=R*H*D;
+  return q.parallel_for(sycl::range<1>(size_t((rows+R-1)/R)*panel),[=](sycl::id<1> id) {
+    const size_t i=id[0]; const int e=i%panel, r=(i/panel)*R+(e/S)%R, h=(e/(R*S))%H, d=(e/(R*H*S))*S+e%S;
+    packed[i]=r<rows?bf16(query[(size_t(r)*H+h)*D+d]):bf16(0.f);
+  });
+}
+class QsaTrainedPrefillXmxK;
+sycl::event qsa_trained_xmx_score(sycl::queue &q,const bf16 *query,const bf16 *keys,int rows,int pos,int nkeys,
+                                 uint32_t *score,int pitch,int32_t *eligible) {
+  constexpr int R=8,K=16,H=4,D=128,S=16,W=16;
+  return q.parallel_for<QsaTrainedPrefillXmxK>(sycl::nd_range<2>({size_t((rows+R-1)/R),size_t((nkeys+K*W-1)/(K*W))*W},{1,W}),
+      [=](sycl::nd_item<2> it) SYCL_ESIMD_KERNEL {
+        const int t=it.get_group(0),r0=t*R,n=(rows-r0<R?rows-r0:R);
+        const int kb=it.get_global_id(1),b0=kb*K;
+        if (b0==0)
+#pragma unroll
+          for(int r=0;r<R;++r) if(r<n) eligible[r0+r]=(pos+r0+r+1)/4;
+        if(b0>=(pos+r0+n)/4) return;
+        const bf16 *A=query+size_t(t)*R*D*H, *B=keys+size_t(kb)*K*D;
+        esimd::simd<float,R*K> c0(0.f), c1(0.f), c2(0.f), c3(0.f);
+#pragma unroll
+        for(int d=0;d<D/S;++d) {
+          const auto b=esimd::block_load<bf16,K*S>(B+d*K*S);
+          const bf16 *a=A+d*H*R*S;
+          c0=xmx::dpas<8,8,float,float,bf16,bf16>(c0,b,esimd::block_load<bf16,R*S>(a+0*R*S));
+          c1=xmx::dpas<8,8,float,float,bf16,bf16>(c1,b,esimd::block_load<bf16,R*S>(a+1*R*S));
+          c2=xmx::dpas<8,8,float,float,bf16,bf16>(c2,b,esimd::block_load<bf16,R*S>(a+2*R*S));
+          c3=xmx::dpas<8,8,float,float,bf16,bf16>(c3,b,esimd::block_load<bf16,R*S>(a+3*R*S));
+        }
+        esimd::simd<float,R*K> sums=((esimd::max(c0,0.f)+esimd::max(c1,0.f))+esimd::max(c2,0.f))+esimd::max(c3,0.f);
+        const esimd::simd<uint32_t,K> index(0,1);
+#pragma unroll
+        for(int r=0;r<R;++r) if(r<n) {
+          const int count=(pos+r0+r+1)/4-b0;
+          auto *dst=score+size_t(r0+r)*pitch+b0;
+          esimd::simd<float,K> fs=sums.template select<K,1>(r*K);
+          const esimd::simd<uint32_t,K> bits=fs.template bit_cast_view<uint32_t>();
+          if(count>=K) esimd::block_store<uint32_t,K>(dst,bits);
+          else if(count>0) esimd::scatter<uint32_t,K>(dst,index*4u,bits,index<uint32_t(count));
+        }
+      });
+}
+
+
+// xq.11: the trained QSA decode tree scores on fp16 DPAS (trained_qsa_device.cpp index_scores_tile<Half, Tree>'s values up
+// to fp32 summation order). query fp32 [rows][4][128]; pool16 fp16 [slots][pitch][128]; scores [rows][pitch] fp32 bits.
+class QsaTrainedDecXmxK;
+sycl::event qsa_trained_dec_xmx_score(sycl::queue &q, const float *query, const sycl::half *pool16, const int32_t *rec, int stride,
+                                      int layout, int rows, int pitch, int bound, uint32_t *scores, int32_t *eligible) {
+  constexpr int H = 4, D = 128, T = 8, NB = 16, KS = 16, MT = 8, TPT = 4;  // + tiles per thread  // heads, dims, threads, blocks per thread, K step, M tiles (16 rows x 4 / 8)
+  constexpr int kTileH = 8 * KS;                                   // halfs per A operand (8 pairs x 16 dims)
+  constexpr uint32_t kSlm = uint32_t(D / KS) * MT * 2 * kTileH * 2; // [kk][t][hi|lo][8][16] halfs = 32 KiB
+  const int segments = seg_count(rows, layout);
+  const int wgs = (bound + T * NB * TPT - 1) / (T * NB * TPT);
+  return q.parallel_for<QsaTrainedDecXmxK>(sycl::nd_range<2>({size_t(segments), size_t(wgs) * T}, {1, T}), [=](sycl::nd_item<2> it) SYCL_ESIMD_KERNEL {
+    esimd::slm_init<kSlm>();
+    const int sgi = int(it.get_group(0)), tid = int(it.get_local_id(1));
+    int rseg, nseg;
+    seg_span(layout, rows, sgi, rseg, nseg);
+    const int start = rec[sgi * stride + kSegPos], slot = rec[sgi * stride + kSegSlot];
+    const int nmax = start / 4;
+    const int n = nseg < 16 ? nseg : 16;
+    const int mt = (n * H + 7) / 8;
+    if (eligible && it.get_group(1) == 0 && tid == 0)  // tree steps (null: the chains nblk is index_blocks)
+      for (int r = 0; r < n; ++r) eligible[rseg + r] = nmax;
+    // stage: thread tid = M tile tid (rows 2 tid, 2 tid + 1; pair i = (row - 2 tid) * 4 + head)
+    if (tid < mt) {
+#pragma unroll
+      for (int i = 0; i < 8; ++i) {
+        const int row = 2 * tid + i / 4, head = i % 4;
+        esimd::simd<float, D> qv = 0.f;
+        if (row < n) qv = esimd::block_load<float, D>(query + (size_t(rseg + row) * H + head) * D);
+        esimd::simd<sycl::half, D> hi = qv;
+        esimd::simd<sycl::half, D> lo = esimd::simd<float, D>(qv - esimd::simd<float, D>(hi));
+#pragma unroll
+        for (int kk = 0; kk < D / KS; ++kk) {
+          const uint32_t base = uint32_t(((kk * MT + tid) * 2) * kTileH + i * KS) * 2;
+          esimd::slm_block_store<sycl::half, KS>(base, hi.select<KS, 1>(kk * KS));
+          esimd::slm_block_store<sycl::half, KS>(base + kTileH * 2, lo.select<KS, 1>(kk * KS));
+        }
+      }
+    }
+    esimd::barrier();
+    for (int tt = 0; tt < TPT; ++tt) {
+    const int b0 = ((int(it.get_group(1)) * TPT + tt) * T + tid) * NB;
+    if (b0 >= nmax) return;
+    // B: 16 keys x 128 dims, per K step one transposed [16 keys][8 dwords] load -> [8 dim pairs][16 keys]
+    const uint32_t *base = reinterpret_cast<const uint32_t *>(pool16 + size_t(slot) * pitch * D);
+    esimd::simd<uint32_t, (D / 2) * NB> bk;
+#pragma unroll
+    for (int kk = 0; kk < D / KS; ++kk)
+      bk.select<8 * NB, 1>(kk * 8 * NB) = esimd::load_2d<uint32_t, 8, NB, 1, true, false>(base, D * 2 - 1, pitch - 1, D * 2 - 1, kk * 8, b0);
+    const int cnt = nmax - b0 < NB ? nmax - b0 : NB;
+    const esimd::simd<uint32_t, NB> idx(0, 1);
+    for (int t = 0; t < mt; ++t) {
+      esimd::simd<float, 8 * NB> acc = 0.f;
+#pragma unroll
+      for (int kk = 0; kk < D / KS; ++kk) {
+        const uint32_t ab = uint32_t(((kk * MT + t) * 2) * kTileH) * 2;
+        const esimd::simd<sycl::half, kTileH> ahi = esimd::slm_block_load<sycl::half, kTileH>(ab);
+        const esimd::simd<sycl::half, kTileH> alo = esimd::slm_block_load<sycl::half, kTileH>(ab + kTileH * 2);
+        const esimd::simd<sycl::half, 2 * 8 * NB> bh = bk.select<8 * NB, 1>(kk * 8 * NB).bit_cast_view<sycl::half>();
+        acc = xmx::dpas<8, 8, float, float, sycl::half, sycl::half>(acc, bh, ahi);
+        acc = xmx::dpas<8, 8, float, float, sycl::half, sycl::half>(acc, bh, alo);
+      }
+#pragma unroll
+      for (int ri = 0; ri < 2; ++ri) {
+        const int row = 2 * t + ri;
+        if (row >= n) break;
+        esimd::simd<float, NB> sc = esimd::max(esimd::simd<float, NB>(acc.select<NB, 1>((ri * 4 + 0) * NB)), esimd::simd<float, NB>(0.f)) + esimd::max(esimd::simd<float, NB>(acc.select<NB, 1>((ri * 4 + 1) * NB)), esimd::simd<float, NB>(0.f));
+        sc = sc + esimd::max(esimd::simd<float, NB>(acc.select<NB, 1>((ri * 4 + 2) * NB)), esimd::simd<float, NB>(0.f));
+        sc = sc + esimd::max(esimd::simd<float, NB>(acc.select<NB, 1>((ri * 4 + 3) * NB)), esimd::simd<float, NB>(0.f));
+        uint32_t *dst = scores + size_t(rseg + row) * pitch + b0;
+        const esimd::simd<uint32_t, NB> bits = sc.bit_cast_view<uint32_t>();
+        if (cnt == NB) esimd::block_store<uint32_t, NB>(dst, bits);
+        else esimd::scatter<uint32_t, NB>(dst, idx * 4u, bits, idx < uint32_t(cnt));
+      }
+    }
+    }
+  });
+}
+
 int qsa_select_chunk(int bound) {
   // Up to 16 chunk work-groups per row (one per 4,096 blocks at least), as wide as the cap
   // of 16 candidate lists allows.
@@ -361,11 +502,15 @@ int qsa_select_chunk(int bound) {
 
 sycl::event qsa_select(sycl::queue &q, int rows, const uint32_t *score, int stride, const int32_t *nblk, int bound, const QsaScratch &sc,
                        sycl::event *merge, int chunk) {
+  if (rows<1 || bound<1 || bound>kQsaMaxBlocks || stride<bound || !score || !nblk || !sc.sel || !sc.sel_n)
+    throw std::invalid_argument("qsa_select: invalid rows, score bounds or output buffers");
   if (chunk <= 0) chunk = qsa_select_chunk(bound);
   if (chunk < kQsaMinChunk || chunk > kQsaPfChunk) throw std::invalid_argument("qsa_select: chunk out of range");
   const int nch = std::max(1, (bound + chunk - 1) / chunk);
   if (nch > kQsaMaxBlocks / kQsaChunk) throw std::invalid_argument("qsa_select: more blocks than the kernel supports");
   const bool direct = nch == 1;
+  if (!direct && (!sc.cand_id || !sc.cand_key || !sc.cand_n))
+    throw std::invalid_argument("qsa_select: missing multi-chunk candidate buffers");
   int32_t *sel = sc.sel, *sel_n = sc.sel_n, *cid = sc.cand_id, *cn = sc.cand_n;
   uint32_t *ckey = sc.cand_key;
   constexpr int K = kQsaTopBlocks, kCh = kQsaMaxBlocks / kQsaChunk;

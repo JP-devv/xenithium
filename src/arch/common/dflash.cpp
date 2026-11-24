@@ -1,4 +1,5 @@
 #include "xenithium/arch/common/dflash.hpp"
+#include "xenithium/arch/common/dspine_head.hpp"
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -530,9 +531,9 @@ void DFlash::load_dspine(const std::string &dir, const std::string &target_dir) 
   void *m_wl = nullptr, *m_p2 = nullptr;
   const k::DenseWeights w_tg = pack0(wl_t, Rk, H, m_wl), w_tsv = pack0(p2, 2 * Rk, Cd, m_p2);
   const model::Checkpoint tck = model::Checkpoint::open(target_dir);
-  const char *head_nm = tck.find("lm_head.weight") ? "lm_head.weight" : nullptr;
-  if (!head_nm || tck.at(head_nm).dtype != model::DType::bf16 || tck.at(head_nm).shape != std::vector<int64_t>{cfg_.vocab, H})
-    throw std::runtime_error("dflash (DSpine): the target's lm_head.weight must be bf16 [vocab][hidden] (the tables' rows)");
+  // TG rows: bf16 lm_head.weight, or the GPTQ int4 head dequantised to bf16 a chunk at a time (no dense copy kept).
+  if (!tck.find("lm_head.weight") && !tck.find("lm_head.qweight"))
+    throw std::runtime_error("dflash (DSpine): the target needs lm_head.weight bf16 [vocab][hidden] or GPTQ lm_head.qweight (int4, dequantised at load)");
   constexpr int kChunk = 4096;
   auto *stage = static_cast<uint16_t *>(fab_.alloc_host(static_cast<size_t>(kChunk) * H * 2));
   void *a = fab_.alloc(0, static_cast<size_t>(kChunk) * H * 2), *a2 = fab_.alloc(0, static_cast<size_t>(kChunk) * H * 2);
@@ -543,7 +544,7 @@ void DFlash::load_dspine(const std::string &dir, const std::string &target_dir) 
       const int64_t t0 = tok_of(r0 + i);
       int run = 1;
       while (i + run < m && tok_of(r0 + i + run) == t0 + run) ++run;
-      read_bf16(tck, head_nm, static_cast<size_t>(t0) * H, static_cast<size_t>(run) * H, stage + static_cast<size_t>(i) * H);
+      dflash::read_lm_head_rows_bf16(tck, cfg_.vocab, H, t0, run, stage + static_cast<size_t>(i) * H);
       i += run;
     }
     q.memcpy(a, stage, static_cast<size_t>(m) * H * 2).wait();  // the stage is rewritten below
@@ -796,7 +797,14 @@ std::vector<std::vector<int32_t>> DFlash::pass(const std::vector<Seg> &segs, int
   // sequences. Sampled segments draft the same tree (their noise unused: the engine walks the tree with the sampler's
   // draws). The tree holds at most the step's depth (block_rows - 1 drafts): a best-first tree of that budget, not the
   // preorder prefix of a larger one (several sequences draft shallower blocks).
-  const int tree = opt_.tree > 0 && std::max(ns, step_seqs) <= std::max(1, opt_.tree_seqs) && block_rows >= 2
+  // Trees if the step is within tree_seqs. At short context, also allow up to 4 streams: the extra tokens
+  // per step still pay. At long context the extra step time loses (same pattern as MTP past depth 3), so the
+  // configured cap stays (default 2: 4-user 128K drafts chains).
+  int64_t longest = 0;
+  for (const auto &g : segs) longest = std::max<int64_t>(longest, g.start);
+  const int tree_cap = std::max(1, opt_.tree_seqs);
+  const int tree_cap_eff = longest < 65536 ? std::max(tree_cap, 4) : tree_cap;
+  const int tree = opt_.tree > 0 && std::max(ns, step_seqs) <= tree_cap_eff && block_rows >= 2
                        ? std::min({block_rows > k::kStepRows8 ? opt_.tree_wide : opt_.tree, k::kTreeRows - 1, block_rows - 1})
                        : 0;
   tree_par_.assign(static_cast<size_t>(ns), {});

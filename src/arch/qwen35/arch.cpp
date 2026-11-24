@@ -108,6 +108,7 @@ Config Config::parse(const ModelConfig &mc) {
     c.w_group = as_int(ModelConfig::need_int(*q, "group_size"), "group_size");
     c.w_sym = ModelConfig::need_bool(*q, "sym");
     if (ModelConfig::str_or(*q, "pack_dtype", "int32") != "int32") invariant("quantization_config.pack_dtype (want int32)");
+    if (c.w_format.empty()) c.w_format = "gptq";  // gptqmodel may omit format when quant_method is already gptq
     if (c.w_format != "gptq") invariant("quantization_config.format '" + c.w_format + "' (want gptq)");
     if (const json::Value *act = q->get("desc_act"); act && act->is_bool() && act->b) invariant("quantization_config.desc_act true (act order) is not implemented");
     // The tensors are in the auto_gptq orientation (qweight [k/8][n], scales [k/128][n], qzeros [k/128][n/8]);

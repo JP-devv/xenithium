@@ -1,3 +1,4 @@
+#include "xenithium/util/ruby_round.hpp"
 #include "xenithium/core/batch_engine.hpp"
 #include "xenithium/util/env.hpp"
 #include "xenithium/util/host_mem.hpp"
@@ -9,6 +10,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
+#include <bit>
+#include <fstream>
 #include <stdexcept>
 
 namespace xenithium::core {
@@ -313,6 +316,7 @@ Finish BatchEngine::emit(Req &r, int32_t tok, TokenLogprob *lp, Event &ev) {
   ev.tokens[ev.n++] = tok;
   if (cfg_.lookup > 0) r.lk_hist.push_back(tok);
   if (kv_shared_ || pc_on_ || tiers_ > 1) r.out.push_back(tok);  // a preempted request re-prefills them; the parked history
+  if (r.generated == 0) r.t_first = clock::now();
   ++r.generated;
   r.next = tok;
   if (is_stop(r, tok)) {
@@ -378,6 +382,7 @@ int BatchEngine::cands_for(const std::vector<const Req *> &reqs) const {
 void BatchEngine::spec_step(const std::vector<size_t> &dec_in, std::vector<std::pair<size_t, Finish>> &done, uint64_t &gen_add) {
   const int N = static_cast<int>(dec_in.size());
   const auto t_step = clock::now();  // the step's time per (sequences, rows per sequence)
+  for (size_t i : dec_in) ++active_[i]->dec_steps, active_[i]->dec_peers += static_cast<uint64_t>(N - 1);
   std::vector<size_t> dec = dec_in;
   std::vector<int> rr(static_cast<size_t>(N)), off(static_cast<size_t>(N));  // rows and first row of each segment
   int sr = 1;
@@ -514,9 +519,30 @@ void BatchEngine::spec_step(const std::vector<size_t> &dec_in, std::vector<std::
     segs.push_back({r.slot, t, rr[static_cast<size_t>(k)], tree ? r.tree.data() : nullptr});
     host |= r.host;
   }
+  namespace ruby = util::ruby_round;
+  const int context=ruby::context_rows();
+  const bool counted=context>=8200 && N==1 && active_[dec[0]]->prompt.size()==size_t(context) && active_[dec[0]]->pos>=context;
+  const auto context_pos=counted?active_[dec[0]]->pos:0;
+  const bool from_lookup=counted && active_[dec[0]]->lk_used;
+  const bool mark=counted && ruby::mode();
+  auto &ru=ruby::r;
+  uint64_t parent_hash=0;
+  if(counted && is_tree[0]) {
+    parent_hash=14695981039346656037ull;
+    for(int i=0;i<rows;++i) parent_hash=(parent_hash^uint32_t(segs[0].parent[i]))*1099511628211ull;
+  }
+  if(mark) {
+    ru={};
+    ru.step=std::chrono::duration_cast<std::chrono::nanoseconds>(t_step.time_since_epoch()).count();
+    ru.pos=active_[dec[0]]->pos;
+    ru.width=rows; ru.tree=is_tree[0];
+    ru.verify0=ruby::ns();
+  }
   m_.verify(segs);
+  if(mark) ru.verify1=ruby::ns();
   std::vector<int32_t> dev(static_cast<size_t>(rows));
   m_.picks(rows, dev.data());
+  if(mark) ru.pick1=ruby::ns();
   // when every host request reads only its top_k, each row's candidates (both cards' top T tiles) instead of the
   // whole rows; cn = candidates per row, 0 = full rows in logits_
   int cn = 0;
@@ -741,6 +767,7 @@ void BatchEngine::spec_step(const std::vector<size_t> &dec_in, std::vector<std::
   // unequal segments at the largest picked depth, for all)
   int lk_depth = depth;
   for (int d : req_depth) lk_depth = std::max(lk_depth, d);
+  const auto lookup0=mark?clock::now():clock::time_point{};
   bool lk_step = cfg_.lookup > 0 && lk_depth > 0 && going > 0;
   std::vector<std::vector<int32_t>> lk_props(static_cast<size_t>(N));
   if (cfg_.lookup > 0)
@@ -751,6 +778,7 @@ void BatchEngine::spec_step(const std::vector<size_t> &dec_in, std::vector<std::
       if (lk_depth > 0) lk_props[static_cast<size_t>(k)] = lk_propose(r, lk_depth);
       lk_step = lk_step && !lk_props[static_cast<size_t>(k)].empty() && r.lk_yield > r.df_yield;
     }
+  const auto lookup_us=mark?std::chrono::duration<double,std::micro>(clock::now()-lookup0).count():0.;
   size_t gi = 0;  // the going requests in order (req_depth)
   for (int k = 0; k < N; ++k) {
     auto &a = acc[static_cast<size_t>(k)];
@@ -781,8 +809,10 @@ void BatchEngine::spec_step(const std::vector<size_t> &dec_in, std::vector<std::
     publish_early(now);
   }
   const auto t_acc0 = clock::now();
+  if(mark) ru.accept0=std::chrono::duration_cast<std::chrono::nanoseconds>(t_acc0.time_since_epoch()).count();
   auto drafts = m_.accept(acc);
   const auto t_acc1 = clock::now();
+  if(mark) ru.accept1=std::chrono::duration_cast<std::chrono::nanoseconds>(t_acc1.time_since_epoch()).count();
   bool drafts_after = false;  // the accept ran a drafting pass
   for (const auto &a : acc) drafts_after |= a.depth > 0;
   for (int k = 0; k < N; ++k) {
@@ -804,6 +834,18 @@ void BatchEngine::spec_step(const std::vector<size_t> &dec_in, std::vector<std::
       e.finish = fin[static_cast<size_t>(k)];
       events_.push_back(std::move(e));
       done.push_back({i, fin[static_cast<size_t>(k)]});
+    }
+  }
+  // Opt-in serving benchmark counters. Host timestamps only; no device readback.
+  const auto native_end=clock::now();
+  if (util::env_flag("XEN_BENCH_VERIFY_LOG")) {
+    const auto ns = [](clock::time_point t) { return static_cast<long long>(std::chrono::duration_cast<std::chrono::nanoseconds>(t.time_since_epoch()).count()); };
+    const auto end = native_end;
+    for (int k = 0; k < N; ++k) {
+      const Req &r = *active_[dec[static_cast<size_t>(k)]];
+      std::fprintf(stderr, "BENCH_VERIFY start_ns=%lld end_ns=%lld slots=%d rows=%d request=%llu slot=%d verify_rows=%d committed=%d\n",
+                   ns(t_step), ns(end), N, rows, static_cast<unsigned long long>(r.id), r.slot,
+                   rv[static_cast<size_t>(k)], acc[static_cast<size_t>(k)].n);
     }
   }
   const bool recorded = m_.step_recorded();  // a step that recorded a graph is not timed
@@ -844,6 +886,30 @@ void BatchEngine::spec_step(const std::vector<size_t> &dec_in, std::vector<std::
     } else if (n == 0 || ms < 3 * e) {
       e = n == 0 ? ms : e + (ms - e) * (n < 8 ? 1.0 / (n + 1) : 0.125);
       ++n;
+    }
+  }
+  if(counted) {
+    const int proposals=std::max(0,rv[0]-1);
+    const int accepted=proposals?std::clamp(confirmed(0),0,proposals):0;
+    auto hash=[](const int32_t *ids,int n) {
+      uint64_t h=14695981039346656037ull;
+      for(int i=0;i<n;++i) { h^=static_cast<uint32_t>(ids[i]);h*=1099511628211ull; }
+      return static_cast<unsigned long long>(h);
+    };
+    std::fprintf(stderr,"RUBY_SCALE pos=%lld rows=%d tree=%d lookup=%d proposed=%d accepted=%d committed=%d proposal_hash=%016llx commit_hash=%016llx parent_hash=%016llx\n",
+      static_cast<long long>(context_pos),rows,int(is_tree[0]),int(from_lookup),proposals,accepted,acc[0].n,
+      hash(toks.data(),rows),hash(next.data(),acc[0].n),static_cast<unsigned long long>(parent_hash));
+  }
+  if(mark) {
+    const auto us=[](int64_t a,int64_t b){return (b-a)*1e-3;};
+    std::fprintf(stderr,"RUBY_ROUND start_ns=%lld pos=%lld tree=%d width=%d commits=%d sampled=%d prepare_us=%.3f verify_us=%.3f picks_us=%.3f host_and_publish_us=%.3f accept_adapter_us=%.3f target_accept_us=%.3f draft_call_us=%.3f mtp_kv_us=%.3f block_call_us=%.3f dflash_internal_us=%.3f lookup_us=%.3f\n",
+        static_cast<long long>(ru.step), static_cast<long long>(ru.pos),ru.tree,ru.width,acc[0].n,ru.device_sample,
+        us(ru.step,ru.verify0),us(ru.verify0,ru.verify1),us(ru.verify1,ru.pick1),us(ru.pick1,ru.accept0),
+        us(ru.accept0,ru.accept1),us(ru.pack0,ru.pack1),us(ru.draft0,ru.draft1),ru.mtp_ns*1e-3,ru.block_ns*1e-3,ru.dflash_pass_ms*1000,lookup_us);
+    ru={};
+    if(fin[0]!=Finish::none) {
+      for(auto &flush:ruby::context_events) flush();
+      ruby::context_events.clear();
     }
   }
   ++spec_steps_;
@@ -1172,6 +1238,17 @@ std::vector<int> BatchEngine::pick_layout(const std::vector<size_t> &going) {
 
 void BatchEngine::retire(size_t i, Finish f) {
   Req &r = *active_[i];
+  static const bool req_log = util::env_flag("XEN_REQ_LOG");
+  if (req_log) {
+    const auto now = clock::now();
+    const bool any = r.generated > 0 && r.t_first != clock::time_point{};
+    const double ttft = any ? dsec(r.t_first - r.t_submit).count() : -1.0, dec_s = any ? dsec(now - r.t_first).count() : 0.0;
+    std::fprintf(stderr, "REQ_DONE id=%llu slot=%d prompt=%zu cached=%zu gen=%d ttft_s=%.2f decode_s=%.2f tok_s=%.1f steps=%u tok_per_step=%.2f peers=%.2f finish=%d\n",
+                 static_cast<unsigned long long>(r.id), r.slot, r.prompt_len, r.cached, r.generated, ttft, dec_s,
+                 dec_s > 0 && r.generated > 1 ? (r.generated - 1) / dec_s : 0.0, r.dec_steps,
+                 r.dec_steps ? static_cast<double>(r.generated) / r.dec_steps : 0.0,
+                 r.dec_steps ? static_cast<double>(r.dec_peers) / r.dec_steps : 0.0, static_cast<int>(f));
+  }
   if (r.slot >= 0) {
     if (pc_on_) pc_park(r, f);           // the slot keeps its sequence (pages, live state, snapshots)
     else if (kv_shared_) m_.kv_release(r.slot);  // the pages back to the pool
@@ -1678,6 +1755,32 @@ BatchEngine::Req *BatchEngine::pc_leader(const std::vector<int32_t> &T, int tier
 int BatchEngine::place(const std::vector<int32_t> &T, int64_t need, bool use_cache, int64_t &start, int tier) {
   start = 0;
   if (free_slots_.empty()) return -1;
+  // The controller verifies the SHA256 of the frozen little-endian ID file.
+  // Check the *entire* admitted native token vector byte-for-byte, not request ID,
+  // slot number or token count alone. Both placement branches resolve the actual slot.
+  static const auto probe=[] {
+    std::vector<int32_t> ids;
+    if(const char *file=std::getenv("XEN_PF_TOPK_PROMPT_IDS"); file && *file) {
+      static_assert(std::endian::native==std::endian::little);
+      std::ifstream f(file,std::ios::binary);
+      ids.resize(util::ruby_round::context_rows()>0?static_cast<size_t>(util::ruby_round::context_rows()):261744);
+      if(!f.read(reinterpret_cast<char *>(ids.data()),ids.size()*sizeof(int32_t)) || f.peek()!=EOF)
+        throw std::runtime_error("prefill top-k replay: invalid frozen native prompt fixture");
+      const char *hash=std::getenv("XEN_PF_TOPK_PROMPT_SHA256");
+      const auto ctx=util::ruby_round::context_rows();
+      const auto h=hash?std::string_view(hash):std::string_view{};
+      if((ctx==0 && h!="9a8f92205d01fadbd19fe0fc87fb782ce53087a1f88cb33dcc07884d7838be50") ||
+         (ctx!=0 && ((ctx!=8200 && ctx!=131072 && ctx!=261744) || h.size()!=64 || h.find_first_not_of("0123456789abcdef")!=h.npos)))
+        throw std::runtime_error("prefill top-k replay: wrong frozen prompt identity");
+    }
+    return ids;
+  }();
+  auto tag_probe=[&](int slot) {
+    if(probe.empty()) return;
+    const bool match=T==probe;
+    m_.note_prefill_probe_prompt(slot,match);
+    if(match) std::fprintf(stderr,"PF_TOPK_TAG slot=%d rows=%zu id_sha256=%s\n",slot,T.size(),std::getenv("XEN_PF_TOPK_PROMPT_SHA256"));
+  };
   if (!pc_on_) {  // the last free slot, a fresh sequence
     const int slot = free_slots_.back();
     if (kv_shared_ && !m_.kv_reserve(slot, need)) return -1;
@@ -1685,6 +1788,8 @@ int BatchEngine::place(const std::vector<int32_t> &T, int64_t need, bool use_cac
     m_.begin(slot);  // a fresh sequence (it drops the slot's pages) ...
     if (tiers_ > 1) m_.set_rope_tier(slot, tier);
     if (kv_shared_ && !m_.kv_reserve(slot, need)) throw std::logic_error("batch engine: pages taken between reserve and begin");  // ... taken again
+    tag_probe(slot);
+    m_.note_prompt(slot,static_cast<int64_t>(T.size()),0);
     return slot;
   }
   // 1. the longest usable cached prefix: a parked slot's live state or any slot's snapshot
@@ -1794,12 +1899,16 @@ int BatchEngine::place(const std::vector<int32_t> &T, int64_t need, bool use_cac
   if (pc_log && best.src >= 0)
     std::fprintf(stderr, "prefix: %lld of %lld prompt tokens from slot %d (%s) into slot %d\n", static_cast<long long>(start),
                  static_cast<long long>(TN), best.src, in_place ? (best.snap < 0 ? "live state" : "snapshot, in place") : "snapshot, copied", dst);
+  tag_probe(dst);
+  m_.note_prompt(dst,TN,start);
   return dst;
 }
 
 void BatchEngine::loop() {
   std::vector<Submit> submits;
   std::vector<uint64_t> cancels;
+  const bool bench_hold5=util::env_flag("XEN_BENCH_HOLD_DECODE_5X176073");
+  bool bench_released5=false;  // one frozen cohort per fresh benchmark server
   log_at_ = clock::now();
   while (true) {
     {
@@ -2029,6 +2138,7 @@ void BatchEngine::loop() {
       r->slot = slot;
       r->tier = tier;
       r->prefilled = static_cast<size_t>(start);
+      r->cached = static_cast<size_t>(start);
       r->pos = start;
       r->prompt_len = r->prompt.size();
       if (cfg_.lookup > 0) {  // the lookup's history starts from the prompt (a resumed request's holds its output too)
@@ -2064,7 +2174,13 @@ void BatchEngine::loop() {
         else {
           const Req &b = *active_[best];
           const size_t lr = r.prompt.size() - r.prefilled, lb = b.prompt.size() - b.prefilled;
-          if (lr < lb || (lr == lb && r.t_admit < b.t_admit)) best = i;
+          // A fixed-length benchmark burst needs its equal-length prompts to reach
+          // decode together. Leave the stock shortest-remaining rule unchanged
+          // outside that explicitly opted-in cohort.
+          static const bool fair_burst = util::env_flag("XEN_BENCH_FAIR_PREFILL");
+          if (fair_burst && r.prompt.size() == b.prompt.size()) {
+            if (r.prefilled < b.prefilled || (r.prefilled == b.prefilled && r.t_admit < b.t_admit)) best = i;
+          } else if (lr < lb || (lr == lb && r.t_admit < b.t_admit)) best = i;
         }
       }
       // The call's tail: the prompt's position advances; the last prompt row gives the first token.
@@ -2078,6 +2194,11 @@ void BatchEngine::loop() {
         Req &r = *active_[i];
         r.prefilled += static_cast<size_t>(n);
         r.pos += n;
+        if (util::env_flag("XEN_BENCH_VERIFY_LOG")) {
+          const auto ns = [](clock::time_point t) { return static_cast<long long>(std::chrono::duration_cast<std::chrono::nanoseconds>(t.time_since_epoch()).count()); };
+          std::fprintf(stderr, "BENCH_PREFILL request=%llu slot=%d submit_ns=%lld admit_ns=%lld start_ns=%lld end_ns=%lld rows=%d through=%zu model_ms=%.6f\n",
+                       static_cast<unsigned long long>(r.id), r.slot, ns(r.t_submit), ns(r.t_admit), ns(t0), ns(t_tail), n, r.prefilled, ms);
+        }
         // the cut's snapshot captured inside this call (before the call end's: positions ascend)
         if (r.snap_armed > 0) {
           if (pc_on_ && r.snap_armed >= cfg_.prefix_min_tokens) pc_snapshot(r.slot, r.snap_armed, r.snap_armed == pc_cut(r), true);
@@ -2170,7 +2291,17 @@ void BatchEngine::loop() {
         }
         pf_pend_.group.clear();
       };
-      if (pf_pend_.active && !pf_pend_.group.empty()) {
+      // XEN_PREFILL_SHARE=s (0<s<1): while other requests decode, prefill gets about s of the loop's wall time (a credit
+      // earned at s x loop time and spent by each prefill call / part); unset: one prefill call or part every loop.
+      static const double pf_share = [] { const char *v = std::getenv("XEN_PREFILL_SHARE"); return v && *v ? std::atof(v) : 0.0; }();
+      const bool pf_shared = decoding && pf_share > 0 && pf_share < 1;
+      const auto pf_now = clock::now();
+      if (!pf_shared) pf_credit_ms_ = 0;
+      else if (pf_loop_t_ != clock::time_point{}) pf_credit_ms_ = std::min(pf_credit_ms_ + pf_share * dsec(pf_now - pf_loop_t_).count() * 1e3, 250.0);
+      pf_loop_t_ = pf_now;
+      const bool pf_hold = pf_shared && pf_credit_ms_ < 0;
+      if (pf_hold) {
+      } else if (pf_pend_.active && !pf_pend_.group.empty()) {
         if (!pf_pend_.finished) {  // the next part (all the rest once nothing decodes)
           const auto ta = clock::now();
           pf_pend_.finished = m_.prefill_advance(decoding ? pf_pend_.layers : m_.prefill_layers());
@@ -2384,6 +2515,7 @@ void BatchEngine::loop() {
         complete(i, n, depth, rows_lp, fit, t0, dsec(clock::now() - t0).count() * 1e3, 1);
         }
       }
+      if (pf_shared && !pf_hold) pf_credit_ms_ -= dsec(clock::now() - pf_now).count() * 1e3;
     }
 
     // 4. one decode step over every request with a token to feed
@@ -2397,6 +2529,18 @@ void BatchEngine::loop() {
         if (!finished && r.prefilled == r.prompt.size() && r.next >= 0 &&
             !std::any_of(events_.begin(), events_.end(), [&](const Event &e) { return e.id == r.id; }))
           dec.push_back(i);
+      }
+      if(bench_hold5 && !bench_released5) {
+        const auto frozen=[&](size_t i){return active_[i]->prompt.size()==176073;};
+        const auto ready=std::count_if(dec.begin(),dec.end(),frozen);
+        if(ready==5) {
+          bench_released5=true;
+          std::fprintf(stderr,"BENCH_HOLD_DECODE_RELEASE slots=5 prompt=176073\n");
+        } else {
+          // The production policy and unrelated short warmup requests are
+          // unchanged. Delay only this opt-in cohort's first verifier call.
+          dec.erase(std::remove_if(dec.begin(),dec.end(),frozen),dec.end());
+        }
       }
       if (!dec.empty()) dec = kv_ensure(dec, done);  // the step's pages (a shared pool may preempt)
       if (!dec.empty() && m_.draft_depth(1) > 0) {
