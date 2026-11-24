@@ -629,7 +629,7 @@ class Model {
   struct Graphs;
   std::unique_ptr<Graphs> graphs_;
   bool graph_step() const;
-  void run_graph(int rows, int seg_rows);
+  void run_graph(int rows, int seg_rows, int pb = -1);  // pb = the step's attention bound (bucketed); -1 = cap
   int graphs_recorded() const;
   // one sequence's host state; pos_ .. pf_last_row_ below mirror the current slot's (save_seq / load_seq)
   struct Seq {
