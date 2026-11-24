@@ -1,3 +1,0 @@
-ROUTE_CASE {"accepted_cache_tokens": 0, "arm": "xmx", "case": "near", "decode_rank_layer_pairs": 32, "decode_routes": ["trained_qsa"], "generation": 3, "prefill_rank_layer_pairs": 32, "prefill_routes": ["dense", "trained_qsa"], "prompt": 176073, "remaining_prefill_rows": 176073, "request": 6, "round": "cold", "slot": 0}
-ROUTE_CASE {"accepted_cache_tokens": 176000, "arm": "xmx", "case": "near", "decode_rank_layer_pairs": 32, "decode_routes": ["dense"], "generation": 4, "prefill_rank_layer_pairs": 32, "prefill_routes": ["dense"], "prompt": 176073, "remaining_prefill_rows": 73, "request": 8, "round": "repeat", "slot": 0}
-ROUTE_CASE_GATE=PASS

@@ -7,10 +7,6 @@ offline.
 - [Easy mode](#easy-mode): the README's [performance table](../../README.md#performance), files ending in `-easy.html`.
 - [Hard mode](#hard-mode): the [hard-mode table](../performance-hard-mode.md), the other files.
 
-## Reproduction requirement for PR results
-
-New PR results packages must provide copy-paste server-launch and matching benchmark commands beside each result group, including a separate baseline and when the preferred settings apply. Record the exact revision/binary, hardware and TP, model/quantization, context and KV capacity, configured slots versus actually active users, drafter/cache settings, nondefault flags and environment, fixture identity and correctness limits. Machine-local paths may be placeholders, but required artifacts and their hashes must be identified. Derive commands from the run receipts; mark historical runs and unavailable inputs explicitly rather than inventing parameters. Link one results entry from the top-level README when applicable; extend the existing entry rather than adding duplicate links.
-
 ## Easy mode
 
 All runs are from 2026-11-21 on the release build of the engine: `xenithium-bench run --mode easy --suite standard`
