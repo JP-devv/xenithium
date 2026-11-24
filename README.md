@@ -2,8 +2,6 @@
 
 **A native C++20 LLM inference engine and OpenAI-compatible server for Intel Arc Pro B-series GPUs (Battlemage / Xe2).**
 
-**[Benchmark results and recommended settings](docs/benchmark/pr4-dense-k8v4-tree/README.md)** — PR #4 review and planned qualification; GPU results are pending.
-
 - **Native all the way down.** Kernels are SYCL + ESIMD, compiled ahead of time for `bmg`. Memory and queues go
   through Level Zero directly, and the tensor-parallel exchange between cards is the engine's own (no oneCCL).
 - **No Python at runtime.** Tokenizer, chat-template renderer (an in-engine Jinja interpreter), reasoning and
