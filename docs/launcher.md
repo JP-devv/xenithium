@@ -213,7 +213,7 @@ clears the line), `↑` `↓` PgUp PgDn / `End` scroll the transcript, `F4` star
   create; a model switch there changes `XEN_MODEL` in place). `scripts/start-server.sh` reads one with
   `SERVE_ENV=profiles/NAME.env` (the model's own file still fills in the keys it does not set).
 - `build/launch/`: `launch.env` (the values of the last launch, every setting written out, `XEN_MODEL_ENV=` empty),
-  `server.log` (its output; the one before is `server.log.1`), `server.pid`, `preview.env`,
+  `server.log` (its output; the previous launch's is kept as `server.prev.log`), `server.pid`, `preview.env`,
   `bench.log` (the Benchmark tab's run output, tailed in its log panel), `rank.log` / `rank.pid` (a
   make-hot-rank.sh run).
 - `.cache/experts/<model folder>/`: `hot-rank.xrc` (the ranking, recorded by the server while it serves);

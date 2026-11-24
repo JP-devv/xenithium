@@ -2191,7 +2191,8 @@ struct App::Impl {
       say(err, th::err, 6);
       return;
     }
-    if (is_file(logf)) std::rename(logf.c_str(), (logf + ".1").c_str());
+    // the previous launch's output is kept once, as server.prev.log (still a .log for editors and viewers)
+    if (is_file(logf)) std::rename(logf.c_str(), join_path(cfg.state_dir, "server.prev.log").c_str());
     const pid_t pid = spawn_server(cfg.root, env, logf, err);
     if (pid < 0) {
       say(err, th::err, 6);
