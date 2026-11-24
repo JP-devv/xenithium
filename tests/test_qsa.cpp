@@ -1065,7 +1065,8 @@ void test_rows(xenithium::Fabric &f, const Model &m, k::QsaKv kv, int p0, int M,
 // (the decode's tiling and the 8-tile prefill attention), every card's out identical, the two cards of a kv head the
 // same K / V pools. Integer data (make_int_model): the projections are exact on any split.
 // split: the KV split by tokens (the two-level merge: attn held to a bound; each card's half pages == one card's rows at
-// the positions it owns).
+// the positions it owns); its prefill instance walks a row's whole half and sends the states itself (p0 0: a row
+// without a token on one side).
 void test_rows_cards(xenithium::Fabric &f, k::QsaKv kv, int p0, int M, bool split = false) {
   const Model m = make_int_model(2560, 29);
   const int C = static_cast<int>(f.size()), H = m.s.hidden, B = k::kQsaRowsBatch, R4 = M + 4;
@@ -1238,7 +1239,7 @@ void test_rows_cards(xenithium::Fabric &f, k::QsaKv kv, int p0, int M, bool spli
   char what[480];
   if (split) {
     std::snprintf(what, sizeof what,
-                  "integer data, %s KV, four cards, KV split by tokens, qsa_rows %d rows at %d (decode tiling and 8-tile): each card's o_proj input vs the "
+                  "integer data, %s KV, four cards, KV split by tokens, qsa_rows %d rows at %d (decode tiling and the whole-half prefill instance): each card's o_proj input vs the "
                   "one-card rows of its heads: %s; every card's out identical; each card's half pages == one card's K / V at its positions; no mailbox timeout",
                   kv_name(kv), M, p0, split_cmp.text().c_str());
     expect(split_cmp.ok(1.0 / 64, 0.02) && out_eq && kv_eq && err == 0, what);
@@ -1916,6 +1917,7 @@ int main() {
       for (const k::QsaKv kv : {k::QsaKv::i8, k::QsaKv::bf16, k::QsaKv::i8v4}) test_cards_split(f4, model, kv, kv_name(kv));
       test_rows_cards(f4, k::QsaKv::i8, 2000, 300, true);
       test_rows_cards(f4, k::QsaKv::i8v4, 2000, 300, true);
+      test_rows_cards(f4, k::QsaKv::i8, 0, 300, true);  // from position 0: its row has no token on side 1 (empty states still cross)
       for (const k::QsaKv kv : {k::QsaKv::i8, k::QsaKv::i8v4}) test_trees(f4, 4, model, kv, {3000, 16400}, "trees, KV split by tokens", true);
     } else {
       std::printf("[SKIP] four-card QSA: %zu card(s) visible\n", loader.size());

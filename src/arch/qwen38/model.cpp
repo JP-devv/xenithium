@@ -1764,16 +1764,27 @@ double Model::vram_free_mib() const {
   return f;
 }
 
+int Model::graphs_alive() const { return static_cast<int>((graphs_ ? graphs_->map.size() : 0) + (mtp_ ? mtp_->graphs.size() : 0)); }
+
 int Model::graph_room(bool all) {
   constexpr double kRoom = kGraphRoomMiB;
   const double f0 = vram_free_mib();
   if (!all && (f0 < 0 || f0 >= kRoom)) return 0;
-  for (int c = 0; c < nc_; ++c) fab_.compute(c).wait();  // no evicted graph may be in flight
   // A destroyed graph's memory goes back to the driver's pool, which the next recording reuses, not to what sysman
-  // reports free. So below the room each new graph evicts kGraphRoomEvict others (the least recently replayed); all =
-  // every one.
+  // reports free: once below the room, the card stays there. Evicting kGraphRoomEvict per new graph for good would
+  // shrink the population by one per first use until every step records its graph again (a server that has seen
+  // enough step shapes: decode at half speed). So the population shrinks only to its keep mark - the pool then holds
+  // the difference as slack for graphs larger than the ones they replace - and is held there. A failed recording
+  // (all) means the mark was too high for the pool: every graph goes and the mark drops.
+  const int alive = graphs_alive();
+  const bool first = graph_keep_ < 0;
+  if (first && !all) graph_keep_ = std::max(kGraphKeepMin, alive * kGraphKeepNum / kGraphKeepDen);
+  if (all && graph_keep_ > 0) graph_keep_ = std::max(kGraphKeepMin, std::min(graph_keep_, alive) * kGraphKeepNum / kGraphKeepDen);
+  const int want = all ? alive : alive > graph_keep_ ? std::min(kGraphRoomEvict, alive - graph_keep_ + 1) : alive == graph_keep_ ? 1 : 0;
+  if (want == 0) return 0;
+  for (int c = 0; c < nc_; ++c) fab_.compute(c).wait();  // no evicted graph may be in flight
   int n = 0;
-  while (all || n < kGraphRoomEvict) {
+  while (n < want) {
     uint64_t best = UINT64_MAX;
     int which = -1;
     decltype(graphs_->map.begin()) sit;
@@ -1789,10 +1800,10 @@ int Model::graph_room(bool all) {
     else mtp_->graphs.erase(mit);
     ++n;
   }
-  if (n && graphs_evicted_ == 0)
-    std::fprintf(stderr, "qwen38: graphs: below %.0f MiB of free VRAM on the tighter card (%.0f): each new graph now evicts %d least recently used\n", kRoom, f0,
-                 kGraphRoomEvict);
-  if (all) std::fprintf(stderr, "qwen38: graphs: a recording failed (%.0f MiB free): all %d evicted\n", f0, n);
+  if (first && !all)
+    std::fprintf(stderr, "qwen38: graphs: below %.0f MiB of free VRAM on the tighter card (%.0f) with %d graphs: new graphs now replace the least recently used, %d kept\n",
+                 kRoom, f0, alive, graph_keep_);
+  if (all) std::fprintf(stderr, "qwen38: graphs: a recording failed (%.0f MiB free): all %d evicted, %d kept from here\n", f0, n, graph_keep_);
   graphs_evicted_ += n;
   return n;
 }

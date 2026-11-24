@@ -45,6 +45,8 @@
 // mailbox (QsaScratch::pair) and combines its own heads' two halves, side 0's first, before the gate. Draft-tree rows
 // keep their K / V in a step area on both cards (QsaCache::tree_row0) and qsa_kv_move writes the accepted path into the
 // owner's slots. The two-level merge rounds differently from one card's: the split is a numerics change.
+// The prefill (qsa_rows) walks a row's half in one work-group (kQsaSplitPfTiles tiles, online softmax) that sends the
+// states itself, one launch over the call's rows; a decode step folds its one-tile work-groups' partials (merge_send).
 //
 // Speculative rows need no accept word: everything is addressed by position, so a rejected row's
 // K / V / raw index key / compressed key is rewritten when the real token at that position comes.
@@ -313,8 +315,8 @@ struct QsaRowsScratch {
   // none ran), then attention for every row.
   int sel_lo = 0, sel_hi = 0;
   const std::function<void(const sycl::event *)> *between = nullptr;
-  // The split by tokens: as QsaScratch's, for the call's m rows (each batch sends its rows' states, one combine after
-  // the last batch); the mailbox's rows_max >= m.
+  // The split by tokens: as QsaScratch's, for the call's m rows (the attention sends every row's states, then one
+  // combine); the mailbox's rows_max >= m.
   float *pend = nullptr;  // [rows_max][hq][kQsaPairWords]
   QsaPairMail pair{};
   int pair_parity = 0;

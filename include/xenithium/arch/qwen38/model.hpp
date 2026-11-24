@@ -65,7 +65,11 @@ inline constexpr int kDenseReadAhead = 16;
 inline constexpr int kExpertPackThreads = 8;
 // The VRAM a first-use graph recording keeps free on the tighter card (graph_room)
 inline constexpr double kGraphRoomMiB = 64;
-inline constexpr int kGraphRoomEvict = 2;  // graphs evicted per new one below the room
+// Below the room a new graph first costs kGraphRoomEvict others, so the driver's pool gains a graph's memory of slack
+// per recording, until the population is kGraphKeepNum / kGraphKeepDen of what it was when the room ran out (at least
+// kGraphKeepMin); from there it is held: one out per new graph.
+inline constexpr int kGraphRoomEvict = 2;
+inline constexpr int kGraphKeepNum = 3, kGraphKeepDen = 4, kGraphKeepMin = 16;
 // kMaxCards: the most cards the model runs on (TP4); per-card arrays hold this many entries. kPfSplitMinRows: a prefill
 // call's two-card sums (GDN, QSA, MoE) split over the cards from this many rows (the generic kPairSplitMinRows is 64),
 // with the same bits; calls of fewer rows stay on the rows wire.
@@ -790,10 +794,14 @@ class Model {
   void pf_tr(const std::string &name, const sycl::ext::oneapi::bfloat16 *dev, int width);
   void run_graph(int rows, int seg_rows, int64_t need);
   void record_step_graph(int rows, int seg_rows, int64_t bound);  // from the current host state, not run
-  // Graphs hold VRAM outside the placement. Before a graph is recorded on first use, graph_room() evicts
-  // kGraphRoomEvict of the least recently replayed step / drafter graphs (queues drained first) when the tighter card
-  // has less than kGraphRoomMiB free; all = evict every graph. Returns the graphs evicted.
+  // Graphs hold VRAM outside the placement. Before a graph is recorded on first use, graph_room() evicts the least
+  // recently replayed step / drafter graphs (queues drained first) when the tighter card has less than kGraphRoomMiB
+  // free: kGraphRoomEvict of them while the population is above its keep mark (graph_keep_, set when the room first
+  // runs out), one at the mark, none below it (a destroyed graph's memory stays in the driver's pool for the next
+  // recording). all = evict every graph (a recording failed: the mark drops too). Returns the graphs evicted.
   int graph_room(bool all = false);
+  int graphs_alive() const;  // step + MTP layer graphs held
+  int graph_keep_ = -1;      // the population held below the room; < 0: the room has not run out yet
   double vram_free_mib() const;  // the tighter card (sysman); < 0 unknown
   const l0::Loader *loader_ = nullptr;
   uint64_t graph_tick_ = 0;
