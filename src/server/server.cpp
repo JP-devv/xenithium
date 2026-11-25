@@ -41,7 +41,7 @@ using json::Value;
 
 namespace {
 
-constexpr const char* kVersion = "0.2.0";
+constexpr const char* kVersion = "0.2.0-xq.11";
 constexpr size_t kMaxChoices = 128;  // OpenAI's `n` bound
 
 std::string random_hex(size_t n) {

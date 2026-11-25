@@ -128,7 +128,9 @@ sycl::event gqa_attn_seg_sel_xl(sycl::queue &q, const GqaShape &s, int rows, con
 
 // The same grouped attention body and K8V4 operands as the dense path.
 // Only the logical-page walk and four-token mask differ; use the requested
-// native QK / P numerics, not a separate attention implementation.
+// native QK / P numerics, not a separate attention implementation. The
+// one-row group still uses the stock tree's virtual-depth, ancestor overlay
+// and causal cut when kSegTree is set. Its page mask pins the path tiles.
 sycl::event gqa_attn_seg_trained_xl(sycl::queue &q, const GqaShape &s, int rows, const GqaCache &c, const GqaStep &step,
                                    const gqa_bf16 *qb, float *part, int ns) {
   using gqa_detail::attn_seg;

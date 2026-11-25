@@ -13,7 +13,16 @@
 namespace xenithium::kernels {
 
 inline constexpr int kTrainedQsaTopBlocks = 512;
-inline constexpr int kTrainedQsaPages = kTrainedQsaTopBlocks + 1;
+// A verifier tree's mandatory ancestor suffix is at most 16 tokens, so it
+// intersects at most two logical pages besides the selected committed pages.
+// A plan row: kTrainedQsaPlanEntries entries (page entries, or gather tiles: bit 31, tile index << 16, valid-block
+// mask), then the row's kTrainedQsaTopBlocks selected block ids the gather tiles read. Page-only plans use up to
+// kTrainedQsaTopBlocks + 2 entries of the row.
+inline constexpr int kTrainedQsaPlanEntries = 48;
+inline constexpr int kTrainedQsaPages = kTrainedQsaPlanEntries + kTrainedQsaTopBlocks;
+inline constexpr int32_t kTrainedQsaGather = int32_t(0x80000000u);
+constexpr bool trained_qsa_is_gather(int32_t entry) { return entry < 0; }
+constexpr int trained_qsa_gather_tile(int32_t entry) { return (entry >> 16) & 0x7fff; }
 static_assert(kQsaPage == 64 && kQsaCompress == 4 && kQsaPageBlocks == 16 && kQsaMaxTokens / kQsaPage <= 32768);
 
 // Each entry has a logical page (high bits) and the 16 visible 4-token
@@ -45,6 +54,30 @@ inline int trained_qsa_pack_row(int pos, const int32_t *ids, int n, int32_t *dst
     const int page = b / kQsaPageBlocks, bit = 1 << (b % kQsaPageBlocks);
     if (count == 0 || trained_qsa_page(dst[count - 1]) != page) dst[count++] = page << 16;
     dst[count - 1] |= bit;
+  }
+  return count;
+}
+
+// Rank only complete committed blocks (strictly below start/4). The
+// partial seam block and every virtual ancestor lane from start through
+// vpos are mandatory. The stock tree walk maps those lanes to the actual
+// path rows, so this mask must never encode a speculative physical slot.
+inline int trained_qsa_pack_tree_row(int start, int vpos, const int32_t *ids, int n, int32_t *dst) {
+  if (start<0 || vpos<start || vpos>=kQsaMaxTokens || vpos-start>=16) return -1;
+  const int prior=start/kQsaCompress, last=vpos/kQsaCompress;
+  if (n!=(prior<kTrainedQsaTopBlocks?prior:kTrainedQsaTopBlocks)) return -1;
+  int prev=-1;
+  for(int i=0;i<n;++i) {
+    if(ids[i]<=prev || ids[i]>=prior) return -1;
+    prev=ids[i];
+  }
+  if(n==prior) return 0;  // every committed block and the entire path are visible
+  int count=0;
+  for(int i=0;i<n+last-prior+1;++i) {
+    const int b=i<n?ids[i]:prior+i-n;
+    const int page=b/kQsaPageBlocks,bit=1<<(b%kQsaPageBlocks);
+    if(!count || trained_qsa_page(dst[count-1])!=page) dst[count++]=page<<16;
+    dst[count-1]|=bit;
   }
   return count;
 }

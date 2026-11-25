@@ -65,6 +65,12 @@ inline constexpr float kQkScale = D == 256 ? 1.f / 16.f : D == 128 ? 0.088388347
 
 inline int cut_tps(int ntiles) { return (ntiles + kGqaSplits - 1) / kGqaSplits; }
 inline int cut_nsp(int ntiles, int tps) { return (ntiles + tps - 1) / tps; }
+#ifndef XEN_TRAINED_SEL_TPS
+#define XEN_TRAINED_SEL_TPS 4
+#endif
+// a trained selected list (gather plans: ~34 tiles) runs at least this many tiles per split: one work-group per tile
+// paid its q load, partial store and merge read for 64 tokens of work
+inline int sel_tps(int ntiles) { const int t = cut_tps(ntiles); return t > XEN_TRAINED_SEL_TPS ? t : XEN_TRAINED_SEL_TPS; }
 
 // C [NH][16] (+)= A [NH][16 k] . B [16 k][16] in DPAS calls of <= 8 rows (rows are independent); A at offset ao of a.
 template <int NH, int AN, int B = 0>
@@ -271,7 +277,7 @@ sycl::event attn_seg(sycl::queue &q, const GqaShape &s, int rows, const GqaCache
         sp = tb / ts + se;
       }
     }
-    const int tps0 = cut_tps(pick ? nsel : (vpos[0] + 1 + kTile - 1) / kTile);
+    const int tps0 = (Blocks && pick) ? sel_tps(nsel) : cut_tps(pick ? nsel : (vpos[0] + 1 + kTile - 1) / kTile);
     int tps = 0, ntok_max = 0, ntl_max = 0;
     bool any = false;
     // windowed (arch flint): split sp = the one tile wt of the group with wt % kGqaWinSplits == sp (the group's tiles
@@ -289,7 +295,7 @@ sycl::event attn_seg(sycl::queue &q, const GqaShape &s, int rows, const GqaCache
     for (int p = 0; p < RM; ++p) {
       const bool live = r_lo + p < r_hi;
       const int ntok = vpos[p] + 1, lo = winl && ntok > win ? ntok - win : 0;
-      const int ntiles = winl ? wt + 1 : (pick ? nsel : (ntok + kTile - 1) / kTile), t = winl ? 1 : cut_tps(ntiles);
+      const int ntiles = winl ? wt + 1 : (pick ? nsel : (ntok + kTile - 1) / kTile), t = winl ? 1 : ((Blocks && pick) ? sel_tps(ntiles) : cut_tps(ntiles));
       const bool in = live && (winl ? (wt >= lo / kTile && wt <= (ntok - 1) / kTile) : ((t == tps0) == (cls == 0)));
       if (!winl && in) tps = t;
       ntk[p] = ntok;
@@ -458,8 +464,9 @@ sycl::event attn_seg(sycl::queue &q, const GqaShape &s, int rows, const GqaCache
 #pragma unroll 1
     for (int u = -1; u < (treeg && !TR ? RM : 0); ++u) {  // u -1: the shared unit; u >= 0: side row u's own view (tree segments)
       const int entry = pick ? slist[si] : 0;
-      const int tile = pick ? (Blocks ? trained_qsa_page(entry) : entry) : si;
-      const int t0 = tile * kTile;
+      const bool gat = Blocks && pick && trained_qsa_is_gather(entry);  // 16 selected 4-token blocks of any pages
+      const int tile = gat ? -1 : (pick ? (Blocks ? trained_qsa_page(entry) : entry) : si);
+      const int t0 = gat ? 0 : tile * kTile;  // a gather tile: committed history, every lane visible to every row
       // TR: one unit per tile; a side work-group's row (p 0) carries its path from tb on
       const int pu = TR ? (sidewg && tile >= tb ? 0 : -1) : u;
       bool on[RM];  // the unit's rows (the group's active rows on the shared unit)
@@ -477,9 +484,34 @@ sycl::event attn_seg(sycl::queue &q, const GqaShape &s, int rows, const GqaCache
       if (!anyu) continue;
       const int ntm = treeg ? ntu : ntok_max;  // chains: the group's last token
       const int nt = ntm - t0 < kTile ? ntm - t0 : kTile;  // Sel: <= 0 past the group's rows
-      const size_t slot = Blocks ? trained_qsa_page_base(pages, tile, hkv, kvh)
+      const size_t slot = Blocks ? (gat ? size_t(0) : trained_qsa_page_base(pages, tile, hkv, kvh))
                                  : (static_cast<size_t>(pages[ring ? tile % ring : tile]) * hkv + kvh) * kPage;
       const bool mine = tq * kTW < nt;  // this item's token quarter holds tokens of the tile
+      // gather: each block's page-start slot and row in its page, and every lane's slot (dead blocks read block 0)
+      esimd::simd<uint32_t, 16> gps(0), gy(0);
+      esimd::simd<uint32_t, kTile> gsl(0);
+      if constexpr (Blocks) {
+        if (gat) {
+          const int32_t *gid = slist + kTrainedQsaPlanEntries + trained_qsa_gather_tile(entry) * 16;
+          esimd::simd<int32_t, 16> bid = esimd::block_load<int32_t, 16>(gid);
+          const esimd::simd<uint32_t, 16> jl(0, 1);
+          bid.merge(esimd::simd<int32_t, 16>(bid[0]), ((esimd::simd<uint32_t, 16>(trained_qsa_mask(entry)) >> jl) & 1u) == 0u);
+          const esimd::simd<int32_t, 16> pg = esimd::gather<int32_t, 16>(pages, esimd::simd<uint32_t, 16>(bid >> 4) * 4u);
+          gps = (esimd::simd<uint32_t, 16>(pg) * static_cast<uint32_t>(hkv) + static_cast<uint32_t>(kvh)) * static_cast<uint32_t>(kPage);
+          gy = esimd::simd<uint32_t, 16>(bid & 15) * 4u;
+#pragma unroll
+          for (int j = 0; j < 16; ++j) gsl.template select<4, 1>(j * 4) = esimd::simd<uint32_t, 4>(0, 1) + static_cast<uint32_t>(gps[j] + gy[j]);
+        }
+      }
+      // gather: this item's quarter (blocks 4 tq .. 4 tq + 3) as 4-row K / V int4 loads from their pages
+      auto gather_kv = [&](esimd::simd<uint8_t, kTW * kDW> &rk, esimd::simd<uint8_t, kTW * kDW / 2> &rv) SYCL_ESIMD_FUNCTION {
+#pragma unroll
+        for (int jj = 0; jj < 4; ++jj) {
+          const uint32_t ps = gps[tq * 4 + jj], y = gy[tq * 4 + jj];
+          rk.template select<4 * kDW, 1>(jj * 4 * kDW) = esimd::load_2d<uint8_t, kDW, 4>(kp + static_cast<size_t>(ps) * kD, kD - 1, kPage - 1, kD - 1, dq * kDW, y);
+          rv.template select<4 * kDW / 2, 1>(jj * 4 * kDW / 2) = esimd::load_2d<uint8_t, kDW / 2, 4>(vp + static_cast<size_t>(ps) * (kD / 2), kD / 2 - 1, kPage - 1, kD / 2 - 1, dq * kDW / 2, y);
+        }
+      };
       // side row u's path lanes in this tile: i in [ilo, ihi) at lane tp0 + i - t0
       int ilo = 0, ihi = 0;
       uint64_t uanc = 0;
@@ -554,6 +586,19 @@ sycl::event attn_seg(sycl::queue &q, const GqaShape &s, int rows, const GqaCache
                   if (static_cast<size_t>(sq[r]) != slot + static_cast<size_t>(tq * kTW + r))
                     overlay_v4_lane(vt, static_cast<size_t>(sq[r]), r);
               } else load_rows(vp, vt);
+            }
+          } else if (gat) {
+            if constexpr (Blocks) {
+              esimd::simd<uint8_t, kTW * kDW> rk;
+              esimd::simd<uint8_t, kTW * kDW / 2> rv;
+              gather_kv(rk, rv);
+              auto r2 = rk.template bit_cast_view<int8_t, kTW, kDW>();
+#pragma unroll
+              for (int dc = 0; dc < kDc; ++dc) {
+                const esimd::simd<int8_t, 256> sb = r2.template select<kTW, 1, 16, 1>(0, dc * 16);
+                kt.template select<256, 1>(dc * 256) = esimd::simd<float, 256>(sb);
+              }
+              vt = unpack_v4(rv);
             }
           } else {
             kt = load_tile(kp + slot * kD * kEB);
@@ -633,6 +678,12 @@ sycl::event attn_seg(sycl::queue &q, const GqaShape &s, int rows, const GqaCache
                 }
               }
             }
+          } else if (gat) {
+            if constexpr (Blocks) {
+              esimd::simd<uint8_t, kTW * kDW / 2> rv;
+              gather_kv(raw, rv);
+              vt = unpack_v4(rv);
+            }
           } else {
             raw = esimd::load_2d<uint8_t, kDW, kTW>(kp + slot * kD, kD - 1, kPage - 1, kD - 1, dq * kDW, tq * kTW);
             if constexpr (V4) vt = load_v4(vp + slot * (kD / 2));
@@ -677,7 +728,7 @@ sycl::event attn_seg(sycl::queue &q, const GqaShape &s, int rows, const GqaCache
         if constexpr (NH % 2)  // odd NH (grp 7 at one row): the last head's 16 partials
           esimd::slm_block_store<float, 16>(so(kAOff + (tq * kDQ + dq) * NH * 16 + (NH - 1) * 16), spd.template select<16, 1>((NH - 1) * 16));
       }
-      if (pf && u < 0 && ch == 0 && !sidewg && si + 1 < tile1) {  // the next tile's K / V blocks into L2 while this one computes
+      if (pf && u < 0 && ch == 0 && !sidewg && si + 1 < tile1 && !gat && !(Blocks && pick && trained_qsa_is_gather(slist[si + 1]))) {  // the next tile's K / V blocks into L2 while this one computes
         const int next = pick ? slist[si + 1] : 0;
         const int ntile = pick ? (Blocks ? trained_qsa_page(next) : next) : si + 1;
         const size_t nslot = (static_cast<size_t>(pages[ring ? ntile % ring : ntile]) * hkv + kvh) * kPage;
@@ -711,6 +762,9 @@ sycl::event attn_seg(sycl::queue &q, const GqaShape &s, int rows, const GqaCache
             ks = esimd::block_load<float, kTile>(ksp + slot);
             vs = esimd::block_load<float, kTile>(vsp + slot);
           }
+        } else if (gat) {
+#pragma unroll
+          for (int h2 = 0; h2 < 2; ++h2) ks.template select<32, 1>(h2 * 32) = esimd::gather<float, 32>(ksp, esimd::simd<uint32_t, 32>(gsl.template select<32, 1>(h2 * 32)) * 4u);
         } else {
           ks = esimd::block_load<float, kTile>(ksp + slot);
           if constexpr (!V4) vs = esimd::block_load<float, kTile>(vsp + slot);  // V4: V scales are folded in P . V
@@ -804,6 +858,7 @@ sycl::event attn_seg(sycl::queue &q, const GqaShape &s, int rows, const GqaCache
           const esimd::simd<int32_t, 16> tk(0, 1);
           // side path: remapped slots; chains and the shared tree unit: the tile is contiguous (coalesced)
           const esimd::simd<uint32_t, 16> soff =
+              gat ? esimd::simd<uint32_t, 16>(gsl.template select<16, 1>(tq * kTW)) * 16u + static_cast<uint32_t>(dq * 4) :
               pu >= 0 ? lane_slots(std::integral_constant<int, kTW>{}, tq * kTW) * 16u + static_cast<uint32_t>(dq * 4)
                       : (esimd::simd<uint32_t, 16>(tk) + static_cast<uint32_t>(slot + tq * kTW)) * 16u +
                             static_cast<uint32_t>(dq * 4);

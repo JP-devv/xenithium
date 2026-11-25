@@ -431,6 +431,10 @@ class Model {
   static constexpr int k_page_tokens = model::KvPages::kPageTokens;
 
   void reset();                             // a fresh sequence at position 0
+  void note_prefill_probe_prompt(int slot,bool match) {
+    if(match) pf_probe_slot_=slot;
+    else if(pf_probe_slot_==slot) pf_probe_slot_=-1;
+  }
   void note_prompt(int slot,int64_t total,int64_t restored);
   void step(const int32_t *ids, int rows);  // rows tokens at position(); waits for the cards
   void accept(int n);                       // keep the last step's first n rows (1..rows)
@@ -744,14 +748,18 @@ class Model {
   uint32_t pend_seq_ = 0; // a split sum whose peer rows the consumer has not waited for yet (0: none)
   double load_s_ = 0;
   std::unique_ptr<load::DenseStore> dense_;
-  std::unique_ptr<trained_qsa::Device> trained_qsa3_;  // optional trained index bank
-  int trained_qsa_prefill_min_ = 0;
-  std::array<uint64_t,2> trained_prefill_reported_{};
+  std::unique_ptr<trained_qsa::Device> trained_qsa3_;  // bank (legacy environment can limit this to layer 3)
+  int pf_probe_slot_=-1;
+  bool pf_probe_done_=false;
+  int trained_qsa_prefill_min_ = 0;  // opt-in XMX selector for cold, contiguous text history
   std::vector<int> trained_qsa_layer_;  // model layer -> bank index; -1 is stock dispatch
   static constexpr int kTrainedQsaShort=8192;
   std::vector<int64_t> qsa_covered_;  // contiguous logical token count; -1 means disabled/incomplete
+  void qsa_invalidate_snapshots(int slot,int64_t retained=-1);
   uint32_t qsa_stage_rows_=0;
-  bool qsa_step_sparse_=false;
+  bool qsa_step_sparse_=false;      // some segment of the step runs the trained sparse walk
+  uint32_t qsa_dense_rows_=0;       // rows of the step kept on the dense walk (plan count 0)
+  uint64_t qsa_sparse_slots_=0;     // slots whose segment is sparse this step (route log)
   std::unique_ptr<Head> head_;
   std::unique_ptr<HeadCands> cands_;  // the sampling candidates (logits_cands)
   std::unique_ptr<Mlp> mlp_;
@@ -818,6 +826,7 @@ class Model {
   // the snapshot store (host buffers allocated on first use, kept for reuse)
   struct SnapRec {
     int64_t pos = 0;
+    int qsa_owner=-1;  // exact complete groups still resident in this logical slot
     int64_t rope_delta = 0;
     int parity = 0;
     bool used = false;
@@ -839,6 +848,7 @@ class Model {
   std::vector<uint16_t> pf_rope_host_;
   std::vector<int32_t> vis_ids_;
   int64_t capt_rope_ = 0;
+  bool capt_qsa_ = false;  // the captured call appended trained-QSA keys from its start (covered==pos)
   void pf_rope_rows(const int32_t *ids, int m);  // pf_start: pf_.rope_rows / snap_rope, pf_rope_host_, the slot's delta
   int snap_cap_ = 0;
   std::vector<int32_t *> fork_pages_;  // [card] device: a fork's page pairs [src slot_pages][dst slot_pages]
