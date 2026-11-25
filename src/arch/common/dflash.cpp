@@ -853,14 +853,7 @@ std::vector<std::vector<int32_t>> DFlash::pass(const std::vector<Seg> &segs, int
   // sequences. Sampled segments draft the same tree (their noise unused: the engine walks the tree with the sampler's
   // draws). The tree holds at most the step's depth (block_rows - 1 drafts): a best-first tree of that budget, not the
   // preorder prefix of a larger one (several sequences draft shallower blocks).
-  // Trees if the step is within tree_seqs. At short context, also allow up to 4 streams: the extra tokens
-  // per step still pay. At long context the extra step time loses (same pattern as MTP past depth 3), so the
-  // configured cap stays (default 2: 4-user 128K drafts chains).
-  int64_t longest = 0;
-  for (const auto &g : segs) longest = std::max<int64_t>(longest, g.start);
-  const int tree_cap = std::max(1, opt_.tree_seqs);
-  const int tree_cap_eff = longest < 65536 ? std::max(tree_cap, 4) : tree_cap;
-  const int tree = opt_.tree > 0 && std::max(ns, step_seqs) <= tree_cap_eff && block_rows >= 2
+  const int tree = opt_.tree > 0 && std::max(ns, step_seqs) <= std::max(1, opt_.tree_seqs) && block_rows >= 2
                        ? std::min({block_rows > k::kStepRows8 ? opt_.tree_wide : opt_.tree, k::kTreeRows - 1, block_rows - 1})
                        : 0;
   tree_par_.assign(static_cast<size_t>(ns), {});
