@@ -89,6 +89,8 @@ int g_gdn_cap_rows = 4096, g_gdn_cap_every = 4;  // model --w4 PAT.., int8 plan 
 bool g_gdn_scan = true;
 // --pf-cold-stage N: ModelOptions:prefill_cold_stage for every model command.
 int g_pf_cold_stage = 16;
+// --pf-fetch N: ModelOptions:prefill_fetch for every model command.
+int g_pf_fetch = 0;
 // --moe-cpu off|auto|avx512|avx2 [off], --moe-cpu-pct P [70], --moe-cpu-threads N [8]: qwen38
 // ModelOptions:moe_cpu for probe model (the decode MoE's CPU path for cold experts; rank takes its own flags).
 std::string g_moe_cpu = "off";

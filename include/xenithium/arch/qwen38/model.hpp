@@ -84,6 +84,16 @@ inline constexpr int kPfSplitMinRows = 24;
 // two of them (a live resume) may get fewer lanes. The MoE runs as one call over every lane under kPfMoeTwoCallRows
 // rows, else as two.
 inline constexpr int kPfOwnerMinRows = 128;  // (= kernels::kPairSplitSendMinRows: the modules send their partials from there)
+// The layer-ahead fetch (ModelOptions::prefill_fetch) from this many rows in a call: a shorter call's layer computes for
+// less time than its copies take, and the copies hold up its sums' sends on the one copy engine (2,048-row calls: 1,806
+// -> 1,635 tok/s with the fetch, round 288).
+inline constexpr int kPfFetchMinRows = 4096;
+// The blobs per layer a 4,096-row call's fetch moves (in proportion to the call's rows, up to prefill_fetch): what the
+// host link carries per card while both cards compute a layer (round 288's sweep).
+inline constexpr int kPfFetchPer4K = 96;
+// The fetch's buffers per card, layer l's in buffer l % kPfFetchBufs: with three, layer l + 2's fetch starts behind
+// layer l's MoE (its buffer's last reader was layer l - 1's), two layers of compute before its own MoE.
+inline constexpr int kPfFetchBufs = 3;
 inline constexpr int kPfTwoLaneRows = 384;
 inline constexpr int kPfFourLaneRows = 1536;
 inline constexpr int kPfMoeTwoCallRows = 2560;
@@ -254,6 +264,12 @@ struct ModelOptions {
   // segments there once (most segments first) instead of reading it over PCIe once per segment; the
   // same bytes, so the same bits. 0 = off.
   int prefill_cold_stage = 16;
+  // The layer-ahead fetch (prefill.cpp pf_fetch_some): VRAM for this many cold expert blobs per layer, kPfFetchBufs
+  // times per card. A prefill call of kPfFetchMinRows rows and more on two cards copies each layer's cold experts (the
+  // first this many by id; the rest stay as they were) into a buffer on the copy engine while the layers before it
+  // compute, and the MoE reads them there: the host link's bytes overlap the compute instead of stalling the MoE. 0 =
+  // off. Taken from the hot experts (only when some are cold, with expert TP, without the MoE CPU path); the same bits.
+  int prefill_fetch = 0;
   // The PLE n-gram table from another checkpoint directory (the bake's int8 rows, or a BF16
   // source's table); empty = the model directory.
   std::string ple_dir;
@@ -315,6 +331,7 @@ struct ModelLoadStats {
   std::string moe_cpu;  // the CPU path's state line ("off", "on: avx512-bf16, 8 threads ...", or why not)
   std::string kv_lend;  // "off", "off (why)" or the lend state at load
   std::string exchange;  // the live expert exchange: "off", "off (why)" or its setup
+  int prefill_fetch = 0;  // the layer-ahead fetch's blobs per layer (0: off)
   int64_t lent = 0;  // cold experts lent into the KV pool at load (per card)
   int64_t blob_mismatches = -1;       // -1 = not verified
   int bf16_overrides = 0;             // plan matrices switched int8 -> bf16 by ModelOptions::bf16_tensors
@@ -784,6 +801,13 @@ class Model {
   struct PfRun;  // a prefill call between its parts (prefill.cpp)
   void pf_start(const int32_t *tokens, int m, int row_base, const std::function<void(int, int)> &on_rows, int32_t next_after);
   void pf_layers(int count);  // the next `count` layers of the pending call
+  // The layer-ahead fetch (ModelOptions::prefill_fetch, prefill.cpp): the lists of cold experts per layer to the cards
+  // (as they stand at the call's start), and layer l's fetch into buffer l % 2 on every card (half 0 / 1 / 2 = all).
+  void pf_fetch_lists(int m);
+  void pf_fetch_some(size_t bytes, int must, int last);
+  size_t pf_fetch_gap(int layer, int gap) const;
+  int pf_fetch_cap_ = 0;
+  std::vector<int16_t> pf_fetch_order_;  // [layer][expert]: the layer's experts by ranking, most routed first
   // The same for a call whose rows live on their owner card (prefill.cpp, "rows by owner")
   enum class PfMixer : uint8_t { attention, mlp };
   struct PfShared {  // one chunk buffer on every card: rows of row_bytes each

@@ -788,6 +788,16 @@ const char *brief_of(std::string_view key) {
        "Output: identical. Off by itself on four cards (every expert in VRAM) and with the MoE CPU path."},
       {"XEN_KV_LEND_KEEP",
        "With KV lending: tokens of KV kept free below the lent pages. Each time a conversation grows past it, more of what the pages hold is given back."},
+      {"XEN_PREFILL_FETCH",
+       "qwen38 on two cards with experts that do not all fit in VRAM: VRAM for this many experts per layer, three times per card. While a long prompt (4,096 tokens and more in one go) is read, each layer's most-used experts that live in host memory are copied to the card in the background while the layers before it compute, so the prompt's experts wait less on PCIe.\n"
+       "\n"
+       "`0`  off: the prompt reads those experts over PCIe in place\n"
+       "`96`  enough for 4,096-token chunks (`XEN_PREFILL_CHUNK` 0 / 4096)\n"
+       "`160`  for 8,192-token chunks\n"
+       "\n"
+       "Gives: + prompt reading speed on long prompts (32K tokens and more), much more with `XEN_PREFILL_CHUNK=8192` and `160`.\n"
+       "Takes: - 3 x this many experts' worth of VRAM per card (160: 480 experts, 0.6 GiB) out of the experts kept in VRAM: - decode speed (most with several streams), - short prompts; 8,192-token chunks take 2.1 GiB more per card on top.\n"
+       "Output: identical. Nothing to do on four cards (every expert in VRAM), on one card or with the MoE CPU path."},
       {"XEN_PREFILL_COLD_STAGE",
        "qwen38: VRAM for this many expert blobs per card, used to copy cold experts once per long prompt instead of reading them over PCIe again and again.\n"
        "\n"
@@ -1584,6 +1594,15 @@ std::vector<Spec> schema() {
     s.unit = "blobs";
   }
   {
+    auto &s = add("XEN_PREFILL_FETCH", "Prompt experts fetched ahead", pf, Kind::Int);
+    s.scope = Scope::Qwen38;
+    s.lo = 0;
+    s.hi = 512;
+    s.choices = {"0", "96", "160"};
+    s.names = {{"0", "off"}};
+    s.unit = "blobs per layer";
+  }
+  {
     add("XEN_PREFIX_CACHE", "Prefix cache", pf, Kind::Bool);
   }
   {
@@ -2234,7 +2253,7 @@ bool moves_memory(std::string_view key) {
   static const char *const keys[] = {"XEN_MODEL", "XEN_SLOTS", "XEN_CONTEXT", "XEN_KV", "XEN_KV_SPLIT", "XEN_KV_POOL_TOKENS", "XEN_RESERVE", "XEN_TP", "XEN_Q38_TP", "XEN_EMU_CARD",
                                      "XEN_HOT", "XEN_MTP", "XEN_DRAFTER", "XEN_DRAFTER_MODEL", "XEN_DRAFTER_MTP_FROM", "XEN_DRAFTER_INT4",
                                      "XEN_SEG_ROWS", "XEN_DRAFT_VOCAB", "XEN_PREFILL_CHUNK", "XEN_PREFILL_GEMM", "XEN_PREFILL_W4", "XEN_PREFILL_ATTN", "XEN_ATTN_SELECT", "XEN_PREFILL_SELECT",
-                                     "XEN_LM_HEAD", "XEN_VISION", "XEN_VISION_MAX_PIXELS", "XEN_VISION_IMAGES", "XEN_WARMUP", "XEN_PREFILL_COLD_STAGE",
+                                     "XEN_LM_HEAD", "XEN_VISION", "XEN_VISION_MAX_PIXELS", "XEN_VISION_IMAGES", "XEN_WARMUP", "XEN_PREFILL_COLD_STAGE", "XEN_PREFILL_FETCH",
                                      "XEN_PREFIX_CACHE", "XEN_PREFIX_CACHE_GIB"};
   for (const char *k : keys)
     if (key == k) return true;

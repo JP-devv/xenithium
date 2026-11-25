@@ -89,6 +89,8 @@ extern int g_gdn_cap_rows, g_gdn_cap_every;  // model --w4 PAT.., int8 plan matr
 extern bool g_gdn_scan;
 // --pf-cold-stage N: ModelOptions:prefill_cold_stage for every model command.
 extern int g_pf_cold_stage;
+// --pf-fetch N: ModelOptions:prefill_fetch for every model command.
+extern int g_pf_fetch;
 extern std::string g_moe_cpu;  // --moe-cpu
 extern int g_moe_cpu_pct, g_moe_cpu_threads, g_moe_cpu_min_cold;
 // --pf-route-trace F: probe model writes every prefill call's MoE inputs and

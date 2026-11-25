@@ -178,6 +178,7 @@ int cmd_model_run(const std::string &model, const std::string &ppl, const std::s
   mo.kv_lend = g_kv_lend, mo.kv_lend_keep = g_kv_lend_keep;
   mo.kv_pool_scramble = g_kv_scramble;
   mo.prefill_cold_stage = g_pf_cold_stage;
+  mo.prefill_fetch = g_pf_fetch;
   mo.gdn_scan = g_gdn_scan;
   mo.moe_cpu.mode = g_moe_cpu, mo.moe_cpu.pct = g_moe_cpu_pct, mo.moe_cpu.threads = g_moe_cpu_threads;
   mo.moe_cpu.min_cold = g_moe_cpu_min_cold;

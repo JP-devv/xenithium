@@ -83,6 +83,17 @@ struct Model::Card {
     // could land before this card read the out projection's flag value: a wait on == seq)
     kernels::PairSplit sel[kPfLanesMax];
     std::optional<sycl::queue> side;     // the split's copies, beside the compute queue
+    // The layer-ahead fetch (ModelOptions::prefill_fetch): the side queue copies a layer's cold experts into a VRAM
+    // buffer (layer l: buffer l % kPfFetchBufs) while the layers before it compute; the MoE reads ftab (its blob table:
+    // the buffer's slot or the expert's own blob) and fflag (the cold flags of what was not fetched, for the staging).
+    uint8_t *fbuf[kPfFetchBufs] = {};
+    const uint8_t **ftab[kPfFetchBufs] = {};  // [per_card]
+    uint8_t *fflag[kPfFetchBufs] = {};        // [per_card]
+    // host (pinned): the card's blob table and cold flags as the call sees them, fetched entries already pointing at
+    // their buffer slot; per layer the host blobs to fetch, in slot order
+    const uint8_t **htab = nullptr;  // [layers][per_card]
+    uint8_t *hflag = nullptr;        // [layers][per_card]
+    std::vector<std::vector<const uint8_t *>> hsrc;  // [layers]
     kernels::QsaRowsScratch qsa;         // QSA's chunk projections (stage A)
     kernels::PleRowsScratch ple;         // the many-row PLE block
     kernels::PfA8 a8;                    // W8A8 scratch for every many-row int8 dense GEMM (ModelOptions:prefill_dense_a8;
@@ -215,6 +226,13 @@ struct Model::PfRun {
   std::vector<kernels::HcState> cs;  // the chunk's HC state per card
   int start_cur[kMaxCards] = {}, start_lcur[kMaxCards] = {};
   int l = 0;                   // the next layer
+  // the layer-ahead fetch (pf_fetch_some): on for this call; per card the next layer to fetch, its next blob, the last
+  // copy queued, and per buffer the copy that completes its layer
+  bool fetch = false;
+  int fq_l[kMaxCards] = {};
+  size_t fq_j[kMaxCards] = {};
+  sycl::event fq_ev[kMaxCards];
+  sycl::event fetched[kMaxCards][kPfFetchBufs];
   // Model::pf_layers_owner: the call's rows by owner, in lanes. Empty: every card holds every row.
   struct Lane {
     int r0 = 0, m = 0;         // the call's rows [r0, r0 + m)

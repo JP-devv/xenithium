@@ -59,6 +59,9 @@
 //   while --kv-lend keeps the layouts
 // --prefill-cold-stage N [16] VRAM blobs per card for copying a prefill call's multi-segment cold experts once
 //   (0 = read every segment over PCIe)
+// --prefill-fetch N [0] qwen38 on two cards: VRAM for N cold expert blobs per layer, three times per card; a prompt
+//   call of 4,096 rows and more copies each layer's cold experts (up to N) into it on the copy engine while the layers
+//   before it compute, instead of its MoE reading them over PCIe (0 = off); identical output
 // --kv-lend on|off [on] qwen38: the KV pool's pages no sequence holds keep cold experts in VRAM (given back, no copy,
 //   when the KV grows into them; refilled while the server is idle); identical output. On the dense 27B the pages keep
 //   the wide prefill matrices' oneDNN layouts instead (no repack per call, given back the same way); there
@@ -159,7 +162,7 @@
 // int4-rescore).
 //
 // --reserve also sizes qwen35's auto KV pool. MoE / qwen38-only options (--hot-rank, --graphs (also arch flint),
-// --prefill-moe / -dense, --decode-moe, --prefill-cold-stage, --mtp) do not apply to it.
+// --prefill-moe / -dense, --decode-moe, --prefill-cold-stage, --prefill-fetch, --mtp) do not apply to it.
 //
 // The prefix cache (qwen35, qwen38): --prefix-cache 0|1 [1] (finished requests leave their sequence on the slot and
 // snapshots of its state; a new request continues the longest cached prefix of its prompt), --prefix-cache-gib F [8]
@@ -251,6 +254,7 @@ std::vector<Flag> flags(serve::Options &o, std::string &kv_pool) {
       {"--prefill-moe", "w4a8|w4a16", str(o.prefill_moe)},
       {"--prefill-dense", "w8a8|w8a8-row|w8a16", str(o.prefill_dense)},
       {"--prefill-cold-stage", "N", i32(o.prefill_cold_stage)},
+      {"--prefill-fetch", "N", i32(o.prefill_fetch)},
       {"--kv-lend", "on|off", str(o.kv_lend)},
       {"--kv-lend-keep", "N", i64(o.kv_lend_keep)},
       {"--kv-lend-park-s", "S", f64(o.kv_lend_park_s)},
@@ -399,6 +403,7 @@ int validate(const serve::Options &o) {
   if (o.lookup != 0 && (o.lookup < 2 || o.lookup > 8)) return bad("--lookup takes 0 (off) or a match length 2..8");
   if (o.prefill_short < 0 || o.prefill_short > 32) return bad("--prefill-short takes 0 (off) .. 32 rows");
   if (o.prefill_gemm_rows < 128 || o.prefill_gemm_rows > 4096) return bad("--prefill-gemm-rows takes 128 .. 4096 rows per call");
+  if (o.prefill_fetch < 0 || o.prefill_fetch > 512) return bad("--prefill-fetch takes 0 (off) .. 512 expert blobs per layer");
   if (o.hot < 0) return bad("--hot takes 0 (auto) or a positive expert count (the routed experts in VRAM over all layers)");
   if (o.attn_tail < 0 || o.attn_tail > 2 || (o.prefix_cache != 0 && o.prefix_cache != 1) || (o.prefix_live != 0 && o.prefix_live != 1) || !(o.prefix_cache_gib >= 0) || o.prefix_mark_min < 0)
     return bad("--attn-tail takes 0, 1 or 2, --prefix-cache and --prefix-live take 0 or 1, --prefix-cache-gib a size >= 0, --prefix-mark-min a token count >= 0");

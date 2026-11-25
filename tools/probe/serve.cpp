@@ -204,6 +204,7 @@ int cmd_serve_run(const std::string &model, const std::string &ppl, int nseq, in
   mo.kv_lend = g_kv_lend, mo.kv_lend_keep = g_kv_lend_keep;
   mo.kv_pool_scramble = g_kv_scramble;
   mo.prefill_cold_stage = g_pf_cold_stage;
+  mo.prefill_fetch = g_pf_fetch;
   mo.gdn_scan = g_gdn_scan;
   mo.slots = N;
   mo.context = std::max<int64_t>(context, P + 97LL * K + 4LL * G + 64);

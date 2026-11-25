@@ -764,15 +764,6 @@ Model::Model(const l0::Loader &loader, Fabric &fab, const std::string &dir, cons
     return;
   }
 
-  // ---- the live exchange's spare VRAM blobs: before the hot count, so they come out of the hot experts ----
-  if (opt.exchange && opt.moe_tp && opt.moe_cpu.mode == "off" && opt.exchange_spares > 0)
-    for (int c = 0; c < nc_; ++c)
-      for (int i = 0; i < opt.exchange_spares; ++i) {
-        auto *p = static_cast<uint8_t *>(fab.alloc(c, stride));
-        x_spare_mem_[c].push_back(p);
-        x_spare_[c].push_back(p);
-      }
-
   // ---- routed experts: whatever VRAM is left ----
   ExpertStoreOptions so;
   so.pack_threads = opt.threads;
@@ -801,10 +792,59 @@ Model::Model(const l0::Loader &loader, Fabric &fab, const std::string &dir, cons
     const double free_now = known ? *std::min_element(vram_free.begin(), vram_free.end()) : 0.0;
     if (!known && opt.hot < 0) throw std::runtime_error("qwen38 model: sysman free VRAM unavailable; pass a hot count");
     int64_t fit = per_total;
+    double room = 0;
     if (known) {
       ls_.free_after_dense_gib = free_now / 1073741824.0;
-      const double room = free_now - (opt.reserve_gib + ls_.onednn_gib) * 1073741824.0;
+      room = free_now - (opt.reserve_gib + ls_.onednn_gib) * 1073741824.0;
       fit = std::clamp<int64_t>(static_cast<int64_t>(room / static_cast<double>(stride)), 0, per_total);
+    }
+    // Some experts stay cold: the live exchange's spare blobs and the prefill's layer-ahead fetch buffers, out of the hot
+    // experts (allocated now, so the count below sees them)
+    if ((opt.hot >= 0 ? std::min(opt.hot, fit) : fit) < per_total && opt.moe_tp && opt.moe_cpu.mode == "off") {
+      const int per = cfg_.experts;
+      size_t extra = 0;
+      for (int c = 0; c < nc_; ++c) {
+        Card &K = *cards_[static_cast<size_t>(c)];
+        if (opt.exchange)
+          for (int i = 0; i < opt.exchange_spares; ++i) {
+            auto *p = static_cast<uint8_t *>(fab.alloc(c, stride));
+            x_spare_mem_[c].push_back(p);
+            x_spare_[c].push_back(p);
+          }
+        if (opt.prefill_fetch > 0) {
+          auto dev = [&](size_t b) {
+            void *p = fab.alloc(c, std::max<size_t>(b, 4096));
+            K.mem.push_back(p);
+            return p;
+          };
+          for (int b = 0; b < kPfFetchBufs; ++b) {
+            K.pf.fbuf[b] = static_cast<uint8_t *>(dev(stride * static_cast<size_t>(opt.prefill_fetch)));
+            K.pf.ftab[b] = static_cast<const uint8_t **>(dev(static_cast<size_t>(per) * 8));
+            K.pf.fflag[b] = static_cast<uint8_t *>(dev(static_cast<size_t>(per)));
+          }
+          K.pf.htab = static_cast<const uint8_t **>(fab.alloc_host(static_cast<size_t>(L) * per * 8));
+          K.pf.hflag = static_cast<uint8_t *>(fab.alloc_host(static_cast<size_t>(L) * per));
+          K.mem.push_back(K.pf.htab);
+          K.mem.push_back(K.pf.hflag);
+          K.pf.hsrc.assign(static_cast<size_t>(L), {});
+          pf_fetch_cap_ = opt.prefill_fetch;
+          ls_.prefill_fetch = pf_fetch_cap_;
+          if (c == 0) {  // the fetch order: per layer by ranking (no ranking: by id)
+            pf_fetch_order_.resize(static_cast<size_t>(L) * per);
+            const bool ranked = so.rank && so.rank->size() == static_cast<size_t>(L) * cfg_.experts;
+            for (int l = 0; l < L; ++l) {
+              int16_t *o = pf_fetch_order_.data() + static_cast<size_t>(l) * per;
+              for (int i = 0; i < per; ++i) o[i] = static_cast<int16_t>(i);
+              if (ranked) {
+                const double *rk = so.rank->data() + static_cast<size_t>(l) * cfg_.experts;
+                std::stable_sort(o, o + per, [&](int16_t a, int16_t b) { return rk[a] > rk[b]; });
+              }
+            }
+          }
+        }
+        if (c == 0) extra = (x_spare_[0].size() + (pf_fetch_cap_ > 0 ? kPfFetchBufs * static_cast<size_t>(pf_fetch_cap_) : 0)) * stride;
+      }
+      if (known) fit = std::clamp<int64_t>(static_cast<int64_t>((room - static_cast<double>(extra)) / static_cast<double>(stride)), 0, per_total);
     }
     so.hot_per_card = opt.hot >= 0 ? std::min(opt.hot, fit) : fit;
     if (opt.hot >= 0 && so.hot_per_card < std::min(opt.hot, per_total)) ls_.hot_asked = opt.hot;
@@ -846,7 +886,7 @@ Model::Model(const l0::Loader &loader, Fabric &fab, const std::string &dir, cons
     K.tab = static_cast<const uint8_t **>(fab.alloc(c, t.size() * 8));
     K.mem.push_back(K.tab);
     fab.compute(c).memcpy(K.tab, t.data(), t.size() * 8).wait();
-    if (K.pf.moe.stage_cap > 0 || opt.moe_cpu.mode != "off") {  // cold flags for the prefill staging and the CPU path
+    if (K.pf.moe.stage_cap > 0 || opt.moe_cpu.mode != "off" || pf_fetch_cap_ > 0) {  // cold flags for the prefill staging, the fetch and the CPU path
       std::vector<uint8_t> cf(static_cast<size_t>(L) * per, 0);
       for (int l = 0; l < L; ++l)
         for (int i = 0; i < per; ++i) {

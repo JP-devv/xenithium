@@ -54,6 +54,7 @@ struct Options {
   std::string prefill_moe = "w4a16";  // qwen38
   std::string prefill_dense = "w8a8-row";  // qwen38
   int prefill_cold_stage = 16;  // qwen38
+  int prefill_fetch = 0;        // qwen38 (two cards)
   std::string kv_lend = "on";  // qwen38: the KV pool's free pages hold cold experts (on|off)
   int64_t kv_lend_keep = 32768;  // qwen38: KV tokens kept free below the lent pages
   double kv_lend_park_s = 300;  // qwen38: a parked prefix above the keep is dropped after this long (0 = never)

@@ -276,6 +276,7 @@ void Model::pf_start(const int32_t *tokens, int m, int row_base, const std::func
       w[k::kSegSlot] = R.slot;
     }
   R.cs.resize(static_cast<size_t>(nc_));  // the chunk's HC state per card, indices as the head's
+  R.fetch = pf_fetch_cap_ > 0 && nc_ > 1 && R.lanes.empty() && ms_.shape.tp && m >= kPfFetchMinRows && ls_.cold[0] > 0 && !calib_cap_ && !calib_hook_;
   const int32_t *dev_ids = tk;
   if (vis_) {  // image ids -> image rows (the images this chunk or the drafter's next token names encoded first)
     if (next_after >= cfg_.vocab) vis_map(&next_after, 1, vis_tmp_);
@@ -735,6 +736,81 @@ void Model::pf_layers_owner(int count) {
   }
 }
 
+// The layer-ahead fetch: the cards' blob tables and cold flags as they stand (the compute queue drained: the lending's
+// and the exchange's updates are in, and no MoE of an earlier call still reads a buffer), then per layer the cold
+// experts the ranking routes most get a buffer slot, as many as the call's compute hides the copies of (the link moves
+// ~kPfFetchPer4K blobs per layer while a 4,096-row call computes a layer; more would stall the call).
+void Model::pf_fetch_lists(int m) {
+  const int L = cfg_.layers, per = ms_.shape.per_card();
+  const size_t stride = experts_->stride(), n = static_cast<size_t>(L) * per;
+  const int cap = std::min<int>(pf_fetch_cap_, static_cast<int>(static_cast<int64_t>(kPfFetchPer4K) * m / 4096));
+  for (int c = 0; c < nc_; ++c) {
+    Card &K = *cards_[static_cast<size_t>(c)];
+    auto &q = fab_.compute(c);
+    q.memcpy(K.pf.htab, K.tab, n * sizeof(const uint8_t *));
+    q.memcpy(K.pf.hflag, K.cold, n);
+  }
+  for (int c = 0; c < nc_; ++c) fab_.compute(c).wait();
+  for (int c = 0; c < nc_; ++c) {
+    Card &K = *cards_[static_cast<size_t>(c)];
+    for (int l = 0; l < L; ++l) {
+      auto &src = K.pf.hsrc[static_cast<size_t>(l)];
+      src.clear();
+      const size_t e0 = static_cast<size_t>(l) * per;
+      const int16_t *order = pf_fetch_order_.data() + e0;
+      for (int k = 0; k < per && static_cast<int>(src.size()) < cap; ++k)
+        if (const size_t e = e0 + static_cast<size_t>(order[k]); K.pf.hflag[e] == 1) {
+          src.push_back(K.pf.htab[e]);
+          K.pf.htab[e] = K.pf.fbuf[l % kPfFetchBufs] + (src.size() - 1) * stride;
+          K.pf.hflag[e] = 0;
+        }
+    }
+  }
+}
+
+// The bytes per card a gap's copies may take: gap 1 runs beside layer l's mixer and attention (from the previous MoE's
+// sum to layer l's attention send), gap 2 beside layer l's MLP mixer and MoE (to the MoE's send). Their lengths at
+// 8,192 rows on two cards (ms; probe timeline, round 288), for fewer rows the same (a 4,096-row call is link bound:
+// every gap filled), for more in proportion; at the host link's rate per card while both cards fetch.
+size_t Model::pf_fetch_gap(int l, int gap) const {
+  constexpr double kGdnGapMs = 14, kQsaGapMs = 38, kMoeGapMs = 10, kGbPerS = 7.0;
+  const double ms = gap == 2 ? kMoeGapMs : cfg_.full_attention[l] ? kQsaGapMs : kGdnGapMs;
+  return static_cast<size_t>(ms * std::max(1.0, pf_run_->m / 8192.0) * kGbPerS * 1e6);
+}
+
+// The fetch's copies on every card's side queue, in the gaps between the two-card sums' copies: the card has one copy
+// engine, and a send queued behind a fetch waits for it, so each gap gets as many bytes as it hides (`bytes` per card).
+// Layer x's copies go to buffer x % kPfFetchBufs, whose last reader (layer x - 3's MoE) the queue's earlier copies
+// already follow; the layers through `must` are queued whole (their MoE is next), none past `last`.
+void Model::pf_fetch_some(size_t bytes, int must, int last) {
+  PfRun &R = *pf_run_;
+  const int per = ms_.shape.per_card();
+  const size_t stride = experts_->stride();
+  for (int c = 0; c < nc_; ++c) {
+    Card &K = *cards_[static_cast<size_t>(c)];
+    auto &q = *K.pf.side;
+    size_t left = bytes;
+    while (R.fq_l[c] <= last) {
+      const int l = R.fq_l[c], b = l % kPfFetchBufs;
+      const auto &src = K.pf.hsrc[static_cast<size_t>(l)];
+      size_t &j = R.fq_j[c];
+      if (j == 0) {  // the layer's tables (no barrier on the side queue: behind one the compute queue stalls, 2.4x)
+        const size_t e0 = static_cast<size_t>(l) * per;
+        q.memcpy(K.pf.ftab[b], K.pf.htab + e0, static_cast<size_t>(per) * sizeof(const uint8_t *));
+        R.fq_ev[c] = q.memcpy(K.pf.fflag[b], K.pf.hflag + e0, static_cast<size_t>(per));
+      }
+      const size_t take = l <= must ? src.size() - j : std::min(src.size() - j, left / stride);
+      for (size_t i = 0; i < take; ++i) R.fq_ev[c] = q.memcpy(K.pf.fbuf[b] + (j + i) * stride, src[j + i], stride);
+      j += take;
+      left -= std::min(left, take * stride);
+      if (j < src.size()) break;  // the gap is full
+      R.fetched[c][b] = R.fq_ev[c];  // the layer's last copy (in order on the side queue)
+      ++R.fq_l[c];
+      j = 0;
+    }
+  }
+}
+
 void Model::pf_layers(int count) {
   PfRun &R = *pf_run_;
   if (!R.lanes.empty()) {
@@ -757,8 +833,16 @@ void Model::pf_layers(int count) {
   // the rows; the thresholds are TP2's).
   const bool split = nc_ > 1 && m >= kPfSplitMinRows, send_ok = nc_ > 1 && m >= k::kPairSplitSendMinRows;
   const int l_end = std::min(L, R.l + count);
+  // the layer-ahead fetch: nothing is fetched across the parts of a split call (the lending may change between them),
+  // so a part starts with its first layer's fetch
+  if (R.fetch) {
+    pf_fetch_lists(m);
+    for (int c = 0; c < nc_; ++c) R.fq_l[c] = R.l, R.fq_j[c] = 0;
+    pf_fetch_some(pf_fetch_gap(R.l, 1), R.l, std::min(l_end - 1, R.l + 2));
+  }
   for (; R.l < l_end; ++R.l) {
     const int l = R.l;
+    const int fetch_last = std::min(l_end - 1, l + 2);  // the fetch runs up to two layers ahead (kPfFetchBufs)
     // attention mixer over the chunk (PLE first on its layer: the pending combine, then the block per slice)
     for (int c = 0; c < nc_; ++c) {
       auto &q = fab_.compute(c);
@@ -822,6 +906,7 @@ void Model::pf_layers(int count) {
         sent[c] = k::gdn_rows(fab_.compute(c), gs_.shape_of(c), m, K.pf.xa, gs_.w[c][l], rs, gsc, wire_of(pw), pf_pair_parity_, K.pf.ya).send;
       }
       if (split) pf_split_sum([&](Card &K) { return K.pf.gdn.partial; }, [&](Card &K) { return K.pf.ya; }, false, 0, send_ok ? sent : nullptr);
+      if (R.fetch) pf_fetch_some(pf_fetch_gap(l, 2), l, fetch_last);
       pf_pair_parity_ ^= 1;
     } else {
       // QSA over the chunk: projections + two-card sum, prep, then 64-row batches of the middle
@@ -840,6 +925,7 @@ void Model::pf_layers(int count) {
                     qrs, wire_of(pw), pf_pair_parity_, K.pf.ya).send;
       }
       if (split) pf_split_sum([&](Card &K) { return K.pf.qsa.partial; }, [&](Card &K) { return K.pf.ya; }, false, 1, send_ok ? sent : nullptr);
+      if (R.fetch) pf_fetch_some(pf_fetch_gap(l, 2), l, fetch_last);
       pf_pair_parity_ ^= 1;
       pf_kv_parity_ ^= 1;
     }
@@ -866,6 +952,12 @@ void Model::pf_layers(int count) {
         k::MoeWeights w = ms_.w[c][l];
         w.blobs = K.tab + static_cast<size_t>(l) * per;
         if (K.cold) w.cold = K.cold + static_cast<size_t>(l) * per;  // cold-expert staging
+        if (R.fetch) {  // the layer's fetched blobs (what was not fetched: its cold flag, for the in-call staging)
+          const int b = l % kPfFetchBufs;
+          fab_.compute(c).ext_oneapi_submit_barrier({R.fetched[c][b]});
+          w.blobs = K.pf.ftab[b];
+          w.cold = K.pf.fflag[b];
+        }
         k::MoeRowsWire mw = K.pf.mw;
         mw.split = split;
         k::PairSplit msp = K.pf.split;
@@ -879,6 +971,7 @@ void Model::pf_layers(int count) {
         sent[c] = me.send;
       }
       if (split) pf_split_sum([&](Card &K) { return K.pf.moe.part; }, [&](Card &K) { return K.pf.ym; }, true, 2, send_ok ? sent : nullptr);
+      if (R.fetch) pf_fetch_some(l + 1 < l_end ? pf_fetch_gap(l + 1, 1) : 0, -1, fetch_last);
       pf_moe_parity_ ^= 1;
       // the routing (card 0's; both cards route the same rows identically)
       if (pf_trace_) pf_tr("L" + std::to_string(l) + ".moe.ids", reinterpret_cast<const bf16 *>(cards_[0]->pf.moe.ids), 2 * cfg_.topk);
