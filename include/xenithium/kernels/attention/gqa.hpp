@@ -205,7 +205,7 @@ struct GqaStep {
   struct {
     const int32_t *entries = nullptr;  // [rows][kTrainedQsaPages]
     const int32_t *counts = nullptr;   // [rows][local_kv_heads], 0 = dense row
-  } trained_qsa;
+  } trained_qsa{};
 };
 
 void gqa_set_prep(int esimd);  // the decode steps' ESIMD prep (D 128) on / off (tests)

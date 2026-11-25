@@ -24,15 +24,26 @@ namespace k = xenithium::kernels;
 
 constexpr int heads = 4, dim = 128, workers = 32, kTop = 512;
 
+// A kernel with 256 registers per item and 32-item sub-groups: the properties ride on the kernel object (the
+// parallel_for overload that takes them separately is deprecated).
+template <class F>
+struct Grf256Sg32 {
+  F f;
+  void operator()(sycl::nd_item<2> it) const { f(it); }
+  auto get(sycl::ext::oneapi::experimental::properties_tag) const {
+    return sycl::ext::oneapi::experimental::properties{sycl::ext::intel::experimental::grf_size<256>,
+                                                       sycl::ext::oneapi::experimental::sub_group_size<32>};
+  }
+};
+
 // production reference: index_scores_tile<Half=true, Tree=true> (trained_qsa_device.cpp), History -> raw pointers
 sycl::event ref_scores(sycl::queue &q, const float *query, const sycl::half *pool16, int cap, int rows, int bound, const int32_t *rec, int stride,
                        int layout, uint32_t *scores, int32_t *eligible) {
   constexpr int R = 4, B = 8;
   const int pitch = cap / 4, tiles = (bound + B - 1) / B;
   const int segments = k::seg_count(rows, layout), groups = (k::seg_size(rows, layout) + R - 1) / R;
-  const auto regs = sycl::ext::oneapi::experimental::properties{sycl::ext::intel::experimental::grf_size<256>};
-  return q.parallel_for(sycl::nd_range<2>({size_t(segments * groups), size_t(tiles) * workers}, {1, workers}), regs,
-                        [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(workers)]] {
+  return q.parallel_for(sycl::nd_range<2>({size_t(segments * groups), size_t(tiles) * workers}, {1, workers}), Grf256Sg32{
+                        [=](sycl::nd_item<2> it) {
     const int g = it.get_group(0), s = g / groups, j0 = (g % groups) * R, b0 = it.get_group(1) * B, lane = it.get_local_id(1);
     int rseg, nseg;
     k::seg_span(layout, rows, s, rseg, nseg);
@@ -73,7 +84,7 @@ sycl::event ref_scores(sycl::queue &q, const float *query, const sycl::half *poo
 #pragma unroll
         for (int r = 0; r < R; ++r) if (r < n) scores[size_t(r0 + r) * pitch + b] = sycl::bit_cast<uint32_t>(score[r]);
     }
-  });
+  }});
 }
 
 struct Stat { double med, p90, p99; std::vector<double> s; };

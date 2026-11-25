@@ -28,6 +28,17 @@ namespace {
 constexpr int width=(heads+1)*dim, workers=32, pf_score_tile=64, pf_fa_min_rows=16;
 constexpr size_t allocation_bytes(size_t n) { return std::max(size_t(4096),n); }
 constexpr size_t align64(size_t n) { return (n+63)&~size_t(63); }
+// A kernel with 256 registers per item and 32-item sub-groups: the properties ride on the kernel object (the
+// parallel_for overload that takes them separately is deprecated).
+template <class F>
+struct Grf256Sg32 {
+  F f;
+  void operator()(sycl::nd_item<2> it) const { f(it); }
+  auto get(sycl::ext::oneapi::experimental::properties_tag) const {
+    return sycl::ext::oneapi::experimental::properties{sycl::ext::intel::experimental::grf_size<256>,
+                                                       sycl::ext::oneapi::experimental::sub_group_size<32>};
+  }
+};
 bool enabled(const char *name) { const char *p=std::getenv(name); return p && p[0]=='1' && !p[1]; }
 const char *pf_replay_dir() {
   const char *p=std::getenv("XEN_PF_TOPK_REPLAY_DIR"); return p && *p?p:nullptr;
@@ -173,9 +184,8 @@ sycl::event index_scores_tile(sycl::queue &q,const History &h,int rows,int bound
   const auto *rec=step.pos;
   const int stride=step.stride,pitch=h.cap/4,tiles=Tail?1:(bound+B-1)/B,layout=step.seg_rows;
   const int segments=k::seg_count(rows,layout),groups=(k::seg_size(rows,layout)+R-1)/R;
-  const auto regs=sycl::ext::oneapi::experimental::properties{sycl::ext::intel::experimental::grf_size<256>};
-  return q.parallel_for(sycl::nd_range<2>({size_t(segments*groups),size_t(tiles)*workers},{1,workers}),regs,
-      [=](sycl::nd_item<2> it) [[sycl::reqd_sub_group_size(workers)]] {
+  return q.parallel_for(sycl::nd_range<2>({size_t(segments*groups),size_t(tiles)*workers},{1,workers}),Grf256Sg32{
+      [=](sycl::nd_item<2> it) {
     const int g=it.get_group(0),s=g/groups,j0=(g%groups)*R,lane=it.get_local_id(1);
     int rseg,nseg; k::seg_span(layout,rows,s,rseg,nseg);
     const int n=sycl::min(R,nseg-j0);
@@ -221,7 +231,7 @@ sycl::event index_scores_tile(sycl::queue &q,const History &h,int rows,int bound
 #pragma unroll
         for(int r=0;r<R;++r) if(r<n && (Tree || last<=start+j0+r)) scores[size_t(r0+r)*pitch+b]=sycl::bit_cast<uint32_t>(score[r]);
     }
-  });
+  }});
 }
 }
 
