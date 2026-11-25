@@ -414,7 +414,7 @@ const char *brief_of(std::string_view key) {
        "Takes: - nothing on other text.\n"
        "Output: the same."},
       {"XEN_MTP_DEPTH",
-       "How many tokens the MTP drafter guesses per step for a single stream (1-3).\n"
+       "How many tokens the MTP drafter guesses per step for a single stream (1-3; Qwen3.8-27B: 1-6).\n"
        "\n"
        "Gives (more): + tokens per step when the guesses land.\n"
        "Takes (more): - time per step.\n"

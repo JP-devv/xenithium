@@ -356,7 +356,7 @@ class Backend final : public serve::Backend {
       if (o_.mtp_depth < 1 || o_.mtp_depth > StepModelAdapter::kDepth)
         throw serve::OptionError("--mtp-depth takes 1.." + std::to_string(StepModelAdapter::kDepth) +
                                  " (the MTP depth of one decoding sequence)");
-      if (o_.draft_depths.empty() && o_.mtp_depth != 3) {
+      if (o_.draft_depths.empty() && o_.mtp_depth != StepModelAdapter::kMtpTableDepth) {
         if (model_->dflash()) adapter_->set_mtp_depth_from(o_.mtp_depth, model_->mtp_from());
         else adapter_->set_mtp_depth(o_.mtp_depth);
       }
