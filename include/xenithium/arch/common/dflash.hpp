@@ -51,8 +51,8 @@
 namespace xenithium::arch {
 
 struct DFlashConfig {
-  // DSpine (`DFlashDraftModel` + the code bridge, kernels/drafter/dspine.hpp): no convolution, causal inside the block,
-  // the bridge after every layer, ds_select's scores.
+  // DSpine (`DFlashDraftModel` or `DSpineDraftModel` + the code bridge, kernels/drafter/dspine.hpp): no convolution,
+  // causal inside the block, the bridge after every layer, ds_select's scores.
   enum class Kind : uint8_t { dflash2, dspine };
   Kind kind = Kind::dflash2;
   int hidden = 0, layers = 0, q_heads = 0, kv_heads = 0, head_dim = 0, inter = 0;
@@ -66,7 +66,7 @@ struct DFlashConfig {
   // Throws naming the key or the broken invariant (the kernels' constants: head dim 128, two taps, top-16, ...).
   // max_block: the rows a pass may draft here (8: the 27B's verify per sequence; 16 with DFlashOptions::wide)
   static DFlashConfig load(const std::string &dir, int max_block = 8);
-  // config.json names DFlash2DraftModel, or DFlashDraftModel with DSpine's bridge
+  // config.json names a block drafter (drafter_archs.hpp)
   static bool is_dflash(const std::string &dir);
 };
 

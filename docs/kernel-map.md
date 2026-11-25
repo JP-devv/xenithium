@@ -149,7 +149,7 @@ A 1-row step commits its state, so no replay is needed.
 
 ## 5. Drafter (`src/arch/common/dflash.cpp`)
 
-**Drafter kind.** A `config.json` with `DFlash2DraftModel` is DFlash 2; `DFlashDraftModel` alone is DSpine. `--seg-rows 16` needs a block of 16 or more (DSpine b16); DFlash 2 runs `--seg-rows 8`.
+**Drafter kind.** A `config.json` with `DFlash2DraftModel` is DFlash 2; `DFlashDraftModel` or `DSpineDraftModel` alone is DSpine. `--seg-rows 16` needs a block of 16 or more (DSpine b16); DFlash 2 runs `--seg-rows 8`.
 
 **Pass layers:**
 

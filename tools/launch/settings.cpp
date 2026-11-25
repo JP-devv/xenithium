@@ -20,6 +20,7 @@
 #include <set>
 #include <sstream>
 
+#include "xenithium/arch/common/drafter_archs.hpp"
 #include "xenithium/model/arch.hpp"
 #include "xenithium/model/config.hpp"
 #include "xenithium/serve/options.hpp"
@@ -28,15 +29,18 @@
 #include "xenithium/util/video.hpp"
 
 namespace {
-// a block drafter directory's config.json names its architecture (DFlashConfig:is_dflash's test): DFlash 2, or
-// DSpine's DFlashDraftModel
+// a block drafter directory's config.json names its architecture (DFlashConfig::is_dflash's test): DFlash 2 or DSpine
 bool is_dflash_dir(const std::string &dir) {
   std::ifstream f(dir + "/config.json");
   if (!f) return false;
   std::stringstream ss;
   ss << f.rdbuf();
   const std::string s = ss.str();
-  return s.find("\"DFlash2DraftModel\"") != std::string::npos || s.find("\"DFlashDraftModel\"") != std::string::npos;
+  const auto names = [&](std::string_view n) { return s.find("\"" + std::string(n) + "\"") != std::string::npos; };
+  if (names(xenithium::arch::kDFlash2Arch)) return true;
+  for (const auto n : xenithium::arch::kDSpineArchs)
+    if (names(n)) return true;
+  return false;
 }
 }  // namespace
 
@@ -2483,7 +2487,7 @@ std::string check_value(const Spec &s, const std::string &v, std::string_view ar
       if (s.key == "XEN_MODEL" && !is_file(join_path(p, "config.json"))) return "no config.json in this directory";
       if (s.key == "XEN_DRAFTER_MODEL" && !is_dflash_dir(p)) {
         if (warn_only) *warn_only = true;
-        return "config.json names neither DFlash2DraftModel nor DFlashDraftModel: not a block drafter?";
+        return "config.json names no block drafter (" + xenithium::arch::block_drafter_arch_names() + ")";
       }
       if (s.key == "XEN_MTP" && !is_file(join_path(p, "mtp-dense.safetensors"))) {
         if (warn_only) *warn_only = true;

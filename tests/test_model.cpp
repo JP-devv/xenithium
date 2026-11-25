@@ -27,6 +27,7 @@
 #include "xenithium/arch/qwen35/arch.hpp"
 #include "xenithium/arch/qwen38/experts.hpp"
 #include "xenithium/arch/common/dflash_plan.hpp"
+#include "xenithium/arch/common/drafter_archs.hpp"
 #include "xenithium/arch/common/dspine_head.hpp"
 #include "xenithium/arch/qwen38/mtp.hpp"
 #include "xenithium/kernels/pack.hpp"
@@ -1457,6 +1458,17 @@ void seq_reader() {
 }
 
 
+// The block drafters' config.json names: DFlash 2, and DSpine under both of its published names.
+void drafter_archs() {
+  namespace a = xenithium::arch;
+  expect(a::is_block_drafter_arch("DFlash2DraftModel") && !a::is_dspine_arch("DFlash2DraftModel"), "drafter archs: DFlash2DraftModel is DFlash 2");
+  expect(a::is_dspine_arch("DFlashDraftModel") && a::is_dspine_arch("DSpineDraftModel") && a::is_block_drafter_arch("DSpineDraftModel"),
+         "drafter archs: DFlashDraftModel and DSpineDraftModel are DSpine");
+  expect(!a::is_block_drafter_arch("Qwen3ForCausalLM") && !a::is_block_drafter_arch("DSpine") && !a::is_block_drafter_arch(""),
+         "drafter archs: other names are not block drafters");
+  expect(a::block_drafter_arch_names() == "DFlash2DraftModel, DFlashDraftModel or DSpineDraftModel", "drafter archs: the names for messages");
+}
+
 void mtp_depth_cap() {
   std::vector<int> d;
   expect(xenithium::serve::parse_draft_depths("6,6,6,6", d) && d.size() == 4 && d[0] == 6 && d[3] == 6,
@@ -1466,6 +1478,7 @@ void mtp_depth_cap() {
 int main() {
   try {
     mtp_depth_cap();
+    drafter_archs();
     bf16_round();
     w4_rtn();
     synthetic();

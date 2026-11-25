@@ -10,6 +10,7 @@
 #include <exception>
 #include <memory>
 
+#include "xenithium/arch/common/drafter_archs.hpp"
 #include "xenithium/arch/common/vision.hpp"
 #include "xenithium/arch/flint/arch.hpp"
 #include "xenithium/arch/llama/arch.hpp"
@@ -158,7 +159,7 @@ ModelOptions model_options(const serve::Options &o, bool flint) {
   if (o.attn_select > 0 && !flint && o.select_heads == "auto") mo.select_self = kSelectSelfSteps;
   mo.prefill_select = o.prefill_select;
   if (o.drafter != 0 && !o.drafter_model.empty()) {
-    if (!DFlashConfig::is_dflash(o.drafter_model)) throw serve::OptionError("--drafter-model " + o.drafter_model + ": config.json names neither DFlash2DraftModel nor DFlashDraftModel (DSpine)");
+    if (!DFlashConfig::is_dflash(o.drafter_model)) throw serve::OptionError("--drafter-model " + o.drafter_model + ": config.json names no block drafter (" + block_drafter_arch_names() + ")");
     mo.dflash_dir = o.drafter_model;
     mo.dflash_ctx_defer = o.drafter_defer;
     mo.dflash_conf_cut = o.drafter_cut;
@@ -203,7 +204,7 @@ std::string plan_of(const serve::Options &opt, const model::ModelConfig &cfg, st
   // the drafters: the MTP layer (the dense 27B's own; with a block drafter only when --drafter-mtp-from > 0), DFlash 2 / DSpine
   int block = 0;  // 1 DFlash 2, 2 DSpine
   if (o.drafter != 0 && !o.drafter_model.empty() && !llama) {
-    if (!DFlashConfig::is_dflash(o.drafter_model)) throw serve::OptionError("--drafter-model " + o.drafter_model + ": config.json names neither DFlash2DraftModel nor DFlashDraftModel (DSpine)");
+    if (!DFlashConfig::is_dflash(o.drafter_model)) throw serve::OptionError("--drafter-model " + o.drafter_model + ": config.json names no block drafter (" + block_drafter_arch_names() + ")");
     const DFlashConfig dc = DFlashConfig::load(o.drafter_model, o.seg_rows >= 16 ? 16 : 8);
     if (dc.hidden != c.hidden || dc.vocab != c.vocab || dc.target_layers_total != c.layers)  // (the load's check: DFlash's constructor)
       throw serve::OptionError("another model's drafter (its hidden size, vocabulary or layer count differ)");

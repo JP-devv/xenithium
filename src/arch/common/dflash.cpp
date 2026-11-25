@@ -1,4 +1,5 @@
 #include "xenithium/arch/common/dflash.hpp"
+#include "xenithium/arch/common/drafter_archs.hpp"
 #include "xenithium/arch/common/dspine_head.hpp"
 
 #include <fcntl.h>
@@ -58,7 +59,7 @@ bool DFlashConfig::is_dflash(const std::string &dir) {
   try {
     const auto mc = ModelConfig::load(dir);
     for (const auto &a : mc.architectures())
-      if (a == "DFlash2DraftModel" || a == "DFlashDraftModel") return true;
+      if (is_block_drafter_arch(a)) return true;
   } catch (const std::exception &) {
   }
   return false;
@@ -67,8 +68,8 @@ bool DFlashConfig::is_dflash(const std::string &dir) {
 DFlashConfig DFlashConfig::load(const std::string &dir, int max_block) {
   const auto mc = ModelConfig::load(dir);
   bool arch = false, ds = false;
-  for (const auto &a : mc.architectures()) arch |= a == "DFlash2DraftModel", ds |= a == "DFlashDraftModel";
-  need(arch || ds, "architectures does not name DFlash2DraftModel or DFlashDraftModel (" + dir + ")");
+  for (const auto &a : mc.architectures()) arch |= a == kDFlash2Arch, ds |= is_dspine_arch(a);
+  need(arch || ds, "architectures names none of " + block_drafter_arch_names() + " (" + dir + ")");
   const json::Value &t = mc.root();
   DFlashConfig c;
   c.kind = ds && !arch ? Kind::dspine : Kind::dflash2;

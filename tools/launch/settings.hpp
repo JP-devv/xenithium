@@ -203,7 +203,7 @@ std::string human_bytes(uint64_t b);
 struct ModelInfo {
   std::string path, name;
   std::string arch, arch_desc, model_type;  // arch "" = not served by this engine
-  bool has_config = false, drafter = false, dflash = false;  // drafter: an MTP checkpoint; dflash: config names DFlash2DraftModel or DFlashDraftModel (DSpine)
+  bool has_config = false, drafter = false, dflash = false;  // drafter: an MTP checkpoint; dflash: config names a block drafter (DFlash 2 or DSpine)
   uint64_t bytes = 0;
   int64_t max_positions = 0;  // max_position_embeddings (text_config first), 0 = not in config.json
   int64_t experts = 0, layers = 0;  // routed experts (per layer) and layers (text_config first), 0 = not in config.json
@@ -217,8 +217,8 @@ std::vector<ModelInfo> scan_models(const std::string &dir);
 // MTP drafter directories that fit a qwen38 target: <target>/runtime/mtp-int4-g32 and the sibling
 // directories named <target>-mtp*.
 std::vector<std::string> drafters_for(const std::string &target);
-// DFlash 2 drafter checkpoints under a models directory: the directories whose config.json names
-// DFlash2DraftModel (qwen35 block drafters).
+// Block drafter checkpoints under a models directory: the directories whose config.json names DFlash 2 or DSpine
+// (arch/common/drafter_archs.hpp).
 std::vector<ModelInfo> dflash_drafters(const std::string &dir);
 
 bool read_text(const std::string &path, std::string &out);
