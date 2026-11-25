@@ -433,6 +433,10 @@ class BatchEngine final : public Engine {
     std::vector<int32_t> drafts;           // speculative: the drafts for the next step
     std::vector<int> tree;  // their parent rows when they are a tree (StepModel::draft_parents)
     clock::time_point t_submit, t_admit;
+    clock::time_point t_first{};       // XEN_REQ_LOG: its first emitted token
+    size_t cached = 0;                 // XEN_REQ_LOG: prompt tokens continued from the prefix cache
+    uint32_t dec_steps = 0;            // XEN_REQ_LOG: decode steps it took part in
+    uint64_t dec_peers = 0;            // XEN_REQ_LOG: the other requests in those steps, summed
     // (shared KV pool): the emitted tokens, the submitted prompt's length; a preempted request (its pages taken
     // for another) waits in resume_ and recomputes its KV: prompt = the submitted prompt + every emitted token
     std::vector<int32_t> out;
@@ -662,6 +666,8 @@ class BatchEngine final : public Engine {
   // status line
   clock::time_point log_at_;
   clock::time_point last_step_end_;  // the last decode step's end (XEN_PF_LOG)
+  double pf_credit_ms_ = 0;          // XEN_PREFILL_SHARE: prefill time credit while others decode
+  clock::time_point pf_loop_t_{};    // XEN_PREFILL_SHARE: when the previous loop decided
   std::vector<double> step_ms_;
   uint64_t log_prefill_tokens_ = 0;
   double log_prefill_s_ = 0;

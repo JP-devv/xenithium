@@ -313,6 +313,7 @@ Finish BatchEngine::emit(Req &r, int32_t tok, TokenLogprob *lp, Event &ev) {
   ev.tokens[ev.n++] = tok;
   if (cfg_.lookup > 0) r.lk_hist.push_back(tok);
   if (kv_shared_ || pc_on_ || tiers_ > 1) r.out.push_back(tok);  // a preempted request re-prefills them; the parked history
+  if (r.generated == 0) r.t_first = clock::now();
   ++r.generated;
   r.next = tok;
   if (is_stop(r, tok)) {
@@ -378,6 +379,7 @@ int BatchEngine::cands_for(const std::vector<const Req *> &reqs) const {
 void BatchEngine::spec_step(const std::vector<size_t> &dec_in, std::vector<std::pair<size_t, Finish>> &done, uint64_t &gen_add) {
   const int N = static_cast<int>(dec_in.size());
   const auto t_step = clock::now();  // the step's time per (sequences, rows per sequence)
+  for (size_t i : dec_in) ++active_[i]->dec_steps, active_[i]->dec_peers += static_cast<uint64_t>(N - 1);
   std::vector<size_t> dec = dec_in;
   std::vector<int> rr(static_cast<size_t>(N)), off(static_cast<size_t>(N));  // rows and first row of each segment
   int sr = 1;
@@ -1172,6 +1174,17 @@ std::vector<int> BatchEngine::pick_layout(const std::vector<size_t> &going) {
 
 void BatchEngine::retire(size_t i, Finish f) {
   Req &r = *active_[i];
+  static const bool req_log = util::env_flag("XEN_REQ_LOG");
+  if (req_log) {
+    const auto now = clock::now();
+    const bool any = r.generated > 0 && r.t_first != clock::time_point{};
+    const double ttft = any ? dsec(r.t_first - r.t_submit).count() : -1.0, dec_s = any ? dsec(now - r.t_first).count() : 0.0;
+    std::fprintf(stderr, "REQ_DONE id=%llu slot=%d prompt=%zu cached=%zu gen=%d ttft_s=%.2f decode_s=%.2f tok_s=%.1f steps=%u tok_per_step=%.2f peers=%.2f finish=%d\n",
+                 static_cast<unsigned long long>(r.id), r.slot, r.prompt_len, r.cached, r.generated, ttft, dec_s,
+                 dec_s > 0 && r.generated > 1 ? (r.generated - 1) / dec_s : 0.0, r.dec_steps,
+                 r.dec_steps ? static_cast<double>(r.generated) / r.dec_steps : 0.0,
+                 r.dec_steps ? static_cast<double>(r.dec_peers) / r.dec_steps : 0.0, static_cast<int>(f));
+  }
   if (r.slot >= 0) {
     if (pc_on_) pc_park(r, f);           // the slot keeps its sequence (pages, live state, snapshots)
     else if (kv_shared_) m_.kv_release(r.slot);  // the pages back to the pool
@@ -2031,6 +2044,7 @@ void BatchEngine::loop() {
       r->slot = slot;
       r->tier = tier;
       r->prefilled = static_cast<size_t>(start);
+      r->cached = static_cast<size_t>(start);
       r->pos = start;
       r->prompt_len = r->prompt.size();
       if (cfg_.lookup > 0) {  // the lookup's history starts from the prompt (a resumed request's holds its output too)
@@ -2172,7 +2186,17 @@ void BatchEngine::loop() {
         }
         pf_pend_.group.clear();
       };
-      if (pf_pend_.active && !pf_pend_.group.empty()) {
+      // XEN_PREFILL_SHARE=s (0<s<1): while other requests decode, prefill gets about s of the loop's wall time (a credit
+      // earned at s x loop time and spent by each prefill call / part); unset: one prefill call or part every loop.
+      static const double pf_share = [] { const char *v = std::getenv("XEN_PREFILL_SHARE"); return v && *v ? std::atof(v) : 0.0; }();
+      const bool pf_shared = decoding && pf_share > 0 && pf_share < 1;
+      const auto pf_now = clock::now();
+      if (!pf_shared) pf_credit_ms_ = 0;
+      else if (pf_loop_t_ != clock::time_point{}) pf_credit_ms_ = std::min(pf_credit_ms_ + pf_share * dsec(pf_now - pf_loop_t_).count() * 1e3, 250.0);
+      pf_loop_t_ = pf_now;
+      const bool pf_hold = pf_shared && pf_credit_ms_ < 0;
+      if (pf_hold) {
+      } else if (pf_pend_.active && !pf_pend_.group.empty()) {
         if (!pf_pend_.finished) {  // the next part (all the rest once nothing decodes)
           const auto ta = clock::now();
           pf_pend_.finished = m_.prefill_advance(decoding ? pf_pend_.layers : m_.prefill_layers());
@@ -2386,6 +2410,7 @@ void BatchEngine::loop() {
         complete(i, n, depth, rows_lp, fit, t0, dsec(clock::now() - t0).count() * 1e3, 1);
         }
       }
+      if (pf_shared && !pf_hold) pf_credit_ms_ -= dsec(clock::now() - pf_now).count() * 1e3;
     }
 
     // 4. one decode step over every request with a token to feed

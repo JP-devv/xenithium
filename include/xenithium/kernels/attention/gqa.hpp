@@ -246,7 +246,7 @@ sycl::event gqa_attn_seg_trained_xl(sycl::queue &q, const GqaShape &s, int rows,
 // The producer must guarantee valid inputs; do not use a malformed plan.
 sycl::event gqa_pack_trained_qsa(sycl::queue &q, int rows, int hkv, const GqaStep &step,
                                 const int32_t *sel, const int32_t *sel_n,
-                                int32_t *entries, int32_t *counts, int32_t *status);
+                                int32_t *entries, int32_t *counts, int32_t *status, uint32_t dense_rows = 0, bool gather = false);
 sycl::event gqa_bounds_page(sycl::queue &q, const GqaShape &s, const GqaCache *caches, int n_caches, int slot, int page);
 sycl::event gqa_bounds_range(sycl::queue &q, const GqaShape &s, const GqaCache &c, int pos0, int m);
 sycl::event gqa_select(sycl::queue &q, const GqaShape &s, int rows, const GqaCache &c, const int32_t *rec, int stride, int seg_rows, const gqa_bf16 *qb,
@@ -285,6 +285,7 @@ struct GqaTrainedPrefill {
   const int32_t *pages = nullptr, *counts = nullptr;
   const uint16_t *masks = nullptr;
   int pitch = 0, rows_per_group = 0;
+  const uint32_t *subtiles = nullptr; // low 4 group bits, then 4 per bundle of eight rows; indexed by union walk
 };
 struct GqaRowsSelect {
   int pages = 0;  // pages per (row block, kv head) once the call's context passes that many; 0 = dense

@@ -15,9 +15,17 @@ class Device {
   ~Device();
   kernels::GqaTrainedPrefill prefill(int card, const kernels::gqa_bf16 *x, int rows, int slot, int pos, int bank_layer = 0, int fa_rows = 0);
   void stage(int card, const kernels::gqa_bf16 *x, int rows, int kv_heads, kernels::GqaStep &step, int bank_layer = 0, int model_layer = -1,
-             uint32_t track=~uint32_t(0),bool sparse=true);
+             uint32_t track=~uint32_t(0),bool sparse=true,uint32_t dense_rows=0);
   void accept(int slot, int pos, int row0, int keep, bool tree_batch=false, uint64_t path=0);
+  // Submission only on the compute queues. The prefix proof is owned by Model.
+  size_t copy_aligned_prefix(int dst, int src, int pos);
+  struct Selection { int eligible, pages; std::vector<int32_t> ids; };
+  std::vector<int32_t> read_logical_pages(int card, int row, int pages);
+  void check_selector_reference(int card, int row, const Selection &picked);
+  // Diagnostic readback only, after a stage that actually scored this row.
+  Selection read_selection(int card, int row);
  private:
+  kernels::GqaTrainedPrefill prefill_plan(int card,int rows,int slot,int pos,int bank,int fa_rows,bool skip_subtiles=false);
   struct Impl;
   std::unique_ptr<Impl> p_;
 };

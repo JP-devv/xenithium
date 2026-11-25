@@ -34,8 +34,6 @@ serve::Options resolve(serve::Options o, std::string_view arch_id) {
     throw serve::OptionError("--kv int8-v4: oneDNN's attention (--prefill-attn onednn) takes int8|bf16 KV");
   if (o.kv == "int8-v4" && o.attn_select > 0)
     throw serve::OptionError("--kv int8-v4: page-selected attention (--attn-select) takes int8|bf16 KV");
-  if (o.kv == "int8-v4" && o.prefill_select > 0)
-    throw serve::OptionError("--kv int8-v4: page-selected prefill (--prefill-select) takes int8|bf16 KV");
   const bool pf_attn_auto = o.prefill_attn == "auto";
   if (pf_attn_auto) o.prefill_attn = kv8 ? "int8-fast" : "fast";
   // the page-selected prefill attention is built in the exact numerics and in what auto serves
