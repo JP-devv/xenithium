@@ -33,7 +33,8 @@ Each served checkpoint keeps its own settings in a file named `<id>.env`. A file
 There are two places for it:
 
 - `models/presets/<id>.env`: the **presets** shipped with the project (tracked in git): `qwen38-flash-next.env`,
-  `qwen38-w4a16-intel.env`, `qwen38-27b.env`, `qwen38-27b-intel.env`, `flint-int4.env`, `nanbeige43-33b.env`. Nothing
+  `qwen38-w4a16-intel.env`, `qwen38-27b.env`, `qwen38-27b-intel.env`, `swift15-27b-int4-baked-qsa.env` (trained QSA; needs the selector bank),
+  `flint-int4.env`, `nanbeige43-33b.env`. Nothing
   on your machine writes them; an update of the project may change them.
 - `models/<id>.env`: **your own file** (git ignores everything in `models/` but `presets/`). The launcher creates it on
   the first save, starting from the preset's lines, and edits only this file from then on. You can also create or edit
@@ -72,7 +73,7 @@ moves them into the model's file.
 
 A model that runs on more than one card count keeps each setup's settings in its own file beside the model's:
 `<id>.tp<N>.env`, where N is the setup's card count. Presets: `qwen38-w4a16-intel.tp1.env` / `.tp2.env` / `.tp4.env`,
-`qwen38-flash-next.tp1.env` / `.tp2.env` / `.tp4.env`, `qwen38-27b-intel.tp1.env` / `.tp2.env`, `qwen38-27b.tp1.env`,
+`qwen38-flash-next.tp1.env` / `.tp2.env` / `.tp4.env`, `qwen38-27b-intel.tp1.env` / `.tp2.env`, `qwen38-27b.tp1.env`, `swift15-27b-int4-baked-qsa.tp2.env`,
 `flint-int4.tp1.env` and `nanbeige43-33b.tp1.env` in `models/presets/`.
 
 The presets' slots and prefill chunk: 16 slots on two and four cards (8 on Flint and Nanbeige, their most), 4 on one

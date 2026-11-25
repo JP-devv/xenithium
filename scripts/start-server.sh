@@ -50,6 +50,7 @@ if [[ "$model_env" == auto ]]; then
   for f in models/*.env models/presets/*.env; do
     [[ "$f" =~ \.tp[0-9]+\.env$ ]] && continue  # a setup file (it names no checkpoint)
     [[ "$f" == models/presets/* && -f "models/${f##*/}" ]] && continue  # your file of that name replaces the preset
+    grep -q "^XEN_PRESET_EXPLICIT=1" "$f" && continue  # a variant that needs extra files: only by name (XEN_MODEL_ENV=<id>)
     [[ -f "$f" ]] && same_dir "$want_model" "$(model_env_model "$f")" && { model_env_file=$f; break; }
   done
 fi

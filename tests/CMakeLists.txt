@@ -41,6 +41,11 @@ xenithium_test(qsa GPU LIBS xenithium_kernels)
 add_executable(xenithium-check-trained-qsa-storage check_trained_qsa_storage.cpp)
 xenithium_sycl(xenithium-check-trained-qsa-storage)
 target_link_libraries(xenithium-check-trained-qsa-storage PRIVATE xenithium_arch)
+# XRV replay of the trained QSA decode score stage: the FMA reference vs the XMX scorer (XEN_QSA_XMX_SCORE) on fixed inputs,
+# timing + top-512 identity against an fp64 CPU reference (exit 1 on a selection mismatch beyond near ties). Not a default ctest.
+add_executable(xenithium-xrv-qsa-trained-score xrv_qsa_trained_score.cpp)
+xenithium_sycl(xenithium-xrv-qsa-trained-score)
+target_link_libraries(xenithium-xrv-qsa-trained-score PRIVATE xenithium_kernels)
 xenithium_test(gqa GPU LIBS xenithium_kernels)
 xenithium_test(gqa128 GPU TIMEOUT 600 LIBS xenithium_kernels)
 xenithium_test(gqa-flint GPU TIMEOUT 600 LIBS xenithium_kernels)
