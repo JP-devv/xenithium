@@ -138,10 +138,12 @@ int main(int argc, char **argv) {
       const std::string md = cfg.model_envs_dir.empty() ? join_path(cfg.root, "models") : cfg.model_envs_dir;
       const ModelEnvView mv = read_model_env(cat, cfg.root, md, env);
       for (const auto &[k, x] : mv.file_values) v[k] = x;
+      for (const auto &[k, x] : mv.setup_values) v[k] = x;  // the setup's file over the model's (start-server.sh)
       for (const auto &[k, x] : mv.env_values) v[k] = x;
       v["XEN_MODEL"] = mv.model;
       std::printf("settings: %s%s\n", mv.file.empty() ? "no per-model file" : tilde(mv.file_exists ? mv.file_source : mv.file).c_str(),
                   mv.file.empty() || mv.file_exists ? "" : " (not created yet)");
+      if (!mv.setup_values.empty()) std::printf("setup: %s\n", tilde(mv.setup_file).c_str());
     } else if (read_text(env, text)) {
       for (const auto &[k, x] : EnvFile::parse(text).values())
         if (cat.find(k)) v[k] = x;

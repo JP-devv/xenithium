@@ -168,7 +168,7 @@ const char *brief_of(std::string_view key) {
        "Gives (int8): + KV pool: twice the tokens of bf16.\n"
        "Takes (int8): - nothing noticeable: the quality change is within run-to-run noise.\n"
        "Gives (int8-v4): + KV pool on the 27B (about 1.3x the tokens of int8) and + decode speed in long conversations. On qwen38 the freed VRAM goes to hot experts.\n"
-       "Takes (int8-v4): - prompt reading speed on the 27B, - a small numerics change."},
+       "Takes (int8-v4): - prompt reading speed on the 27B, - a small numerics change, - on the 27B no decode page selection (`XEN_ATTN_SELECT`); the trained page selection and the long-prompt page selection run on it."},
       {"XEN_KV_SPLIT",
        "qwen38 on four cards: how the two cards that share a KV head store its KV cache.\n"
        "\n"
@@ -276,7 +276,7 @@ const char *brief_of(std::string_view key) {
        "`empty`  the MTP drafter\n"
        "\n"
        "- qwen35 with DFlash 2 (`qwen38-27b-dflash2`): faster than the MTP layer on every kind of text, most on maths.\n"
-       "- qwen35 with DSpine (`qwen38-27b-dspine-b16`, 16-token blocks): with `XEN_SEG_ROWS` 16 one stream drafts the whole block. The shipped 27B settings use it.\n"
+       "- qwen35 with DSpine (`qwen38-27b-dspine-b16`, 16-token blocks): with `XEN_SEG_ROWS` 16 one stream drafts the whole block. The shipped 27B settings use it. It reads the target's output head: a bf16 head, or an int4-only GPTQ head (`swift15-27b-int4-baked`), dequantised a chunk at a time at load.\n"
        "- flint (`flint-dflash2`, its only drafter): a clear gain at 1-2 streams, none from about 4.\n"
        "- qwen38 (`qwen38-flash-next-dflash2`, replaces `XEN_MTP`): ahead on reasoning-heavy requests, behind MTP on plain chat.\n"
        "\n"
@@ -375,7 +375,7 @@ const char *brief_of(std::string_view key) {
        "\n"
        "Gives (deeper): + tokens per step when the guesses land.\n"
        "Takes (deeper): - time per step, wasted when they miss.\n"
-       "Limits: up to 7 guesses with `XEN_SEG_ROWS` 8, 15 with 16. Streams x (guesses + 1) must fit `XEN_STEP_ROWS`.\n"
+       "Limits: up to 7 guesses with `XEN_SEG_ROWS` 8, 15 with 16. Streams x (guesses + 1) must fit `XEN_STEP_ROWS`. The Qwen3.8-27B's MTP drafter alone (no `XEN_DRAFTER_MODEL`) guesses at most 6; deeper entries run at 6.\n"
        "Note: the adaptive depth picks at or below these. flint runs 8-row steps: `7,3,1,1`.\n"
        "Output: the same."},
       {"XEN_DRAFTER_WIDE",
@@ -543,7 +543,8 @@ const char *brief_of(std::string_view key) {
        "\n"
        "Gives: + decode speed in long conversations, more the longer they are and the fewer pages are kept.\n"
        "Takes: - exactness: the output changes once a conversation passes that many pages (fewer pages = further from full attention). - draft trees: such a conversation drafts chains, and so do the ones generating beside it. - a little KV pool: every KV page also stores its key bounds.\n"
-       "Note: a conversation within 1.25x of the page count gains nothing; a shorter one runs as with `0`. Runs with `XEN_DECODE_ATTN` auto, exact or int8-fast."},
+       "Note: a conversation within 1.25x of the page count gains nothing; a shorter one runs as with `0`. Runs with `XEN_DECODE_ATTN` auto, exact or int8-fast.\n"
+       "Needs: an int8 or bf16 KV cache; it has no int8-v4 kernel and the server refuses it there. On int8-v4 the Qwen3.8-27B's trained page selection (`XEN_TRAINED_QSA_DELTA_DIR`) reads the 512 best four-token blocks instead."},
       {"XEN_SELECT_HEADS",
        "qwen35: with `XEN_ATTN_SELECT` above 128, how the pages are shared among the attention heads.\n"
        "\n"
@@ -563,7 +564,7 @@ const char *brief_of(std::string_view key) {
        "\n"
        "Gives: + prompt reading speed on long prompts, more the longer they are and the fewer pages are kept.\n"
        "Takes: - exactness: the stored prompt differs from a fully read one once it passes that many pages, and a cached prefix keeps the way it was read. - a little KV pool: every KV page also stores its key bounds.\n"
-       "Note: a prompt within 1.25x of the page count gains nothing; a shorter one is read as with `0`. Runs with `XEN_PREFILL_ATTN` auto or exact."},
+       "Note: a prompt within 1.25x of the page count gains nothing; a shorter one is read as with `0`. Runs with `XEN_PREFILL_ATTN` auto or exact, on every KV cache (int8-v4 included). Beside the trained page selection it is the faster way to read long prompts: `256` there, and the trained prompt reading (`XEN_TRAINED_QSA_PREFILL_XMX`) stays off."},
       {"XEN_W4_ITEMS",
        "qwen35: how the int4 matrix work is split across the GPU while generating.\n"
        "\n"
@@ -1013,6 +1014,258 @@ const char *brief_of(std::string_view key) {
        "\n"
        "Lower: + VRAM headroom on tight cards. Takes: - a recording (~20-40 ms) whenever a dropped step shape comes back.\n"
        "Output: the same."},
+      {"XEN_PREFILL_SHARE",
+       "How the loop divides its time between reading new prompts and generating for the requests that are already answering. By default every loop turn runs one prompt call (or one part of a split call) next to the generation step, so a long prompt arriving slows down every stream that is generating while it is read. With a share `s` between 0 and 1, while any request generates, prompt reading gets about `s` of the loop's wall time and generation the rest; with nothing generating, prompts run at full speed again.\n"
+       "\n"
+       "`empty`  off: one prompt call or part every loop turn (the default)\n"
+       "`0.33`  about a third of the time for prompts, two thirds for generation\n"
+       "\n"
+       "Gives: + steadier and faster generation for the users already answering while long prompts arrive (interactive serving with several users).\n"
+       "Takes: - a long prompt can take longer to read while others generate (it gets at most its share).\n"
+       "Note: every model. 0 and 1 also mean off.\n"
+       "Output: the same."},
+      {"XEN_TRAINED_QSA_DELTA_DIR",
+       "Turns trained page selection on for the Qwen3.8-27B: the folder of the trained indexer, a small scorer per global-attention layer (downloaded separately; the int4-baked QSA preset names it). In speculative decoding past 8,192 tokens of context, each layer's scorer ranks the completed four-token blocks of the past for every new token, and attention reads only the 512 best (plus the token's own block) instead of the whole context. Layers missing from the bank, short contexts and prompts keep full attention.\n"
+       "\n"
+       "`empty`  off: full attention, nothing allocated (the default)\n"
+       "\n"
+       "Gives: + decode speed at long contexts (tens of thousands of tokens and more), more with longer contexts and more streams.\n"
+       "Takes: - VRAM for the scorer weights and every slot's block summaries; - replies are no longer identical to full attention (each token reads part of the past).\n"
+       "Needs: the int8-v4 KV cache (its pool a token count or auto), a block drafter (XEN_DRAFTER_MODEL) and a context of 2,049-262,144; the server refuses to start otherwise. The long-context page selection (XEN_ATTN_SELECT) has no int8-v4 kernel and is not used with it. Image input is not supported with it.\n"
+       "Output: differs from full attention."},
+      {"XEN_TRAINED_QSA_TILED_SCORE",
+       "How the scorer computes the block scores of chain verifier steps. Tiled: one kernel scores a tile of up to 16 rows per stream and 32 rows per step together, with the same arithmetic order as the untiled scorer; steps outside the tile use the untiled one.\n"
+       "\n"
+       "`1`  tiled scorer\n"
+       "`0`  untiled scorer (the default)\n"
+       "\n"
+       "Gives (1): + decode speed (a cheaper scoring pass every step).\n"
+       "Takes (1): nothing.\n"
+       "Note: draft trees with selection (XEN_TRAINED_QSA_TREE) need it.\n"
+       "Output: the same."},
+      {"XEN_TRAINED_QSA_POOL_FP16",
+       "The format of the block summaries the scorer ranks: one 128-value key per completed four-token block, kept for every slot and trained layer for the whole context. FP16 halves their VRAM; the scores are still computed in FP32 (the summaries are widened first), and the current query and unfinished blocks stay FP32.\n"
+       "\n"
+       "`1`  FP16 summaries\n"
+       "`0`  FP32 summaries (the default)\n"
+       "\n"
+       "Gives (1): + half the summaries' VRAM (room for a larger KV pool or more slots); the XMX scorer (XEN_QSA_XMX_SCORE) needs it.\n"
+       "Takes (1): - rounding: blocks with nearly equal scores can be picked differently than with FP32.\n"
+       "Output: can differ from FP32 summaries."},
+      {"XEN_TRAINED_QSA_TREE",
+       "Lets draft-tree verifier steps (XEN_DRAFTER_TREE) read selectively as well; without it every tree step reads the full context. With it, each eligible tree segment (a stream with complete history, past 8,192 tokens, at most 16 tree rows) takes the selection, and the other rows of the step keep full attention.\n"
+       "\n"
+       "`1`  tree steps select\n"
+       "`0`  tree steps read the full context (the default)\n"
+       "\n"
+       "Gives (1): + decode speed at long contexts whenever the drafter grows trees (the first streams, XEN_DRAFTER_TREE_SEQS).\n"
+       "Takes (1): nothing beyond the selection's own cost.\n"
+       "Needs: tiled scoring (XEN_TRAINED_QSA_TILED_SCORE 1); the server refuses to start without it.\n"
+       "Output: differs from full attention, like every selected step."},
+      {"XEN_QSA_XMX_SCORE",
+       "Computes the block scores on the cards' matrix engines (XMX, FP16 products) instead of vector FMA. The query is split into two FP16 halves (high and low part), so the products stay close to FP32 and the 512 picks normally match the vector scorer.\n"
+       "\n"
+       "`1`  XMX scorer\n"
+       "`0`  vector scorer (the default)\n"
+       "\n"
+       "Gives (1): + decode speed: scoring is the selector's largest cost and becomes several times cheaper.\n"
+       "Takes (1): - repeatability: tree and chain steps score with differently rounded methods, so nearly equal blocks can be picked differently and the same greedy request can return a different reply on another run.\n"
+       "Needs: FP16 summaries (XEN_TRAINED_QSA_POOL_FP16 1); without them the vector scorer runs.\n"
+       "Output: can differ from run to run."},
+      {"XEN_QSA_GATHER",
+       "How attention reads what the scorer picked. Without it the picks are read as whole 64-token KV pages, with the unpicked blocks masked: a page with one picked block is still read in full. With it the walk gathers just the picked four-token blocks (16 per entry, from any pages).\n"
+       "\n"
+       "`1`  gather the picked blocks\n"
+       "`0`  read whole pages (the default)\n"
+       "\n"
+       "Gives (1): + decode speed: less KV traffic per step, the more so the more scattered the picks.\n"
+       "Takes (1): nothing.\n"
+       "Output: the same blocks are read; the attention sums run in another order."},
+      {"XEN_QSA_RESIDENT_SNAPSHOTS",
+       "The scorer needs each slot's block summaries from token zero. A request resumed from the prefix cache (a follow-up turn) gets its KV back but not the summaries, and reads the full context for the rest of the request. With this, prefix-cache snapshots remember which slot's summaries match them, and a turn that resumes in that slot keeps selecting.\n"
+       "\n"
+       "`1`  keep the history\n"
+       "`0`  resumed turns read the full context (the default)\n"
+       "\n"
+       "Gives (1): + decode speed on multi-turn chats and agents with long histories.\n"
+       "Takes (1): nothing beyond the bookkeeping.\n"
+       "Needs: the prefix cache (XEN_PREFIX_CACHE 1). Resuming in another slot also needs XEN_QSA_RESIDENT_FORK_COPY.\n"
+       "Output: differs from full attention, like every selected step."},
+      {"XEN_QSA_RESIDENT_FORK_COPY",
+       "When a prefix-cache snapshot resumes in a different slot than the one that wrote it, also copies its block summaries there, so that request keeps selecting too. Only for snapshots that end on a 64-token page boundary and carry no rotary offset; the others resume with full attention.\n"
+       "\n"
+       "`1`  copy the summaries\n"
+       "`0`  only the writing slot keeps selecting (the default)\n"
+       "\n"
+       "Gives (1): + decode speed when a follow-up turn lands in another slot.\n"
+       "Takes (1): - a copy of the summaries on the card at each such resume.\n"
+       "Needs: XEN_QSA_RESIDENT_SNAPSHOTS 1.\n"
+       "Output: differs from full attention, like every selected step."},
+      {"XEN_TRAINED_QSA_DECODE_MIN_POS",
+       "The context position below which every step reads the full context, on top of the fixed 8,192-token threshold (the higher of the two applies).\n"
+       "\n"
+       "`0`  the 8,192-token threshold alone (the default)\n"
+       "\n"
+       "Higher: + full-attention output further into the context; - the selection's speed starts later.\n"
+       "A value past the context: every step reads the full context with the bank loaded (a comparison run).\n"
+       "Output: the same as full attention below the position."},
+      {"XEN_TRAINED_QSA_PREFILL_XMX",
+       "Reads long prompts selectively too. Past XEN_TRAINED_QSA_PREFILL_MIN_POS, every prompt chunk's queries are scored on XMX (BF16) against the completed blocks, and each query reads only its 512 best blocks instead of the whole prefix.\n"
+       "\n"
+       "`1`  selected prompt reading\n"
+       "`0`  full prompt attention, or the long-prompt page selection (the default)\n"
+       "\n"
+       "Gives (1): + prompt reading speed on very long prompts.\n"
+       "Takes (1): - the prompt is read differently from full attention (BF16 scores, part of the prefix); - VRAM for its workspace.\n"
+       "Needs: the full bank (XEN_TRAINED_QSA_DELTA_DIR), one slot (four with XEN_TRAINED_QSA_PREFILL_4SLOT_SINGLE_SEG), the int8-fast prompt attention and no prompt slicing. It stays off while the long-prompt page selection (XEN_PREFILL_SELECT) is on, which reads long prompts faster.\n"
+       "Output: differs from full attention."},
+      {"XEN_TRAINED_QSA_PREFILL_MIN_POS",
+       "The prompt position from which the selected prompt reading starts; earlier chunks read the full prefix. A multiple of 64, at least 2,112 and below the context.\n"
+       "\n"
+       "`empty`  32,768 (the default)\n"
+       "\n"
+       "Lower: + more of the prompt read selectively (faster); - more of it read differently from full attention.\n"
+       "Needs: XEN_TRAINED_QSA_PREFILL_XMX 1; the server refuses it otherwise."},
+      {"XEN_TRAINED_QSA_PREFILL_4SLOT_SINGLE_SEG",
+       "Allows the selected prompt reading on a server with four slots (XEN_SLOTS 4) instead of one. Prompt calls that carry one prompt read it selectively; calls that merge several prompts read the full prefix unless XEN_TRAINED_QSA_PREFILL_MERGED is on.\n"
+       "\n"
+       "`1`  allowed with four slots\n"
+       "`0`  one slot only (the default)\n"
+       "\n"
+       "Gives (1): + the selected prompt reading for up to four users.\n"
+       "Needs: XEN_SLOTS 4 and XEN_TRAINED_QSA_PREFILL_XMX 1; the server refuses it otherwise.\n"
+       "Output: differs from full attention."},
+      {"XEN_TRAINED_QSA_PREFILL_MERGED",
+       "Gives each prompt of a merged prompt call (several prompts read in one call) its own selection, instead of reading the full prefix for all of them.\n"
+       "\n"
+       "`1`  merged calls select per prompt\n"
+       "`0`  merged calls read the full prefix (the default)\n"
+       "\n"
+       "Gives (1): + prompt reading speed when several long prompts arrive together.\n"
+       "Needs: XEN_TRAINED_QSA_PREFILL_4SLOT_SINGLE_SEG 1; the server refuses it otherwise.\n"
+       "Output: differs from full attention."},
+      {"XEN_PF_SUBTILE_SKIP",
+       "In the selected prompt reading, skips the parts of each 40-row attention group that picked nothing from a page, instead of computing them and masking the result.\n"
+       "\n"
+       "`1`  skip them\n"
+       "`0`  compute and mask (the default)\n"
+       "\n"
+       "Gives (1): + prompt reading speed.\n"
+       "Takes (1): - a small table in VRAM.\n"
+       "Needs: XEN_TRAINED_QSA_PREFILL_XMX 1 with the native 40-row groups; refused next to the prompt replay switches (XEN_PF_TOPK_*).\n"
+       "Output: the same."},
+      {"XEN_TRAINED_QSA_SHARE_SCRATCH",
+       "The selector's work buffers (projections, scores, candidates) each have their own VRAM by default. This lays them over one another, sized for the largest stage at a time.\n"
+       "\n"
+       "`1`  one shared buffer\n"
+       "`0`  separate buffers (the default)\n"
+       "\n"
+       "Gives (1): + VRAM headroom (room for a larger KV pool or another slot).\n"
+       "Takes (1): nothing.\n"
+       "Output: the same."},
+      {"XEN_TRAINED_QSA_STREAM_PROJECTION",
+       "Keeps the scorer's projection weights (three matrices per trained layer) in pinned host memory and copies a layer's matrices to the card when that layer runs, instead of holding all of them on every card.\n"
+       "\n"
+       "`1`  copy from the host as needed\n"
+       "`0`  all weights in VRAM (the default)\n"
+       "\n"
+       "Gives (1): + VRAM headroom: the weights of every trained layer but one.\n"
+       "Takes (1): - decode and prompt speed (a host-to-card copy for each trained layer of every step); - pinned host RAM.\n"
+       "Output: the same."},
+      {"XEN_REQ_LOG",
+       "Diagnostic: one `REQ_DONE` log line per finished request with its slot, prompt and cached tokens, tokens generated, time to first token, decode time and speed, verifier steps and tokens per step, the average number of streams beside it, and why it finished.\n"
+       "\n"
+       "Takes: nothing measurable (one line per request)."},
+      {"XEN_DEPTH_TRACE",
+       "Diagnostic for the adaptive draft depth (XEN_ADAPTIVE_DEPTH): a log line each time it changes the depth or the drafter layers used at a stream count, with the tokens per millisecond before and after.\n"
+       "\n"
+       "Takes: nothing measurable."},
+      {"XEN_QSA_TRIAL_ROUTE_LOG",
+       "Trained page selection diagnostic: one log line per stream per verifier step with the route its attention took and why: `covered` or `covered-tree` (selected), `short` (under the threshold), `incomplete` (history missing, e.g. resumed from the cache), `tree` (tree steps without XEN_TRAINED_QSA_TREE), `mixed`.\n"
+       "\n"
+       "Takes: - decode speed (very verbose). Never use it to measure speed."},
+      {"XEN_DSPINE_ONEUSER_AUDIT",
+       "Block drafter diagnostic: per verifier step, one `ONE128_VERIFY` line per stream (position, rows, tree or chain, selected or full attention and why), and one `ONE128_DRAFT` line per drafting pass naming the drafter that ran.\n"
+       "\n"
+       "Takes: - decode speed (very verbose). Never use it to measure speed."},
+      {"XEN_DSPINE_PREFILL_DISPATCH_LOG",
+       "Diagnostic: logs which attention kernels a single prompt's call uses at three fixed positions (32,768, 190,464 and 260,096 tokens), to check the long-prompt dispatch."},
+      {"XEN_BENCH_VERIFY_LOG",
+       "Benchmark diagnostic: one `BENCH_VERIFY` line per stream per verifier step and per prompt call, with host start and end timestamps, rows and committed tokens, for drawing timelines offline. Host clock only, no waits on the cards.\n"
+       "\n"
+       "Takes: - a little decode speed (log lines every step)."},
+      {"XEN_BENCH_RUBY_ROUNDS",
+       "Benchmark diagnostic for speculative decoding rounds.\n"
+       "\n"
+       "`1`  one `RUBY_ROUND` line per round with the host time of each stage (prepare, verify, picks, acceptance, drafting) and one `RUBY_SCALE` line with proposed and accepted tokens and their hashes\n"
+       "`2`  also times the cards' attention on six sampled 7-row selected steps past XEN_BENCH_CONTEXT_ROWS + 16 (two cards)\n"
+       "\n"
+       "Takes: - decode speed. Never use it to measure speed."},
+      {"XEN_BENCH_CONTEXT_ROWS",
+       "Benchmark diagnostic: the length of the benchmark's frozen prompt. The round timing samples (XEN_BENCH_RUBY_ROUNDS 2) start 16 tokens past it, and the prompt replay (XEN_PF_TOPK_PROMPT_IDS) reads that many token ids (8,200, 131,072 or 261,744).\n"
+       "\n"
+       "`empty`  261,744 tokens for the replay, samples from token 16"},
+      {"XEN_BENCH_FAIR_PREFILL",
+       "Benchmark scheduling: prompts of equal length are read in turns (the least-read first) instead of shortest-remaining first, so a burst of identical prompts reaches generation together. Other prompts keep the normal order.\n"
+       "\n"
+       "Takes: - the first of the burst answers later."},
+      {"XEN_BENCH_HOLD_DECODE_5X176073",
+       "Benchmark scheduling: requests with a 176,073-token prompt do not start generating until five of them are ready; then all five start together (`BENCH_HOLD_DECODE_RELEASE` in the log). One cohort per server start; other requests are unaffected. Only for a synchronized five-user long-context run."},
+      {"XEN_PF_TOPK_CHUNK",
+       "Selected prompt reading diagnostic: fixes the selector's candidate chunk at 8,192 blocks, instead of the size it derives from the context, to compare the picks.\n"
+       "\n"
+       "`8192`  8,192-block chunks (the one value accepted)\n"
+       "\n"
+       "Needs: XEN_TRAINED_QSA_PREFILL_XMX 1."},
+      {"XEN_PF_TOPK_PROMPT_IDS",
+       "Prompt replay diagnostic: a file of the frozen prompt's token ids (little-endian int32, XEN_BENCH_CONTEXT_ROWS of them). A request with exactly this prompt is tagged (`PF_TOPK_TAG` in the log) for the replay; the file must match XEN_PF_TOPK_PROMPT_SHA256."},
+      {"XEN_PF_TOPK_PROMPT_SHA256",
+       "Prompt replay diagnostic: the SHA-256 (64 hex digits) of the prompt ids in XEN_PF_TOPK_PROMPT_IDS; the server refuses a file that does not match its benchmark prompts."},
+      {"XEN_PF_TOPK_REPLAY_DIR",
+       "Selected prompt reading diagnostic: captures the tagged prompt's chunk at position 194,560 (2,048 rows), replays its scoring, picks and attention against a reference and writes the comparison to this folder; the server stops with an error when they disagree.\n"
+       "\n"
+       "Needs: XEN_TRAINED_QSA_PREFILL_XMX 1, one slot, 2,048-token prompt chunks."},
+      {"XEN_QSA_PACK_CHECK",
+       "Trained page selection diagnostic: for the first N steps on card 0, reads back the packed attention entries and checks them against a host reference; the log reports mismatches.\n"
+       "\n"
+       "`0`  off (the default)\n"
+       "\n"
+       "Takes: - decode speed during the checked steps (waits on the card)."},
+      {"XEN_QSA_SCORE_CHECK",
+       "Trained page selection diagnostic: for the first N XMX scoring passes on card 0, also computes the scores with the vector scorer and logs how far the two differ.\n"
+       "\n"
+       "`0`  off (the default)\n"
+       "\n"
+       "Needs: XEN_QSA_XMX_SCORE 1 and XEN_TRAINED_QSA_POOL_FP16 1.\n"
+       "Takes: - decode speed during the checked steps."},
+      {"XEN_TRAINED_QSA_FP16_AUDIT_DIR",
+       "Trained page selection diagnostic: keeps an FP32 copy of one bank layer's summaries (model layer 27) next to the FP16 ones, replays the FP32 picks on six selected steps and writes how they differ to this folder.\n"
+       "\n"
+       "Needs: XEN_TRAINED_QSA_POOL_FP16 1, tiled scoring and five slots; the server refuses other setups.\n"
+       "Takes: - VRAM for the FP32 copy, - decode speed."},
+      {"XEN_TRAINED_QSA_TREE_AUDIT_DIR",
+       "Trained page selection diagnostic: on tree steps of model layer 27, compares the trained tree selection with its reference and writes the result to this folder.\n"
+       "\n"
+       "Needs: one slot, FP16 summaries with tiled scoring and the full bank, no other audit; the server refuses other setups.\n"
+       "Takes: - VRAM, - decode speed."},
+      {"XEN_TRAINED_QSA_TRACE_MARKER",
+       "Diagnostic: while the named file exists, logs for every stream and step the KV pages each row reads. Only without a trained bank (with XEN_TRAINED_QSA_DELTA_DIR set it logs nothing). Create and delete the file to trace a window of a run.\n"
+       "\n"
+       "Takes: - decode speed while tracing."},
+      {"XEN_PF_DENSE_ONEDNN_LOG",
+       "qwen38 diagnostic for the oneDNN prompt GEMMs of the dense trunk (XEN_PREFILL_GEMM onednn): one line per new matrix shape saying whether oneDNN or the engine's own kernel runs it (oneDNN is kept only where it gives the engine's bits)."},
+      {"XEN_PF_DENSE_ONEDNN_SLOTS",
+       "qwen38, oneDNN prompt GEMMs of the dense trunk: how many repacked weight matrices stay cached on each card.\n"
+       "\n"
+       "`empty`  4 (the default)\n"
+       "\n"
+       "More: + fewer repacks during long prompts; - VRAM (one largest int8 matrix per slot)."},
+      {"XEN_PF_ONEDNN_SLOTS",
+       "The int4 prompt GEMMs on oneDNN (XEN_PREFILL_GEMM onednn): how many repacked int4 weight matrices stay cached on each card.\n"
+       "\n"
+       "`empty`  2 (the default)\n"
+       "\n"
+       "More: + fewer repacks per prompt call; - VRAM (one repacked matrix per slot)."},
   };
   for (const auto &[k, v] : t)
     if (key == k) return v;
@@ -1032,7 +1285,7 @@ std::vector<Spec> schema() {
   };
   const std::string net = "Model & network", cap = "Capacity & memory", spec = "Speculative decoding", num = "Numerics & kernels",
                     pf = "Prompt processing & cache", q = "Queue & connections", rt = "Runtime", dg = "Diagnostics",
-                    smp = "Sampling defaults";
+                    smp = "Sampling defaults", tq = "Trained page selection";
   add("XEN_MODEL", "Model", net, Kind::Path);
   {
     auto &s = add("XEN_MODELS_DIR", "Models folder", net, Kind::Path);
@@ -1317,10 +1570,9 @@ std::vector<Spec> schema() {
     s.names = {{"0", "off"}, {"4", "4-token match (default)"}, {"3", "3-token match"}, {"6", "6-token match"}};
   }
   {
-    auto &s = add("XEN_MTP_DEPTH", "MTP depth", spec, Kind::Choice);  // one decoding sequence
-    s.scope = Scope::Qwen38;
-    s.choices = {"3", "2", "1"};
-    s.names = {{"3", "MTP-3 (default)"}, {"2", "MTP-2"}, {"1", "MTP-1"}};
+    auto &s = add("XEN_MTP_DEPTH", "MTP depth", spec, Kind::Choice);  // one decoding sequence; qwen38 1-3, the dense 27B 1-6
+    s.choices = {"3", "2", "1", "4", "5", "6"};
+    s.names = {{"3", "MTP-3 (default)"}, {"2", "MTP-2"}, {"1", "MTP-1"}, {"4", "MTP-4 (Qwen3.8-27B)"}, {"5", "MTP-5 (Qwen3.8-27B)"}, {"6", "MTP-6 (Qwen3.8-27B)"}};
   }
   {
     auto &s = add("XEN_PREFILL_MOE", "Prefill experts", num, Kind::Choice);
@@ -1770,6 +2022,260 @@ std::vector<Spec> schema() {
     s.lo = 4;
     s.allow_empty = true;
   }
+  {
+    auto &s = add("XEN_PREFILL_SHARE", "Prompt time share while decoding", pf, Kind::Float);
+    s.diag = true;
+    s.lo = 0;
+    s.hi = 1;
+    s.allow_empty = true;
+    s.choices = {"0.33", "0.5"};
+  }
+  {
+    auto &s = add("XEN_TRAINED_QSA_DELTA_DIR", "Trained bank folder", tq, Kind::Path);
+    s.diag = true;
+    s.scope = Scope::Qwen35;
+    s.allow_empty = true;
+  }
+  {
+    auto &s = add("XEN_TRAINED_QSA_TILED_SCORE", "Tiled scoring", tq, Kind::Bool);
+    s.diag = true;
+    s.scope = Scope::Qwen35;
+    s.allow_empty = true;
+  }
+  {
+    auto &s = add("XEN_TRAINED_QSA_POOL_FP16", "Block summaries in FP16", tq, Kind::Bool);
+    s.diag = true;
+    s.scope = Scope::Qwen35;
+    s.allow_empty = true;
+  }
+  {
+    auto &s = add("XEN_TRAINED_QSA_TREE", "Selection in draft trees", tq, Kind::Bool);
+    s.diag = true;
+    s.scope = Scope::Qwen35;
+    s.allow_empty = true;
+  }
+  {
+    auto &s = add("XEN_QSA_XMX_SCORE", "Scoring on XMX", tq, Kind::Bool);
+    s.diag = true;
+    s.scope = Scope::Qwen35;
+    s.allow_empty = true;
+  }
+  {
+    auto &s = add("XEN_QSA_GATHER", "Read only the selected blocks", tq, Kind::Bool);
+    s.diag = true;
+    s.scope = Scope::Qwen35;
+    s.allow_empty = true;
+  }
+  {
+    auto &s = add("XEN_QSA_RESIDENT_SNAPSHOTS", "Keep selection history in the prefix cache", tq, Kind::Bool);
+    s.diag = true;
+    s.scope = Scope::Qwen35;
+    s.allow_empty = true;
+  }
+  {
+    auto &s = add("XEN_QSA_RESIDENT_FORK_COPY", "Copy selection history to another slot", tq, Kind::Bool);
+    s.diag = true;
+    s.scope = Scope::Qwen35;
+    s.allow_empty = true;
+  }
+  {
+    auto &s = add("XEN_TRAINED_QSA_DECODE_MIN_POS", "Selection starts at position", tq, Kind::Int);
+    s.diag = true;
+    s.scope = Scope::Qwen35;
+    s.lo = 0;
+    s.allow_empty = true;
+    s.choices = {"0", "16384", "32768"};
+    s.names = {{"0", "the 8,192-token threshold"}};
+    s.unit = "tokens";
+  }
+  {
+    auto &s = add("XEN_TRAINED_QSA_PREFILL_XMX", "Selected prompt reading (XMX)", tq, Kind::Bool);
+    s.diag = true;
+    s.scope = Scope::Qwen35;
+    s.allow_empty = true;
+  }
+  {
+    auto &s = add("XEN_TRAINED_QSA_PREFILL_MIN_POS", "Selected prompt reading from", tq, Kind::Int);
+    s.diag = true;
+    s.scope = Scope::Qwen35;
+    s.lo = 2112;
+    s.multiple = 64;
+    s.allow_empty = true;
+    s.choices = {"32768", "16384", "65536"};
+    s.unit = "tokens";
+  }
+  {
+    auto &s = add("XEN_TRAINED_QSA_PREFILL_4SLOT_SINGLE_SEG", "Selected prompt reading with 4 slots", tq, Kind::Bool);
+    s.diag = true;
+    s.scope = Scope::Qwen35;
+    s.allow_empty = true;
+  }
+  {
+    auto &s = add("XEN_TRAINED_QSA_PREFILL_MERGED", "Selected reading in merged prompt calls", tq, Kind::Bool);
+    s.diag = true;
+    s.scope = Scope::Qwen35;
+    s.allow_empty = true;
+  }
+  {
+    auto &s = add("XEN_PF_SUBTILE_SKIP", "Skip unpicked prompt subtiles", tq, Kind::Bool);
+    s.diag = true;
+    s.scope = Scope::Qwen35;
+    s.allow_empty = true;
+  }
+  {
+    auto &s = add("XEN_TRAINED_QSA_SHARE_SCRATCH", "Shared selector scratch", tq, Kind::Bool);
+    s.diag = true;
+    s.scope = Scope::Qwen35;
+    s.allow_empty = true;
+  }
+  {
+    auto &s = add("XEN_TRAINED_QSA_STREAM_PROJECTION", "Scorer weights in host memory", tq, Kind::Bool);
+    s.diag = true;
+    s.scope = Scope::Qwen35;
+    s.allow_empty = true;
+  }
+  {
+    auto &s = add("XEN_REQ_LOG", "Request log", dg, Kind::Bool);
+    s.diag = true;
+    s.allow_empty = true;
+  }
+  {
+    auto &s = add("XEN_DEPTH_TRACE", "Adaptive depth log", dg, Kind::Bool);
+    s.diag = true;
+    s.allow_empty = true;
+  }
+  {
+    auto &s = add("XEN_QSA_TRIAL_ROUTE_LOG", "Trained selection route log", dg, Kind::Bool);
+    s.diag = true;
+    s.scope = Scope::Qwen35;
+    s.allow_empty = true;
+  }
+  {
+    auto &s = add("XEN_DSPINE_ONEUSER_AUDIT", "Verifier step audit", dg, Kind::Bool);
+    s.diag = true;
+    s.scope = Scope::Qwen35;
+    s.allow_empty = true;
+  }
+  {
+    auto &s = add("XEN_DSPINE_PREFILL_DISPATCH_LOG", "Prompt dispatch log", dg, Kind::Bool);
+    s.diag = true;
+    s.scope = Scope::Qwen35;
+    s.allow_empty = true;
+  }
+  {
+    auto &s = add("XEN_BENCH_VERIFY_LOG", "Verifier timeline log", dg, Kind::Bool);
+    s.diag = true;
+    s.allow_empty = true;
+  }
+  {
+    auto &s = add("XEN_BENCH_RUBY_ROUNDS", "Verifier round timing", dg, Kind::Choice);
+    s.diag = true;
+    s.scope = Scope::Qwen35;
+    s.allow_empty = true;
+    s.choices = {"", "1", "2"};
+    s.names = {{"", "off"}, {"1", "1 (host stages)"}, {"2", "2 (+ device samples)"}};
+  }
+  {
+    auto &s = add("XEN_BENCH_CONTEXT_ROWS", "Benchmark prompt length", dg, Kind::Int);
+    s.diag = true;
+    s.scope = Scope::Qwen35;
+    s.lo = 0;
+    s.allow_empty = true;
+    s.unit = "tokens";
+  }
+  {
+    auto &s = add("XEN_BENCH_FAIR_PREFILL", "Equal prompts in turns", dg, Kind::Bool);
+    s.diag = true;
+    s.allow_empty = true;
+  }
+  {
+    auto &s = add("XEN_BENCH_HOLD_DECODE_5X176073", "Hold a 5-user benchmark cohort", dg, Kind::Bool);
+    s.diag = true;
+    s.allow_empty = true;
+  }
+  {
+    auto &s = add("XEN_PF_TOPK_CHUNK", "Prompt selection chunk", dg, Kind::Choice);
+    s.diag = true;
+    s.scope = Scope::Qwen35;
+    s.allow_empty = true;
+    s.choices = {"", "8192"};
+    s.names = {{"", "the selector's own (default)"}};
+  }
+  {
+    auto &s = add("XEN_PF_TOPK_PROMPT_IDS", "Replay prompt ids file", dg, Kind::Path);
+    s.diag = true;
+    s.scope = Scope::Qwen35;
+    s.allow_empty = true;
+    s.path_file = true;
+  }
+  {
+    auto &s = add("XEN_PF_TOPK_PROMPT_SHA256", "Replay prompt hash", dg, Kind::Text);
+    s.diag = true;
+    s.scope = Scope::Qwen35;
+    s.allow_empty = true;
+  }
+  {
+    auto &s = add("XEN_PF_TOPK_REPLAY_DIR", "Prompt selection replay folder", dg, Kind::Path);
+    s.diag = true;
+    s.scope = Scope::Qwen35;
+    s.allow_empty = true;
+  }
+  {
+    auto &s = add("XEN_QSA_PACK_CHECK", "Gather pack check", dg, Kind::Int);
+    s.diag = true;
+    s.scope = Scope::Qwen35;
+    s.lo = 0;
+    s.allow_empty = true;
+    s.unit = "steps";
+  }
+  {
+    auto &s = add("XEN_QSA_SCORE_CHECK", "XMX score check", dg, Kind::Int);
+    s.diag = true;
+    s.scope = Scope::Qwen35;
+    s.lo = 0;
+    s.allow_empty = true;
+    s.unit = "steps";
+  }
+  {
+    auto &s = add("XEN_TRAINED_QSA_FP16_AUDIT_DIR", "FP16 summaries audit folder", dg, Kind::Path);
+    s.diag = true;
+    s.scope = Scope::Qwen35;
+    s.allow_empty = true;
+  }
+  {
+    auto &s = add("XEN_TRAINED_QSA_TREE_AUDIT_DIR", "Tree selection audit folder", dg, Kind::Path);
+    s.diag = true;
+    s.scope = Scope::Qwen35;
+    s.allow_empty = true;
+  }
+  {
+    auto &s = add("XEN_TRAINED_QSA_TRACE_MARKER", "Selection trace marker file", dg, Kind::Path);
+    s.diag = true;
+    s.scope = Scope::Qwen35;
+    s.allow_empty = true;
+    s.path_file = true;
+  }
+  {
+    auto &s = add("XEN_PF_DENSE_ONEDNN_LOG", "oneDNN dense prompt GEMM log", dg, Kind::Bool);
+    s.diag = true;
+    s.scope = Scope::Qwen38;
+    s.allow_empty = true;
+  }
+  {
+    auto &s = add("XEN_PF_DENSE_ONEDNN_SLOTS", "oneDNN dense repack slots", dg, Kind::Int);
+    s.diag = true;
+    s.scope = Scope::Qwen38;
+    s.lo = 1;
+    s.hi = 64;
+    s.allow_empty = true;
+  }
+  {
+    auto &s = add("XEN_PF_ONEDNN_SLOTS", "oneDNN int4 repack slots", dg, Kind::Int);
+    s.diag = true;
+    s.lo = 1;
+    s.hi = 512;
+    s.allow_empty = true;
+  }
   return v;
 }
 
@@ -1891,7 +2397,7 @@ Catalog build_catalog(std::string_view script, std::string_view docs) {
   // Display order, from what is chosen first to what rarely changes: what and where, how much, how it
   // decodes, how prompts are scheduled, the numerics, who may connect, the process, diagnostics.
   static const char *const order[] = {"Model & network", "Capacity & memory", "Speculative decoding", "Prompt processing & cache", "Numerics & kernels",
-                                      "Sampling defaults", "Queue & connections", "Runtime", "Diagnostics", "Other"};
+                                      "Trained page selection", "Sampling defaults", "Queue & connections", "Runtime", "Diagnostics", "Other"};
   auto rank = [&](const std::string &g) {
     for (size_t i = 0; i < std::size(order); ++i)
       if (g == order[i]) return i;
@@ -2082,6 +2588,50 @@ bool flint_skips(std::string_view key) {
   return llama_skips(key);
 }
 
+namespace {
+
+// The trained page selection's settings (the dense 27B with a trained bank) and its diagnostics.
+bool trained_qsa_key(std::string_view key) {
+  static const char *const keys[] = {"XEN_TRAINED_QSA_DELTA_DIR", "XEN_TRAINED_QSA_TILED_SCORE",
+                                     "XEN_TRAINED_QSA_POOL_FP16", "XEN_TRAINED_QSA_TREE", "XEN_QSA_XMX_SCORE", "XEN_QSA_GATHER",
+                                     "XEN_QSA_RESIDENT_SNAPSHOTS", "XEN_QSA_RESIDENT_FORK_COPY", "XEN_TRAINED_QSA_DECODE_MIN_POS",
+                                     "XEN_TRAINED_QSA_PREFILL_XMX", "XEN_TRAINED_QSA_PREFILL_MIN_POS", "XEN_TRAINED_QSA_PREFILL_4SLOT_SINGLE_SEG",
+                                     "XEN_TRAINED_QSA_PREFILL_MERGED", "XEN_PF_SUBTILE_SKIP", "XEN_TRAINED_QSA_SHARE_SCRATCH",
+                                     "XEN_TRAINED_QSA_STREAM_PROJECTION", "XEN_QSA_TRIAL_ROUTE_LOG", "XEN_QSA_PACK_CHECK", "XEN_QSA_SCORE_CHECK",
+                                     "XEN_TRAINED_QSA_FP16_AUDIT_DIR", "XEN_TRAINED_QSA_TREE_AUDIT_DIR", "XEN_TRAINED_QSA_TRACE_MARKER",
+                                     "XEN_PF_TOPK_CHUNK", "XEN_PF_TOPK_PROMPT_IDS", "XEN_PF_TOPK_PROMPT_SHA256", "XEN_PF_TOPK_REPLAY_DIR"};
+  for (const char *k : keys)
+    if (key == k) return true;
+  return false;
+}
+
+// Why a trained page selection setting does nothing with these values ("" = it is used). The server refuses the
+// combinations noted "refused"; the launcher shows them as unused with the setting they need.
+template <class Get>
+std::string trained_qsa_unused(const std::string &key, Get v) {
+  if (!trained_qsa_key(key) || key == "XEN_TRAINED_QSA_DELTA_DIR" || key == "XEN_TRAINED_QSA_TRACE_MARKER") return "";
+  if (v("XEN_TRAINED_QSA_DELTA_DIR").empty()) return "needs a trained bank (XEN_TRAINED_QSA_DELTA_DIR)";
+  auto on = [&](const char *k) { return v(k) == "1"; };
+  if (key == "XEN_TRAINED_QSA_TREE" && !on("XEN_TRAINED_QSA_TILED_SCORE")) return "needs tiled scoring (XEN_TRAINED_QSA_TILED_SCORE 1; refused without)";
+  if (key == "XEN_QSA_XMX_SCORE" && !on("XEN_TRAINED_QSA_POOL_FP16")) return "needs FP16 summaries (XEN_TRAINED_QSA_POOL_FP16 1)";
+  if (key == "XEN_QSA_SCORE_CHECK" && (!on("XEN_QSA_XMX_SCORE") || !on("XEN_TRAINED_QSA_POOL_FP16"))) return "needs the XMX scorer (XEN_QSA_XMX_SCORE 1, FP16 summaries)";
+  if (key == "XEN_TRAINED_QSA_FP16_AUDIT_DIR" && !on("XEN_TRAINED_QSA_POOL_FP16")) return "needs FP16 summaries (XEN_TRAINED_QSA_POOL_FP16 1)";
+  if (key == "XEN_QSA_RESIDENT_SNAPSHOTS" && v("XEN_PREFIX_CACHE") != "1") return "needs the prefix cache (XEN_PREFIX_CACHE 1)";
+  if (key == "XEN_QSA_RESIDENT_FORK_COPY" && !on("XEN_QSA_RESIDENT_SNAPSHOTS")) return "needs XEN_QSA_RESIDENT_SNAPSHOTS 1";
+  if (key == "XEN_TRAINED_QSA_PREFILL_XMX" && !v("XEN_PREFILL_SELECT").empty() && v("XEN_PREFILL_SELECT") != "0")
+    return "off while the long-prompt page selection is on (XEN_PREFILL_SELECT)";
+  if ((key == "XEN_TRAINED_QSA_PREFILL_MIN_POS" || key == "XEN_TRAINED_QSA_PREFILL_4SLOT_SINGLE_SEG" || key == "XEN_PF_SUBTILE_SKIP" ||
+       key == "XEN_PF_TOPK_CHUNK" || key == "XEN_PF_TOPK_REPLAY_DIR") &&
+      !on("XEN_TRAINED_QSA_PREFILL_XMX"))
+    return "needs the selected prompt reading (XEN_TRAINED_QSA_PREFILL_XMX 1; refused without)";
+  if (key == "XEN_TRAINED_QSA_PREFILL_4SLOT_SINGLE_SEG" && v("XEN_SLOTS") != "4") return "needs four slots (XEN_SLOTS 4; refused otherwise)";
+  if (key == "XEN_TRAINED_QSA_PREFILL_MERGED" && !on("XEN_TRAINED_QSA_PREFILL_4SLOT_SINGLE_SEG"))
+    return "needs XEN_TRAINED_QSA_PREFILL_4SLOT_SINGLE_SEG 1 (refused without)";
+  return "";
+}
+
+}  // namespace
+
 bool applies(const Spec &s, std::string_view arch) {
   if (arch == "llama" && llama_skips(s.key)) return false;
   if (arch == "flint" && flint_skips(s.key)) return false;
@@ -2094,6 +2644,7 @@ bool applies(const Spec &s, std::string_view arch) {
   if (arch == "qwen38" && s.key == "XEN_DRAFTER_MTP_FROM") return true;  // Both drafters
   if (arch == "qwen38" && (s.key == "XEN_DRAFTER_TREE" || s.key == "XEN_DRAFTER_TREE_SEQS")) return true;  // DFlash trees
   if (arch == "qwen38" && s.key == "XEN_STEP_ROWS") return true;  // Qwen38's 32-row steps
+  if (trained_qsa_key(s.key)) return arch.empty() || arch == "qwen35";  // the Qwen3.8-27B's selector, not llama / flint
   if (s.scope == Scope::Vision) return arch.empty() || arch == "qwen38" || arch == "qwen35";
   if (arch.empty() || s.scope == Scope::All) return true;
   return (s.scope == Scope::Qwen38 && arch == "qwen38") || (s.scope == Scope::MoE && arch == "qwen38") ||
@@ -2134,7 +2685,17 @@ std::string unused_reason(const Spec &s, std::string_view arch, const Values &va
     if ((s.key == "XEN_DRAFTER_DEFER" || s.key == "XEN_DRAFTER_CUT" || s.key == "XEN_DRAFT_DEPTHS" || s.key == "XEN_ADAPTIVE_DEPTH") && !df)
       return "needs the DFlash drafter (XEN_DRAFTER on + XEN_DRAFTER_MODEL)";
   }
-  if (s.key == "XEN_MTP_DEPTH" && v("XEN_MTP").empty()) return "needs an MTP drafter (XEN_MTP)";
+  if (s.key == "XEN_MTP_DEPTH" && arch != "qwen38") {  // The dense 27B's checkpoint MTP layer; llama / flint have none
+    if (arch != "qwen35") return "no MTP layer";
+    if (v("XEN_DRAFTER") != "1") return "needs the drafter on";
+    if (!v("XEN_DRAFT_DEPTHS").empty()) return "the per-stream depths (XEN_DRAFT_DEPTHS) set it";
+    if (!v("XEN_DRAFTER_MODEL").empty() && v("XEN_DRAFTER_MTP_FROM") == "0") return "the block drafter drafts every step (XEN_DRAFTER_MTP_FROM 0)";
+  }
+  if (arch == "qwen35") {
+    if (const std::string why = trained_qsa_unused(s.key, v); !why.empty()) return why;
+    if ((s.key == "XEN_ATTN_SELECT" || s.key == "XEN_SELECT_HEADS") && v("XEN_KV") == "int8-v4")
+      return "not used with the int8-v4 KV (launched as 0): the trained page selection selects there";
+  }
   if ((s.key == "XEN_ADAPTIVE_DEPTH" || s.key == "XEN_LOOKUP") && arch != "qwen38" && v("XEN_DRAFTER") != "1") return "needs the drafter on";  // qwen35 too
   if (s.key == "XEN_DRAFT_VOCAB" && arch != "qwen38" && v("XEN_DRAFTER") != "1") return "needs the checkpoint drafter on";
   if (s.key == "XEN_UNEQUAL_SEGMENTS" && arch == "qwen35" && v("XEN_DRAFTER") != "1") return "needs the drafter on";
@@ -2457,6 +3018,7 @@ std::string check_value(const Spec &s, const std::string &v, std::string_view ar
       }
       if (s.key == "XEN_KV" && v == "int8-v4" && !arch.empty() && arch != "qwen38" && arch != "qwen35")  // the dense 27B and qwen38
         return "int8-v4 is built for qwen38 and the dense 27B (int8 or bf16 here)";
+      if (s.key == "XEN_MTP_DEPTH" && arch == "qwen38" && v > "3") return "1-3 for qwen38 (4-6 are the Qwen3.8-27B's)";
       if (s.key == "XEN_WIRE" && v == "int8" && !arch.empty() && arch != "qwen35")
         return "the int8 wire is built for the dense 27B (bf16 or fp32 here)";
       return "";
@@ -2485,6 +3047,8 @@ std::string check_value(const Spec &s, const std::string &v, std::string_view ar
       }
       if (!is_dir(p)) return "directory not found";
       if (s.key == "XEN_MODEL" && !is_file(join_path(p, "config.json"))) return "no config.json in this directory";
+      if (QsaBank b; s.key == "XEN_TRAINED_QSA_DELTA_DIR" && !probe_qsa_bank(p, b))  // the server refuses it
+        return "no trained indexer tensors (*.safetensors with _qsa_indexer) in this folder";
       if (s.key == "XEN_DRAFTER_MODEL" && !is_dflash_dir(p)) {
         if (warn_only) *warn_only = true;
         return "config.json names no block drafter (" + xenithium::arch::block_drafter_arch_names() + ")";
@@ -2535,6 +3099,20 @@ std::vector<Issue> validate(const Catalog &cat, const Values &vals, std::string_
     out.push_back({"XEN_KV_POOL_TOKENS", "must hold at least one context (" + with_commas(ctx) + " tokens)", true});
   if (parse_int(get("XEN_CONTEXT"), ctx) && (max_context <= 0 || ctx <= max_context))
     if (const std::string n = yarn_note(arch, ctx, trained); !n.empty()) out.push_back({"XEN_CONTEXT", n, false});
+  // The trained bank's start-up needs (tools/server refuses a start without them). Only settings that are in use: a
+  // setting shown as unused goes back to its default at launch (decode page selection on int8-v4, a trained switch
+  // whose base switch is off), so it never blocks one.
+  if (arch == "qwen35" && !get("XEN_TRAINED_QSA_DELTA_DIR").empty()) {
+    int64_t cx = 0;
+    if (get("XEN_KV") != "int8-v4") out.push_back({"XEN_TRAINED_QSA_DELTA_DIR", "the trained page selection runs on the int8-v4 KV: set XEN_KV int8-v4", true});
+    if (get("XEN_DRAFTER") != "1" || get("XEN_DRAFTER_MODEL").empty())
+      out.push_back({"XEN_TRAINED_QSA_DELTA_DIR", "the trained page selection needs a block drafter (XEN_DRAFTER on + XEN_DRAFTER_MODEL)", true});
+    if (parse_int(get("XEN_CONTEXT"), cx) && (cx <= 2048 || cx > 262144))
+      out.push_back({"XEN_TRAINED_QSA_DELTA_DIR", "the trained page selection needs a max context of 2,049-262,144", true});
+    if (get("XEN_TRAINED_QSA_PREFILL_XMX") == "1" && get("XEN_SLOTS") != "1" && get("XEN_TRAINED_QSA_PREFILL_4SLOT_SINGLE_SEG") != "1" &&
+        (get("XEN_PREFILL_SELECT").empty() || get("XEN_PREFILL_SELECT") == "0"))
+      out.push_back({"XEN_TRAINED_QSA_PREFILL_XMX", "the selected prompt reading needs one slot (four with XEN_TRAINED_QSA_PREFILL_4SLOT_SINGLE_SEG)", true});
+  }
   if (arch == "qwen38") {  // Qwen38's step rows (as tools/server checks them)
     int64_t slots = 0;
     if (get("XEN_STEP_ROWS") == "8" && parse_int(get("XEN_SLOTS"), slots) && slots > 8) out.push_back({"XEN_STEP_ROWS", "8-row steps hold at most 8 streams: XEN_SLOTS 1..8", true});
@@ -2840,10 +3418,24 @@ std::vector<std::string> model_env_files(const std::string &dir) {
   return out;
 }
 
+namespace {
+
+// A preset that needs files beyond the checkpoint (XEN_PRESET_EXPLICIT=1, e.g. a separately downloaded bank) is picked only
+// by its name, as scripts/start-server.sh does: never as the model's settings file.
+bool explicit_preset(const std::string &env_path) {
+  std::string text;
+  if (!read_text(env_path, text)) return false;
+  const Values all = EnvFile::parse(text).values();
+  const auto it = all.find("XEN_PRESET_EXPLICIT");
+  return it != all.end() && it->second == "1";
+}
+
+}  // namespace
+
 std::string find_model_env(const std::string &dir, const std::string &model_path) {
   if (model_path.empty()) return "";
   for (const auto &f : model_env_files(dir))
-    if (same_path(model_env_model(f), model_path)) return f;
+    if (same_path(model_env_model(f), model_path) && !explicit_preset(f)) return f;
   return "";
 }
 
@@ -3058,6 +3650,68 @@ std::vector<ModelInfo> dflash_drafters(const std::string &dir) {
   for (const auto &m : scan_models(dir))
     if (m.dflash) out.push_back(m);
   return out;
+}
+
+bool probe_qsa_bank(const std::string &dir_in, QsaBank &out) {
+  std::string dir = dir_in;
+  while (dir.size() > 1 && dir.back() == '/') dir.pop_back();
+  out = QsaBank{};
+  out.path = dir;
+  if (!is_dir(dir) || is_file(join_path(dir, "config.json"))) return false;  // a checkpoint, not a bank
+  std::set<int> layers;
+  static const std::string tag = ".self_attn._qsa_indexer.";
+  for (const auto &n : list_dir(dir)) {
+    if (n.size() < 12 || n.compare(n.size() - 12, 12, ".safetensors") != 0) continue;
+    // safetensors: an 8-byte little-endian header length, then the JSON header naming every tensor
+    std::ifstream f(join_path(dir, n), std::ios::binary);
+    unsigned char len[8] = {};
+    if (!f.read(reinterpret_cast<char *>(len), 8)) continue;
+    uint64_t hl = 0;
+    for (int i = 7; i >= 0; --i) hl = hl << 8 | len[i];
+    if (hl == 0 || hl > (64u << 20)) continue;
+    std::string header(hl, '\0');
+    if (!f.read(header.data(), static_cast<std::streamsize>(hl))) continue;
+    json::Value v;
+    if (!json::parse(header, v) || !v.is_object()) continue;
+    for (const auto &m : v.obj) {
+      const size_t t = m.first.find(tag), l = m.first.rfind("layers.", t);
+      if (t == std::string::npos || l == std::string::npos) continue;
+      const std::string num = m.first.substr(l + 7, t - l - 7);
+      if (num.empty() || num.size() > 4 || num.find_first_not_of("0123456789") != std::string::npos) continue;
+      layers.insert(std::stoi(num));
+    }
+    out.bytes += static_cast<uint64_t>(std::filesystem::file_size(join_path(dir, n)));
+  }
+  out.layers.assign(layers.begin(), layers.end());
+  return !out.layers.empty();
+}
+
+std::vector<QsaBank> qsa_banks(const std::vector<std::string> &dirs) {
+  std::vector<QsaBank> out;
+  std::set<std::string> seen;
+  for (const auto &d : dirs) {
+    if (d.empty() || !seen.insert(d).second) continue;
+    for (const auto &n : list_dir(d)) {
+      QsaBank b;
+      if (n[0] != '.' && probe_qsa_bank(join_path(d, n), b)) out.push_back(std::move(b));
+    }
+  }
+  std::sort(out.begin(), out.end(), [](const QsaBank &a, const QsaBank &b) { return a.path < b.path; });
+  out.erase(std::unique(out.begin(), out.end(), [](const QsaBank &a, const QsaBank &b) { return a.path == b.path; }), out.end());
+  return out;
+}
+
+std::string qsa_bank_detail(const QsaBank &b) {
+  std::string l;
+  const size_t n = b.layers.size();
+  for (size_t i = 0; i < n; ++i) {
+    if (n > 4 && i == 2) {  // the first two, then the last
+      l += " ... " + std::to_string(b.layers.back());
+      break;
+    }
+    l += (i ? ", " : "") + std::to_string(b.layers[i]);
+  }
+  return std::to_string(n) + (n == 1 ? " layer (" : " layers (") + l + "), " + human_bytes(b.bytes);
 }
 
 std::vector<std::string> complete_path(const std::string &typed, const std::string &root, std::string &common) {

@@ -1330,6 +1330,10 @@ struct App::Impl {
       opts.push_back({"", ""});
       for (const auto &d : dflash_drafters(models_dir())) opts.push_back({d.path, human_bytes(d.bytes)});
     }
+    if (is_bank_key(s.key)) {  // the banks found, with their layers
+      opts.push_back({"", "off"});
+      for (const auto &b : banks()) opts.push_back({b.path, qsa_bank_detail(b)});
+    }
     if (s.key == "XEN_VISION_FFMPEG") {  // The name on PATH (the default), off, and the programs found
       opts.push_back({"ffmpeg", check_value(s, "ffmpeg", model.arch, cfg.root, nullptr, 0).empty() ? "on PATH" : "not on PATH"});
       opts.push_back({"", ""});
@@ -1455,7 +1459,7 @@ struct App::Impl {
       change(s.key, val(s.key) == "1" ? "0" : "1");
       return;
     }
-    if (s.kind == Kind::Choice || !s.choices.empty() || s.key == "XEN_MTP" || s.key == "XEN_HOT_RANK" || s.key == "XEN_DRAFTER_MODEL") {
+    if (s.kind == Kind::Choice || !s.choices.empty() || s.key == "XEN_MTP" || s.key == "XEN_HOT_RANK" || s.key == "XEN_DRAFTER_MODEL" || is_bank_key(s.key)) {
       open_choices(s);
       return;
     }
@@ -1483,6 +1487,10 @@ struct App::Impl {
       opts = {""};
       for (const auto &x : dflash_drafters(models_dir())) opts.push_back(x.path);
     }
+    if (is_bank_key(s->key)) {
+      opts = {""};
+      for (const auto &b : banks()) opts.push_back(b.path);
+    }
     if (s->key == "XEN_HOT_RANK") opts = {"auto", ""};
     if (opts.empty()) return;
     const std::string cur = val(s->key);
@@ -1503,6 +1511,15 @@ struct App::Impl {
     std::string d = expand_home(val("XEN_MODELS_DIR"));
     while (d.size() > 1 && d.back() == '/') d.pop_back();
     return d.empty() ? join_path(cfg.root, "models") : d;
+  }
+
+  // Trained page selection banks: the folders of the models folder and of the model's own parent folder (where its
+  // drafters and bank usually sit) that hold indexer tensors.
+  static bool is_bank_key(const std::string &k) { return k == "XEN_TRAINED_QSA_DELTA_DIR"; }
+  std::vector<QsaBank> banks() const {
+    std::vector<std::string> dirs = {models_dir()};
+    if (const size_t sl = model.path.find_last_of('/'); sl != std::string::npos && sl > 0) dirs.push_back(model.path.substr(0, sl));
+    return qsa_banks(dirs);
   }
 
   void open_models() {
