@@ -1,4 +1,5 @@
 #include "xenithium/arch/common/dflash.hpp"
+#include "xenithium/arch/common/dspine_head.hpp"
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -571,9 +572,9 @@ void DFlash::load_dspine(const std::string &dir, const std::string &target_dir) 
   void *m_wl = nullptr, *m_p2 = nullptr;
   const k::DenseWeights w_tg = pack0(wl_t, Rk, H, m_wl), w_tsv = pack0(p2, 2 * Rk, Cd, m_p2);
   const model::Checkpoint tck = model::Checkpoint::open(target_dir);
-  const char *head_nm = tck.find("lm_head.weight") ? "lm_head.weight" : nullptr;
-  if (!head_nm || tck.at(head_nm).dtype != model::DType::bf16 || tck.at(head_nm).shape != std::vector<int64_t>{cfg_.vocab, H})
-    throw std::runtime_error("dflash (DSpine): the target's lm_head.weight must be bf16 [vocab][hidden] (the tables' rows)");
+  // TG rows: bf16 lm_head.weight, or the GPTQ int4 head dequantised to bf16 a chunk at a time (no dense copy kept).
+  if (!tck.find("lm_head.weight") && !tck.find("lm_head.qweight"))
+    throw std::runtime_error("dflash (DSpine): the target needs lm_head.weight bf16 [vocab][hidden] or GPTQ lm_head.qweight (int4, dequantised at load)");
   constexpr int kChunk = 4096;
   auto *stage = static_cast<uint16_t *>(fab_.alloc_host(static_cast<size_t>(kChunk) * H * 2));
   void *a = fab_.alloc(0, static_cast<size_t>(kChunk) * H * 2), *a2 = fab_.alloc(0, static_cast<size_t>(kChunk) * H * 2);
@@ -584,7 +585,7 @@ void DFlash::load_dspine(const std::string &dir, const std::string &target_dir) 
       const int64_t t0 = tok_of(r0 + i);
       int run = 1;
       while (i + run < m && tok_of(r0 + i + run) == t0 + run) ++run;
-      read_bf16(tck, head_nm, static_cast<size_t>(t0) * H, static_cast<size_t>(run) * H, stage + static_cast<size_t>(i) * H);
+      dflash::read_lm_head_rows_bf16(tck, cfg_.vocab, H, t0, run, stage + static_cast<size_t>(i) * H);
       i += run;
     }
     q.memcpy(a, stage, static_cast<size_t>(m) * H * 2).wait();  // the stage is rewritten below
