@@ -48,6 +48,7 @@
 #include <sycl/sycl.hpp>
 
 #include "xenithium/kernels/attention/gqa.hpp"
+#include "xenithium/kernels/attention/trained_qsa_pages.hpp"
 #include "xenithium/kernels/rows.hpp"
 
 namespace xenithium::kernels::gqa_detail {
@@ -124,6 +125,8 @@ inline esimd::simd<bf16, 256> seg_v_operand(esimd::simd<bf16, 256> v) SYCL_ESIMD
 
 template <QsaKv KV, int G, int RM, int Lib, bool Sel, int D, int QK, bool LO, int TR>
 class GqaAttnSegK;
+template <int QK, bool LO>
+class GqaTrainedBlockSegK;
 
 // C [NH][16] (+)= A [NH][32 k] . B [32 k][16] on s8 x s8 DPAS in calls of <= 8 rows; A at offset ao (bytes) of a.
 template <int NH, int AN, int B = 0>
@@ -161,12 +164,15 @@ constexpr int seg_hc(int nh) {
 // see the same tiles in the same order), placed first in the grid; the row group's work-group leaves the row out of
 // those splits. A side work-group runs the group's code with one live row whose tiles from p0 on carry its path's
 // K / V in the virtual lanes: the same per-row arithmetic as its unit (a row's bits do not depend on its group).
-template <QsaKv KV, int G, int RM, int Lib, bool Sel = false, int D = 256, int QK = 0, bool LO = true, int TR = 0>
+// Blocks: the selected-page walk with a subpage mask, one list per query row.
+// Each group's one row still reads its segment's slot table.
+template <QsaKv KV, int G, int RM, int Lib, bool Sel = false, int D = 256, int QK = 0, bool LO = true, int TR = 0, bool Blocks = false>
 sycl::event attn_seg(sycl::queue &q, const GqaShape &s, int rows, const GqaCache &c, const int32_t *rec, int rstride, int seg_rows, const bf16 *qb,
                      float *part, int ns, const int32_t *sel = nullptr, const int32_t *sel_n = nullptr, bool pf = false) {
   constexpr bool V4 = KV == QsaKv::i8v4;  // K int8, V int4 codes + a bf16 scale per 32 dims (head_dim 256)
   constexpr bool I8 = KV != QsaKv::bf16;  // K int8 with a scale per token (and V int8 unless V4)
   static_assert(!V4 || D == 256, "int8-v4 KV: head_dim 256");
+  static_assert(!Blocks || (V4 && Sel && !TR && RM == 1), "trained QSA: selected K8V4 pages, one query per group");
   static_assert(!TR || (!V4 && !Sel && RM > 1), "the tree instance: int8 / bf16 KV, no selection, row groups (qwen38-27b round 89: any numerics)");
   constexpr int kD = D, kPartStride = D + 16;
   static_assert(D == 256 || D == 128, "head_dim 256 or 128");
@@ -195,7 +201,8 @@ sycl::event attn_seg(sycl::queue &q, const GqaShape &s, int rows, const GqaCache
   // TR: the side work-groups (segment, row, kv head, its first / second split from p0) before the row groups
   const size_t nside = TR ? static_cast<size_t>(nseg) * sr * hkv * 2 : 0;
   const size_t groups = nside + static_cast<size_t>(nseg) * nch * 2 * hkv * ns;
-  return q.parallel_for<GqaAttnSegK<KV, G, RM, Lib, Sel, D, QK, LO, TR>>(sycl::nd_range<1>(groups * kI, kI), [=](sycl::nd_item<1> it) SYCL_ESIMD_KERNEL {
+  using Kernel = std::conditional_t<Blocks, GqaTrainedBlockSegK<QK, LO>, GqaAttnSegK<KV, G, RM, Lib, Sel, D, QK, LO, TR>>;
+  return q.parallel_for<Kernel>(sycl::nd_range<1>(groups * kI, kI), [=](sycl::nd_item<1> it) SYCL_ESIMD_KERNEL {
     esimd::slm_init<kSlm>();
     int g = static_cast<int>(it.get_group(0));
     const int i = static_cast<int>(it.get_local_id(0));
@@ -230,8 +237,10 @@ sycl::event attn_seg(sycl::queue &q, const GqaShape &s, int rows, const GqaCache
     int ntk[RM], ntl[RM];
     bool act[RM];
     const SegRow s0 = seg_row(rec, rstride, seg_rows, r_lo);
-    const int32_t *slist = Sel ? sel + static_cast<size_t>(seg * hkv + kvh) * kGqaSelMax : nullptr;
-    const int nsel = Sel ? sel_n[seg * hkv + kvh] : 0;
+    const int32_t *slist = nullptr;
+    if constexpr (Blocks) slist = sel + static_cast<size_t>(r_lo) * kTrainedQsaPages;
+    else if constexpr (Sel) slist = sel + static_cast<size_t>(seg * hkv + kvh) * kGqaSelMax;
+    const int nsel = Sel ? sel_n[(Blocks ? r_lo : seg) * hkv + kvh] : 0;
     const bool pick = Sel && nsel > 0;  // 0: the segment keeps every page (the dense walk, bit for bit)
     // DDTree: a tree segment (record kSegTree): row j attends as row depth(j) of a chain over its ancestors.
     // vpos = its position for the cut and the masks (p0 + depth); a side row (j != depth: its path is not rows 0 .. j)
@@ -428,7 +437,8 @@ sycl::event attn_seg(sycl::queue &q, const GqaShape &s, int rows, const GqaCache
     for (int si = tile0; si < tile1; ++si) {
 #pragma unroll 1
     for (int u = -1; u < (treeg && !TR ? RM : 0); ++u) {  // u -1: the shared unit; u >= 0: side row u's own view (tree segments)
-      const int tile = pick ? slist[si] : si;  // Sel: the si-th selected page
+      const int entry = pick ? slist[si] : 0;
+      const int tile = pick ? (Blocks ? trained_qsa_page(entry) : entry) : si;
       const int t0 = tile * kTile;
       // TR: one unit per tile; a side work-group's row (p 0) carries its path from tb on
       const int pu = TR ? (sidewg && tile >= tb ? 0 : -1) : u;
@@ -447,7 +457,8 @@ sycl::event attn_seg(sycl::queue &q, const GqaShape &s, int rows, const GqaCache
       if (!anyu) continue;
       const int ntm = treeg ? ntu : ntok_max;  // chains: the group's last token
       const int nt = ntm - t0 < kTile ? ntm - t0 : kTile;  // Sel: <= 0 past the group's rows
-      const size_t slot = (static_cast<size_t>(pages[ring ? tile % ring : tile]) * hkv + kvh) * kPage;  // the tile's first slot
+      const size_t slot = Blocks ? trained_qsa_page_base(pages, tile, hkv, kvh)
+                                 : (static_cast<size_t>(pages[ring ? tile % ring : tile]) * hkv + kvh) * kPage;
       const bool mine = tq * kTW < nt;  // this item's token quarter holds tokens of the tile
       // side row u's path lanes in this tile: i in [ilo, ihi) at lane tp0 + i - t0
       int ilo = 0, ihi = 0;
@@ -621,7 +632,8 @@ sycl::event attn_seg(sycl::queue &q, const GqaShape &s, int rows, const GqaCache
           esimd::slm_block_store<float, 16>(so(kAOff + (tq * kDQ + dq) * NH * 16 + (NH - 1) * 16), spd.template select<16, 1>((NH - 1) * 16));
       }
       if (pf && u < 0 && ch == 0 && !sidewg && si + 1 < tile1) {  // the next tile's K / V blocks into L2 while this one computes
-        const int ntile = pick ? slist[si + 1] : si + 1;
+        const int next = pick ? slist[si + 1] : 0;
+        const int ntile = pick ? (Blocks ? trained_qsa_page(next) : next) : si + 1;
         const size_t nslot = (static_cast<size_t>(pages[ring ? ntile % ring : ntile]) * hkv + kvh) * kPage;
         constexpr auto pfp = esimd::properties{esimd::cache_hint_L1<esimd::cache_hint::uncached>, esimd::cache_hint_L2<esimd::cache_hint::cached>};
         if constexpr (I8) {
@@ -701,12 +713,19 @@ sycl::event attn_seg(sycl::queue &q, const GqaShape &s, int rows, const GqaCache
               }
             }
             if constexpr (I8) x *= ks;
-            x.merge(esimd::simd<float, kTile>(-INFINITY), (ti >= ntr) | (ti < nlo));
+            esimd::simd_mask<kTile> masked = (ti >= ntr) | (ti < nlo);
+            if constexpr (Blocks) {
+              if (pick) {
+                const esimd::simd<uint32_t, kTile> bits(trained_qsa_mask(entry));
+                masked |= ((bits >> esimd::simd<uint32_t, kTile>(ti / kQsaCompress)) & 1u) == 0u;
+              }
+            }
+            x.merge(esimd::simd<float, kTile>(-INFINITY), masked);
             const float mt = esimd::hmax<float>(x);
             const float mn = m_run[k] > mt ? m_run[k] : mt;
             const esimd::simd<float, 1> a1 = esimd::exp(esimd::simd<float, 1>(m_run[k] - mn));  // 0 on the row's first tile
             pe = esimd::exp(x - mn);
-            pe.merge(esimd::simd<float, kTile>(0.f), (ti >= ntr) | (ti < nlo));
+            pe.merge(esimd::simd<float, kTile>(0.f), masked);
             l_run[k] = l_run[k] * static_cast<float>(a1[0]) + esimd::reduce<float>(pe, std::plus<>());
             m_run[k] = mn;
             al = a1[0];

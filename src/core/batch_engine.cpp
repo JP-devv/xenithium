@@ -1685,6 +1685,7 @@ int BatchEngine::place(const std::vector<int32_t> &T, int64_t need, bool use_cac
     m_.begin(slot);  // a fresh sequence (it drops the slot's pages) ...
     if (tiers_ > 1) m_.set_rope_tier(slot, tier);
     if (kv_shared_ && !m_.kv_reserve(slot, need)) throw std::logic_error("batch engine: pages taken between reserve and begin");  // ... taken again
+    m_.note_prompt(slot,static_cast<int64_t>(T.size()),0);
     return slot;
   }
   // 1. the longest usable cached prefix: a parked slot's live state or any slot's snapshot
@@ -1794,6 +1795,7 @@ int BatchEngine::place(const std::vector<int32_t> &T, int64_t need, bool use_cac
   if (pc_log && best.src >= 0)
     std::fprintf(stderr, "prefix: %lld of %lld prompt tokens from slot %d (%s) into slot %d\n", static_cast<long long>(start),
                  static_cast<long long>(TN), best.src, in_place ? (best.snap < 0 ? "live state" : "snapshot, in place") : "snapshot, copied", dst);
+  m_.note_prompt(dst,TN,start);
   return dst;
 }
 
