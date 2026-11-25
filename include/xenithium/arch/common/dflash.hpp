@@ -206,7 +206,9 @@ class DFlash {
   static const char *const *stage_names();
   const double *stage_ms() const { return stage_ms_; }
   int stage_passes() const { return stage_passes_; }
-  int graphs() const { return static_cast<int>(graphs_.size()); }  // pass graphs recorded so far
+  int graphs() const { return graphs_n_; }                                // pass graphs recorded so far
+  int graphs_held() const { return static_cast<int>(graphs_.size()); }  // of them still held (at most XEN_DRAFT_GRAPHS)
+  int graphs_evicted() const { return graphs_evicted_; }                // the least recently used, dropped at the cap
   double graphs_ms() const { return graphs_ms_; }                     // their recording time in all
   void clear_stages() {
     for (double &x : stage_ms_) x = 0;
@@ -303,8 +305,12 @@ class DFlash {
   struct Graph {
     std::vector<sycl::ext::oneapi::experimental::command_graph<sycl::ext::oneapi::experimental::graph_state::executable>> exec;
     int end_par = 0;
+    uint64_t used = 0;  // the last replay (graph_tick_): the least recently used is evicted at the cap
   };
+  // at most XEN_DRAFT_GRAPHS (default 96) entries; each holds ~10 MiB of device memory per card
   std::map<GraphKey, Graph> graphs_;
+  uint64_t graph_tick_ = 0;
+  int graphs_n_ = 0, graphs_evicted_ = 0;
   double graphs_ms_ = 0;
   void submit(int ns, int ctx_rows, int block_rows, int ctx_row0, int tree = 0);
   double stage_ms_[kStages] = {};
