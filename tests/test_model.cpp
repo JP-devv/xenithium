@@ -33,6 +33,7 @@
 #include "xenithium/model/bulk_read.hpp"
 #include "xenithium/model/checkpoint.hpp"
 #include "xenithium/model/kv_lend.hpp"
+#include "xenithium/serve/options.hpp"
 #include "xenithium/model/kv_pages.hpp"
 
 namespace fs = std::filesystem;
@@ -1454,8 +1455,16 @@ void seq_reader() {
   }
 }
 
+
+void mtp_depth_cap() {
+  std::vector<int> d;
+  expect(xenithium::serve::parse_draft_depths("6,6,6,6", d) && d.size() == 4 && d[0] == 6 && d[3] == 6,
+         "draft-depths accepts a table of 6");
+  expect(xenithium::serve::parse_draft_depths("16", d) == false, "draft-depths still rejects 16 (max 15)");
+}
 int main() {
   try {
+    mtp_depth_cap();
     bf16_round();
     w4_rtn();
     synthetic();

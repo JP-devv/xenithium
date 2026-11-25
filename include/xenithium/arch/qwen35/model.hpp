@@ -575,7 +575,11 @@ class Model {
   // the rows the step buffers hold (head, MLP, mixers, drafters): pass_rows() or the load's prefill_short, whichever is
   // more (16 unless 32-row steps or 17-32-row short prefill calls)
   int rows_cap() const { return rows_cap_; }
-  // the most drafts one draft call returns: MTP 3 (passes), DFlash the checkpoint's block - 1 (7)
+  // One MTP layer reused recursively: pass 1 plus further chained passes, up to this many drafts.
+  // DFlash / DSpine still cap at the checkpoint's block - 1 (7 or 15).
+  static constexpr int kMtpDepthMax = 6;
+  static_assert(kMtpDepthMax >= 6 && kMtpDepthMax <= 15, "qwen35 MTP depth 6 fits a segment and kDepthMax 15");
+  // the most drafts one draft call returns: MTP kMtpDepthMax, DFlash the checkpoint's block - 1
   int draft_depth_max() const;
   // both drafters loaded (ModelOptions:mtp_from); which one drafts a call for `seqs` sequences (true: MTP), and
   // the most drafts it returns then

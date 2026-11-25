@@ -170,6 +170,12 @@ ModelOptions model_options(const serve::Options &o, bool flint) {
     mo.mtp_from = o.drafter_mtp_from;  // both drafters
     mo.dflash_dense_bytes = o.drafter_int4 != 0 ? 4 : 1;  // q, o, gate | up, down as int4 (RTN at load)
   }
+  // Depth 4..6 needs a 5- to 7-row verify: raise the GDN pending logs to 8 rows. DFlash / DSpine already do.
+  if (o.drafter != 0 && o.drafter_model.empty() && o.mtp_depth > 3) mo.rows8 = true;
+  std::vector<int> want;
+  if (o.drafter != 0 && o.drafter_model.empty() && serve::parse_draft_depths(o.draft_depths, want))
+    for (int x : want)
+      if (x > 3) mo.rows8 = true;
   return mo;
 }
 
@@ -348,6 +354,15 @@ class Backend final : public serve::Backend {
     }
     adapter_ = std::make_unique<StepModelAdapter>(*model_);
     adapter_->set_wide_from(o_.drafter != 0 && !o_.drafter_model.empty() ? o_.drafter_wide : 0);
+    if (model_->drafter()) {
+      if (o_.mtp_depth < 1 || o_.mtp_depth > StepModelAdapter::kDepth)
+        throw serve::OptionError("--mtp-depth takes 1.." + std::to_string(StepModelAdapter::kDepth) +
+                                 " (the MTP depth of one decoding sequence)");
+      if (o_.draft_depths.empty() && o_.mtp_depth != 3) {
+        if (model_->dflash()) adapter_->set_mtp_depth_from(o_.mtp_depth, model_->mtp_from());
+        else adapter_->set_mtp_depth(o_.mtp_depth);
+      }
+    }
     std::vector<int> dd;  // XEN_DRAFT_DEPTHS over the built-in table (validated with the options)
     if (serve::parse_draft_depths(o_.draft_depths, dd) && !dd.empty()) adapter_->set_depths(dd);
     if (model_->has_drafter()) {  // the step rows and the depth table in effect
@@ -400,9 +415,12 @@ class Backend final : public serve::Backend {
                      ? ", one stream drafts 16 rows (" + (o_.drafter_tree > 0 ? "trees of " + std::to_string(o_.drafter_tree_wide) + " nodes" : std::string("chains")) +
                            ") after " + std::to_string(o_.drafter_wide) + "+ accepted drafts"
                      : std::string()) +
-                (m.dual_drafters() ? " + the MTP layer for steps of " + std::to_string(m.mtp_from()) + "+ sequences" : std::string());
+                (m.dual_drafters() ? " + the MTP layer (depth " + std::to_string(o_.mtp_depth) + ") for steps of " +
+                                         std::to_string(m.mtp_from()) + "+ sequences"
+                                   : std::string());
     else if (m.has_drafter())
-      drafter = "MTP drafter (draft vocabulary " + std::to_string(m.drafter()->draft_vocab()) + ")";
+      drafter = "MTP drafter (depth " + std::to_string(o_.mtp_depth) + ", draft vocabulary " +
+                 std::to_string(m.drafter()->draft_vocab()) + ")";
     const char *what = arch_ == "llama" ? "llama (dense, qwen35 runtime)" : arch_ == "flint" ? "flint (MoE, qwen35 runtime, step graphs)" : "qwen35";
     std::fprintf(stderr, "server: %s model loaded in %.1f s (%s); %d slots x %lld tokens, KV %s, prefill chunk %d (attention %s, W4 %s), lm_head %s, W4 split %d items; %s\n",
                  what, m.load_seconds(), tp_desc.c_str(), m.slots(), static_cast<long long>(m.capacity()), o_.kv.c_str(), m.prefill_chunk(), o_.prefill_attn.c_str(),
