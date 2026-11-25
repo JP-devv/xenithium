@@ -164,7 +164,7 @@ const char *brief_of(std::string_view key) {
        "Gives (int8): + KV pool: twice the tokens of bf16.\n"
        "Takes (int8): - nothing noticeable: the quality change is within run-to-run noise.\n"
        "Gives (int8-v4): + KV pool on the 27B (about 1.3x the tokens of int8) and + decode speed in long conversations. On qwen38 the freed VRAM goes to hot experts.\n"
-       "Takes (int8-v4): - prompt reading speed on the 27B, - draft trees on the 27B (it drafts chains), - a small numerics change."},
+       "Takes (int8-v4): - prompt reading speed on the 27B, - a small numerics change."},
       {"XEN_KV_SPLIT",
        "qwen38 on four cards: how the two cards that share a KV head store its KV cache.\n"
        "\n"
@@ -326,7 +326,7 @@ const char *brief_of(std::string_view key) {
        "\n"
        "Gives: + decode speed at few streams (more tokens accepted per step).\n"
        "Takes: - nothing: it runs only at the stream counts of `XEN_DRAFTER_TREE_SEQS`; more streams keep chains.\n"
-       "Needs (Qwen3.8-27B): an int8 or bf16 KV cache; with `XEN_KV` int8-v4 the server drafts chains. With `XEN_ATTN_SELECT`, a conversation past the page count drafts chains, and so do the ones generating beside it.\n"
+       "Qwen3.8-27B: any KV cache (int8, bf16 or int8-v4). With `XEN_ATTN_SELECT`, a conversation past the page count drafts chains, and so do the ones generating beside it.\n"
        "Flash-Next: any KV cache and context, from 2 streams (one stream keeps the line with `XEN_DRAFTER_CUT`, which is as fast there). Chains when the MTP layer drafts beside DFlash (`XEN_DRAFTER_MTP_FROM`).\n"
        "Output: the same."},
       {"XEN_DRAFTER_TREE_SEQS",
@@ -1003,6 +1003,12 @@ const char *brief_of(std::string_view key) {
        "qwen38 diagnostic: GPU clock stamps around every module of the generation step. The log gets one line of times per module every 512 steps.\n"
        "\n"
        "Takes: - decode speed. Never use it to measure speed."},
+      {"XEN_DRAFT_GRAPHS",
+       "Block drafter (DFlash 2 / DSpine): the most recorded drafter-pass graphs kept on the cards (a number, at least 4; default `96`). Each holds about 10 MiB per "
+       "card; once the cap is reached the least recently used one is dropped, and the log says so once.\n"
+       "\n"
+       "Lower: + VRAM headroom on tight cards. Takes: - a recording (~20-40 ms) whenever a dropped step shape comes back.\n"
+       "Output: the same."},
   };
   for (const auto &[k, v] : t)
     if (key == k) return v;
@@ -1754,6 +1760,12 @@ std::vector<Spec> schema() {
     s.scope = Scope::Qwen38;
     s.allow_empty = true;
   }
+  {
+    auto &s = add("XEN_DRAFT_GRAPHS", "Drafter pass graphs kept", dg, Kind::Int);
+    s.diag = true;
+    s.lo = 4;
+    s.allow_empty = true;
+  }
   return v;
 }
 
@@ -2129,11 +2141,6 @@ std::string unused_reason(const Spec &s, std::string_view arch, const Values &va
        s.key == "XEN_DRAFTER_TREE_WIDE" || s.key == "XEN_DRAFTER_INT4") && (v("XEN_DRAFTER") != "1" || v("XEN_DRAFTER_MODEL").empty()))
     return "needs the DFlash drafter";
   if ((s.key == "XEN_SEG_ROWS" || s.key == "XEN_DRAFT_DEPTHS") && v("XEN_DRAFTER") != "1") return "needs the drafter on";
-  // A tree step verifies on dense attention over an int8 / bf16 KV; a KV chosen by name wins and the
-  // server drafts chains (src/arch/qwen35/serve.cpp resolve). With page selection the trees stay, for the steps
-  // under its page count.
-  if ((s.key == "XEN_DRAFTER_TREE" || s.key == "XEN_DRAFTER_TREE_SEQS") && arch == "qwen35" && v("XEN_KV") == "int8-v4")
-    return "draft trees need an int8 or bf16 KV cache (XEN_KV)";
   // Qwen38 drafts chains beside the MTP layer (src/arch/qwen38/serve.cpp)
   if ((s.key == "XEN_DRAFTER_TREE" || s.key == "XEN_DRAFTER_TREE_SEQS") && arch == "qwen38" && !v("XEN_MTP").empty() && v("XEN_DRAFTER_MTP_FROM") != "" &&
       v("XEN_DRAFTER_MTP_FROM") != "0")
