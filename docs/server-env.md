@@ -276,6 +276,7 @@ all off.
 | `XEN_PF_LOG` | Diagnostic: one log line per prompt-processing call, part and generation step. |
 | `XEN_PF_PROFILE` | qwen38 diagnostic: times every prompt-processing phase.<br><br>`1`  host time<br>`2`  device time with barriers<br>`3`  GPU clock stamps<br><br>Takes: - prompt reading speed. Never use it to measure speed. |
 | `XEN_DEC_PROFILE` | qwen38 diagnostic: GPU clock stamps around every module of the generation step. The log gets one line of times per module every 512 steps.<br><br>Takes: - decode speed. Never use it to measure speed. |
+| `XEN_DRAFT_GRAPHS` | Block drafter (DFlash 2 / DSpine): the most recorded drafter-pass graphs kept on the cards (a number, at least 4; default `96`). Each holds about 10 MiB per card; once the cap is reached the least recently used one is dropped, and the log says so once.<br><br>Lower: + VRAM headroom on tight cards. Takes: - a recording (~20-40 ms) whenever a dropped step shape comes back.<br>Output: the same. |
 | `XEN_QSA_PF_TILES` | qwen38 numerics switch for the prompt's attention.<br><br>`empty`  the faster 8-tile prompt attention (the default)<br>`1`  the generation step's tiling: bit-equal to it<br><br>Gives (1): + bit-equality of prompt reading with generation.<br>Takes (1): - a little prompt reading speed. |
 
 Request-level features need no setting: structured output (`response_format` json_object /

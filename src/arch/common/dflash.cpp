@@ -7,6 +7,7 @@
 #include <chrono>
 #include <functional>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -884,6 +885,21 @@ std::vector<std::vector<int32_t>> DFlash::pass(const std::vector<Seg> &segs, int
     const GraphKey key{ns, ctx_rows, block_rows, ctx_row0, par_, tree};
     auto it = graphs_.find(key);
     if (it == graphs_.end()) {
+      // Bounded: each pass graph holds ~10 MiB of device memory per card, and mixed concurrency with adaptive draft depths
+      // keeps producing new keys (unbounded, multi-agent traffic filled 24 GB cards in 15-25 min). Every pass ends with
+      // both cards drained (below), so an evicted graph is never in flight.
+      static const size_t cap = [] {
+        const char *e = std::getenv("XEN_DRAFT_GRAPHS");
+        return e ? static_cast<size_t>(std::max(4, std::atoi(e))) : size_t{96};
+      }();
+      while (graphs_.size() >= cap) {
+        auto lru = graphs_.begin();
+        for (auto g = graphs_.begin(); g != graphs_.end(); ++g)
+          if (g->second.used < lru->second.used) lru = g;
+        graphs_.erase(lru);
+        if (graphs_evicted_++ == 0)
+          std::fprintf(stderr, "dflash: pass graphs at the cap of %zu (XEN_DRAFT_GRAPHS): the least recently used is evicted from now on\n", cap);
+      }
       namespace sx = sycl::ext::oneapi::experimental;
       const auto tr = std::chrono::steady_clock::now();
       std::vector<sx::command_graph<sx::graph_state::modifiable>> g;
@@ -903,8 +919,10 @@ std::vector<std::vector<int32_t>> DFlash::pass(const std::vector<Seg> &segs, int
       par_ = p0;
       for (size_t c = 0; c < C; ++c) e.exec.push_back(g[c].finalize());
       it = graphs_.emplace(key, std::move(e)).first;
+      ++graphs_n_;
       graphs_ms_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tr).count();
     }
+    it->second.used = ++graph_tick_;
     // both cards' graphs in flight together: the mailbox waits inside pair up across the cards
     for (size_t c = 0; c < C; ++c) fab_.compute(c).ext_oneapi_graph(it->second.exec[c]);
     par_ = it->second.end_par;
