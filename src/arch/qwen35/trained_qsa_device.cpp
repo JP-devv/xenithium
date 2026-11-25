@@ -118,9 +118,10 @@ sycl::event index_blocks(sycl::queue &q, const History &h, float eps, int rows, 
   const int stride=step.stride, seg_rows=step.seg_rows;
   return q.parallel_for(sycl::nd_range<1>(size_t(rows)*workers,workers), [=](sycl::nd_item<1> it) {
     const int r=it.get_group(0), lane=it.get_local_id(0);
-    if(draft && !(track&(uint32_t(1)<<r))) return;
     const auto sr=draft?k::seg_row(rec,stride,seg_rows,r):k::SegRow{0,r,pos+r,slot};
+    // every row's block count, tracked or not: the selection runs over all rows and reads it as the row's bound
     if (draft && lane==0) eligible[r]=(sr.pos+1)/4;
+    if(draft && !(track&(uint32_t(1)<<r))) return;
     if (sr.pos%4!=3) return;
     const int start=draft?rec[sr.seg*stride+k::kSegPos]:pos;
     const float *tail=h.tail+size_t(sr.slot)*4*dim;
@@ -1132,8 +1133,9 @@ size_t Device::copy_aligned_prefix(int dst,int src,int pos) {
     auto &q=p_->fab.compute(c);
     for(const auto &layer:p_->cards[c].layer) {
       const auto &h=layer.h;
+      // both stores when both exist (the FP16 audit keeps an FP32 mirror beside the FP16 summaries)
       if(h.pool16) q.memcpy(h.pool16+size_t(dst)*stride,h.pool16+size_t(src)*stride,words*sizeof(sycl::half));
-      else q.memcpy(h.pool+size_t(dst)*stride,h.pool+size_t(src)*stride,words*sizeof(float));
+      if(h.pool) q.memcpy(h.pool+size_t(dst)*stride,h.pool+size_t(src)*stride,words*sizeof(float));
     }
   }
   // No partial group is visible at the aligned boundary. The next append
