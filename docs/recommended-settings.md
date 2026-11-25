@@ -15,7 +15,9 @@ The QSA preset is only used when you name it, because it needs the bank. Started
 
 ## The fastest setup
 
-This is the exact configuration we run in production. The only changes are the model paths, and the logging switches are removed (see [Diagnostics](#diagnostics-leave-them-off)).
+This is the configuration we run in production. The model paths are generic, the logging switches are removed (see [Diagnostics](#diagnostics-leave-them-off)), and the KV pool is left to the engine.
+
+**Sizing the KV pool for your cards.** `--kv-pool-tokens auto` gives the KV pool what's left of VRAM after the weights, the drafter, the graphs and `--reserve`. On our 2x 24 GB B60s we pin `--kv-pool-tokens 884416 --context 221120` (6 slots sharing the pool), the largest pool that still leaves room for the prefix cache and graphs there. Don't copy those two numbers to other cards: on 32 GB cards (B70) `auto` gives a much larger pool, for example 1,575,936 tokens on 2x B70. Set `--context` only if you want to cap a single request below the model's 262,144.
 
 ```sh
 XEN_TRAINED_QSA_DELTA_DIR=/path/to/bank XEN_TRAINED_QSA_TILED_SCORE=1 XEN_TRAINED_QSA_POOL_FP16=1 \
@@ -23,8 +25,8 @@ XEN_TRAINED_QSA_TREE=1 XEN_TRAINED_QSA_PREFILL_XMX=0 XEN_TRAINED_QSA_PREFILL_MER
 XEN_TRAINED_QSA_PREFILL_4SLOT_SINGLE_SEG=0 XEN_PF_SUBTILE_SKIP=0 \
 XEN_QSA_XMX_SCORE=1 XEN_QSA_GATHER=1 XEN_QSA_RESIDENT_SNAPSHOTS=1 XEN_QSA_RESIDENT_FORK_COPY=1 \
 XEN_PREFILL_SHARE=0.33 \
-xenithium-server --model ~/models/swift15-27b-int4-baked --tp 2 --card 0 --slots 6 --context 221120 \
-  --kv int8-v4 --kv-pool-tokens 884416 --reserve 2.0 --graphs 1 --warmup 1 \
+xenithium-server --model ~/models/swift15-27b-int4-baked --tp 2 --card 0 --slots 6 \
+  --kv int8-v4 --kv-pool-tokens auto --reserve 2.0 --graphs 1 --warmup 1 \
   --drafter 1 --drafter-model ~/models/qwen38-27b-dspine-b16 --drafter-int4 1 --draft-vocab 98304 \
   --seg-rows 16 --step-rows 0 --draft-depths 15,7,4,3 --adaptive-depth 1 --unequal-segments 1 \
   --drafter-tree 7 --drafter-tree-wide 15 --drafter-wide 7 --drafter-tree-seqs 2 \
