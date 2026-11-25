@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <exception>
 #include <memory>
 
@@ -16,6 +17,7 @@
 #include "xenithium/arch/llama/arch.hpp"
 #include "xenithium/arch/qwen35/model.hpp"
 #include "xenithium/arch/qwen35/step_model.hpp"
+#include "xenithium/arch/qwen35/trained_qsa_device.hpp"
 #include "xenithium/model/checkpoint.hpp"
 #include "xenithium/rt/fabric.hpp"
 #include "xenithium/rt/l0.hpp"
@@ -250,6 +252,20 @@ std::string plan_of(const serve::Options &opt, const model::ModelConfig &cfg, st
     if (o.prefill_w4 == "exact") m.scratch_gib -= 0.182;  // (dequant on this arch: counted as a8)
     else if (o.prefill_w4 == "a8" && o.prefill_gemm == "esimd") m.scratch_gib -= 0.142;
     first_use = 0.24;
+    // The trained page selection (a bank in the environment, read as the load reads it): every slot's block summaries over
+    // the max context, the scorer's weights and scratch, allocated at load before the KV (the load's own arithmetic).
+    if (const char *bank = std::getenv("XEN_TRAINED_QSA_DELTA_DIR"); bank && *bank) {
+      size_t layers = 0;
+      try {
+        layers = model::Checkpoint::open(bank, false).tensors().size() / 5;  // five tensors per trained layer
+      } catch (const std::exception &e) {
+        throw serve::OptionError(std::string("XEN_TRAINED_QSA_DELTA_DIR: ") + e.what());
+      }
+      const char *pfx = std::getenv("XEN_TRAINED_QSA_PREFILL_XMX");
+      m.state_gib += static_cast<double>(trained_qsa::Device::bytes_per_rank(layers, c.hidden, o.slots, static_cast<int>(o.context), chunk,
+                                                                             std::min(o.step_rows_or(32), kernels::kStepRows32),
+                                                                             pfx && std::string_view(pfx) == "1")) / G;
+    }
   } else if (llama) {
     m.scratch_gib = 0.938 + (C == 1 ? 0.026 : 0.0) + 0.230 * kchunk;
     m.state_gib = 0.199 * ctx_m;
@@ -291,7 +307,7 @@ std::string plan_of(const serve::Options &opt, const model::ModelConfig &cfg, st
     char e[400];
     std::snprintf(e, sizeof e, "the KV of %s needs %.2f GiB per card, about %.2f GiB will be free: a max context of about %lld tokens fits one request (lower XEN_CONTEXT%s)",
                   what, (static_cast<double>(o.kv_pool_tokens < 0 ? slot_pages : pool) * page + rings) / G, (static_cast<double>(have) * page + rings) / G,
-                  static_cast<long long>(have * kPage / 1024 * 1024), o.kv_pool_tokens > 0 ? " or XEN_KV_POOL_TOKENS" : o.kv_pool_tokens == 0 ? ", or share the KV pool: XEN_KV_POOL_TOKENS auto" : "");
+                  static_cast<long long>(have * kPage / 1024 * 1024), o.kv_pool_tokens > 0 ? " or XEN_KV_POOL_TOKENS; auto takes what fits" : o.kv_pool_tokens == 0 ? ", or share the KV pool: XEN_KV_POOL_TOKENS auto" : "");
     throw serve::OptionError(e);
   };
   if (o.kv_pool_tokens >= 0 && pool > fit0) refuse(fit0, o.kv_pool_tokens == 0 ? "every slot at the max context" : "the pool");

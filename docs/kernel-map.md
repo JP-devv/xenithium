@@ -11,7 +11,7 @@ The trained-QSA switches do nothing unless `XEN_TRAINED_QSA_DELTA_DIR` is set ([
 
 - `--kv int8-v4`
 - `--attn-select 0`
-- a fixed `--kv-pool-tokens`
+- a shared KV pool (`--kv-pool-tokens` a token count or `auto`)
 - a drafter
 - a context of 2,049 to 262,144 tokens
 

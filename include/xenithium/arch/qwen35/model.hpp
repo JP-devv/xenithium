@@ -367,6 +367,7 @@ class Model {
   bool kv_reserve(int slot, int64_t tokens);
   void kv_release(int slot);
   int64_t kv_pool_tokens() const { return kvp_.pool_tokens(); }
+  bool trained_qsa() const { return trained_qsa3_ != nullptr; }  // a trained page selection bank is loaded
   int64_t kv_free_tokens() const { return kvp_.free_tokens(); }
   int64_t kv_used_tokens() const { return kvp_.used_tokens(); }
   size_t kv_bytes(int c) const { return kv_bytes_.at(static_cast<size_t>(c)); }  // KV of the target + drafter on card c

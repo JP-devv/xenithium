@@ -200,9 +200,11 @@ Model::Model(Fabric &fab, const std::string &dir, const ModelOptions &opt) : fab
   const bool legacy_qsa=dir3 && *dir3;
   if (dir_all && *dir_all && legacy_qsa) throw std::invalid_argument("choose one trained QSA bank option");
   if (legacy_qsa || (dir_all && *dir_all)) {
+    // The selector's buffers depend on the slots and the context, not on the pool: an auto pool (kv_pool_tokens < 0)
+    // is sized after them by kv_fit, from the VRAM they leave.
     if (llama || flint || opt_.kv!=k::QsaKv::i8v4 || opt_.attn_select!=0 ||
-        opt_.kv_pool_tokens==0 || (!legacy_qsa && opt_.kv_pool_tokens<0) || opt_.dflash_dir.empty() || cap_<=2048 || cap_>trained_qsa::kMaxContext)
-      throw std::invalid_argument("trained QSA requires Swift, fixed-size shared int8-v4 pool, context 2049..262144, a drafter and no other selector");
+        opt_.kv_pool_tokens==0 || opt_.dflash_dir.empty() || cap_<=2048 || cap_>trained_qsa::kMaxContext)
+      throw std::invalid_argument("trained QSA requires Swift, a shared int8-v4 pool (a token count or auto), context 2049..262144, a drafter and no other selector");
     const auto bank=model::Checkpoint::open(legacy_qsa?dir3:dir_all,false);
     trained_qsa_layer_.assign(cfg_.layers,-1);
     for (int l=0;l<cfg_.layers;++l) {
@@ -1208,6 +1210,7 @@ int64_t Model::kv_fit(double reserve_gib) {
     throw std::runtime_error("qwen35 model: the VRAM left (" + std::to_string(free) + " GiB free) holds less than one context of KV");
   kv_alloc(fit);
   for (int s = 0; s < slots(); ++s) seqs_[static_cast<size_t>(s)] = Seq{}, self_reset(s);
+  std::fill(qsa_covered_.begin(), qsa_covered_.end(), -1);  // the trained history described the freed KV
   load_seq();
   return kvp_.pool_tokens();
 }
