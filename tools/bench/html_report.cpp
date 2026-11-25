@@ -20,35 +20,40 @@ namespace {
 
 using svg::duration_text;
 
+bool wordy(char c) { return std::isalnum(static_cast<unsigned char>(c)) || c == '_'; }
+bool pathy(char c) { return wordy(c) || c == '-' || c == '.' || c == '/'; }
+bool pathy_not_slash(char c) { return c != '/' && pathy(c); }
+
+// Replaces each occurrence of `name` in `out` by `as` unless a neighbour continues it: before(c) / after(c) true = the
+// character before / after belongs to a longer word or path, and that occurrence stays.
+void mask(std::string &out, const std::string &name, std::string_view as, bool (*before)(char), bool (*after)(char)) {
+  for (size_t pos = out.find(name); pos != std::string::npos; pos = out.find(name, pos)) {
+    const size_t end = pos + name.size();
+    if ((pos > 0 && before(out[pos - 1])) || (end < out.size() && after(out[end]))) {
+      pos = end;
+      continue;
+    }
+    out.replace(pos, name.size(), as);
+    pos += as.size();
+  }
+}
+
 // The report page leaves the machine, and results.json / report.txt stay local: so the page masks the two identities
-// a value can carry: the login name and the home directory's path. A home-directory prefix becomes $HOME wherever it
-// appears; a login name standing as its own word
-// (the host name of a machine named for its user) becomes $USER. The strings written are escaped as before.
+// a value can carry: the login name and the home directory's path. The home directory where a path starts with it
+// (not inside another path: /x/root/y with the home /root) becomes $HOME; a login name standing as its own word (the
+// host name of a machine named for its user) becomes $USER. The strings written are escaped as before.
 std::string escaped(std::string_view text) {
   std::string out(text);
   static const std::string home = [] {
     const char *h = std::getenv("HOME");
     return h && *h ? std::string(h) : std::string();
   }();
-  if (home.size() > 1)
-    for (size_t pos = out.find(home); pos != std::string::npos; pos = out.find(home, pos + 5)) out.replace(pos, home.size(), "$HOME");
+  if (home.size() > 1) mask(out, home, "$HOME", pathy, pathy_not_slash);
   static const std::string user = [] {
     const passwd *p = getpwuid(geteuid());
     return p ? std::string(p->pw_name) : std::string();
   }();
-  if (user.size() > 3) {  // a shorter name would mask its way through ordinary words
-    size_t pos = 0;
-    while ((pos = out.find(user, pos)) != std::string::npos) {
-      const size_t after = pos + user.size();
-      const auto wordy = [](char c) { return std::isalnum(static_cast<unsigned char>(c)) || c == '_'; };
-      const bool whole = (pos == 0 || !wordy(out[pos - 1])) && (after >= out.size() || !wordy(out[after]));
-      if (whole) {
-        out.replace(pos, user.size(), "$USER");
-        pos += 5;
-      } else
-        pos = after;
-    }
-  }
+  if (user.size() > 3) mask(out, user, "$USER", wordy, wordy);  // a shorter name would mask its way through ordinary words
   return svg::escaped(out);
 }
 

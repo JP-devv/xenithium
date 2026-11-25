@@ -536,11 +536,22 @@ void test_html() {
     leak.info.host = user;
     leak.info.notes.push_back({"XEN_DRAFTER_MODEL", "/some/where/" + user + "/drafter"});
     std::string masked = b::render_html(leak);
-    CHECK(masked.find(user) == std::string::npos && masked.find("$USER/drafter") != std::string::npos, "html: the login name is masked to $USER wherever it stands as its own word");
+    // The page's own stylesheet and script may hold the name as a word (`:root`, `const root` for the user root): the
+    // run's values add no occurrence to what the same page without them carries.
+    const auto occurrences = [&](const std::string &html) {
+      size_t n = 0;
+      for (size_t at = html.find(user); at != std::string::npos; at = html.find(user, at + 1)) ++n;
+      return n;
+    };
+    const size_t in_page = occurrences(b::render_html(sample_run(200)));
+    CHECK(occurrences(masked) == in_page && masked.find("$USER/drafter") != std::string::npos,
+          "html: the login name is masked to $USER wherever it stands as its own word (%zu in the page itself)", in_page);
     if (const char *home = std::getenv("HOME"); home && std::strlen(home) > 1) {
       leak.info.notes.push_back({"XEN_MODEL", std::string(home) + "/models/qwen"});
+      leak.info.notes.push_back({"XEN_DRAFTER_INT4", "/mnt" + std::string(home) + "/data"});  // the home path inside another path
       masked = b::render_html(leak);
       CHECK(masked.find(home) == std::string::npos && masked.find("$HOME/models/qwen") != std::string::npos, "html: a path under the home directory is masked to $HOME");
+      CHECK(masked.find("/mnt$HOME") == std::string::npos, "html: the home path inside another path is not $HOME");
     }
   }
   if (const char *keep = std::getenv("XEN_TEST_BENCH_HTML")) std::ofstream(keep) << page;  // to look at it
