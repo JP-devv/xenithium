@@ -45,17 +45,11 @@ serve::Options resolve(serve::Options o, std::string_view arch_id) {
   if (o.prefill_select > 0 && o.prefill_attn != "exact" && o.prefill_attn != (kv8 ? "int8-fast" : "fast"))
     throw serve::OptionError("--prefill-select: page-selected prefill runs with --prefill-attn auto, exact or " + std::string(kv8 ? "int8-fast" : "fast") +
                              " on this KV (not " + o.prefill_attn + ")");
-  // Draft trees (--drafter-tree with a block drafter on the dense 27B) verify on dense attention over an int8 or bf16 KV:
-  // kernels::gqa_decode refuses a tree step on the int8-v4 KV. A KV the settings name wins over the tree count (a
-  // default): the trees go, said once. (Tree steps run under every decode attention numerics, and with page selection
-  // too for the steps under its page budget: the model drafts chains once a sequence of the step passes it,
-  // Model::selects_pages.)
+  // Draft trees (--drafter-tree with a block drafter on the dense 27B) verify on dense attention over an int8, int8-v4,
+  // or bf16 KV (tree-masked group attention; int8-v4 reads int4 V and its bf16 scales). Tree steps run under every
+  // decode attention numerics, and with page selection too for the steps under its page budget: the model drafts chains
+  // once a sequence of the step passes it, Model::selects_pages.
   const bool trees = !llama && !flint && o.drafter != 0 && !o.drafter_model.empty() && o.drafter_tree > 0;
-  if (trees && o.kv == "int8-v4") {
-    std::fprintf(stderr, "server: draft trees off (--drafter-tree %d not used): a tree step verifies on the int8 or bf16 KV, not int8-v4; the drafter drafts chains\n",
-                 o.drafter_tree);
-    o.drafter_tree = 0;
-  }
   if (trees && o.attn_select > 0)
     std::fprintf(stderr, "server: draft trees for steps under the page budget (--attn-select %d pages); a sequence past it, and the ones decoding beside it, draft chains\n",
                  o.attn_select);

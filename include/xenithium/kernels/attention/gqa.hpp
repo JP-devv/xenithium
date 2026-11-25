@@ -264,7 +264,7 @@ GqaEvents gqa_decode(sycl::queue &q, const GqaShape &s, int rows, const gqa_bf16
 // After a tree step, the accepted path's K / V rows to their final slots. In each listed cache (one
 // card's attention layers), for every kv head, the token at slot position p0 + from[i] moves to p0 + to[i], i ascending
 // (to[i] = i < from[i]: a path's depth i; a source slot is never a destination written before it). Byte copies of the
-// K / V codes and their scales (int8 / bf16 KV). One launch for up to kGqaMoveCaches caches.
+// K / V codes and their scales (int8 / int8-v4 / bf16 KV; int8-v4 V is half the K row, with 8 bf16 scales). One launch for up to kGqaMoveCaches caches.
 inline constexpr int kGqaMoveCaches = 16;
 struct GqaMove {
   int n = 0;
