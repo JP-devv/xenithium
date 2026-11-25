@@ -71,6 +71,8 @@
 
 #include "probe.hpp"  // the run-wide flags
 namespace q38 = xenithium::arch::qwen38;
+// pf_graphs.cpp: --pf-graph-gate
+int pf_graph_gate(q38::Model &m, const std::vector<int32_t> &tok, int calls, const std::vector<int> &sizes);
 
 namespace {
 
@@ -179,6 +181,8 @@ int cmd_model_run(const std::string &model, const std::string &ppl, const std::s
   mo.kv_pool_scramble = g_kv_scramble;
   mo.prefill_cold_stage = g_pf_cold_stage;
   mo.prefill_fetch = g_pf_fetch;
+  mo.prefill_graphs = g_pf_graphs || g_pf_graph_gate != 0;
+  if (g_pf_graph_gate > 0) mo.slots = std::max(mo.slots, 2);  // the gate's script runs two slots (< 0: the timing alone)
   mo.gdn_scan = g_gdn_scan;
   mo.moe_cpu.mode = g_moe_cpu, mo.moe_cpu.pct = g_moe_cpu_pct, mo.moe_cpu.threads = g_moe_cpu_threads;
   mo.moe_cpu.min_cold = g_moe_cpu_min_cold;
@@ -327,6 +331,22 @@ int cmd_model_run(const std::string &model, const std::string &ppl, const std::s
     rc |= !ok;
   };
   if (ls.blob_mismatches >= 0) check(ls.blob_mismatches == 0, "expert blobs verified against their pack-time hashes (" + std::to_string(ls.blob_mismatches) + " differ)");
+
+  // ---- --pf-graph-gate N: the prompt-call graphs against the launches (pf_graphs.cpp), then exit ----
+  if (g_pf_graph_gate != 0) {
+    if (chunks.empty()) {
+      std::fprintf(stderr, "model: --pf-graph-gate needs --ppl (its tokens)\n");
+      return 2;
+    }
+    std::vector<int32_t> tok;
+    for (const auto &c : chunks) tok.insert(tok.end(), c.begin(), c.end());
+    std::vector<int> sizes;
+    std::stringstream ss(g_pf_graph_sizes);
+    std::string t;
+    while (std::getline(ss, t, ','))
+      if (!t.empty()) sizes.push_back(std::stoi(t));
+    return rc | pf_graph_gate(m, tok, g_pf_graph_gate, sizes);
+  }
 
   // ---- --pf-route-trace: capture for xenithium-lookahead, then exit ----
   if (!g_pf_route_trace.empty()) {

@@ -59,6 +59,7 @@ ModelOptions model_options(const serve::Options &o, const model::ModelConfig &cf
   mo.hot = o.hot > 0 ? o.hot : -1;  // 0 = measured from the free VRAM
   mo.reserve_gib = o.reserve_gib + vision_plan(o, cfg).max_gib();  // the tower's VRAM stays free for it
   mo.graphs = o.graphs;
+  mo.prefill_graphs = o.prefill_graphs;
   mo.prefill_chunk = o.prefill_chunk > 0 ? o.prefill_chunk : 4096;
   mo.prefill_moe_a8 = o.prefill_moe == "w4a8";
   mo.prefill_dense_a8 = o.prefill_dense == "w8a8" || o.prefill_dense == "w8a8-row";
@@ -230,6 +231,9 @@ class Backend final : public serve::Backend {
       std::fprintf(stderr, "server: prompt reads fetch each layer's cold experts ahead: %d blobs x %d per card\n", ls.prefill_fetch, kPfFetchBufs);
     else
       std::fprintf(stderr, "server: prompt reads fetch no cold experts ahead\n");
+    if (o_.prefill_graphs)  // --prefill-graphs
+      std::fprintf(stderr, "server: prompt calls of fewer than %d rows replay recorded graphs (a shape recorded on its run %d, up to %d kept)\n", kPfGraphMaxRows,
+                   kPfGraphRecordAt, kPfGraphsMax);
     adapter_ = std::make_unique<StepModelAdapter>(*model_);
     adapter_->set_depth(o_.mtp_depth);
     adapter_->set_step_rows(step_rows_of(o_));  // --step-rows / XEN_STEP_ROWS, 0 = this setup's default

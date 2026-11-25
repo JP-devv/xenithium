@@ -91,6 +91,12 @@ extern bool g_gdn_scan;
 extern int g_pf_cold_stage;
 // --pf-fetch N: ModelOptions:prefill_fetch for every model command.
 extern int g_pf_fetch;
+// --pf-graphs 0|1: ModelOptions:prefill_graphs for every qwen38 model command. --pf-graph-gate N: probe model runs
+// the prompt-call graph gate (pf_graphs.cpp: N calls per slot on two slots, then the timing of --pf-graph-sizes
+// N,N.. rows per call) and exits.
+extern bool g_pf_graphs;
+extern int g_pf_graph_gate;
+extern std::string g_pf_graph_sizes;
 extern std::string g_moe_cpu;  // --moe-cpu
 extern int g_moe_cpu_pct, g_moe_cpu_threads, g_moe_cpu_min_cold;
 // --pf-route-trace F: probe model writes every prefill call's MoE inputs and

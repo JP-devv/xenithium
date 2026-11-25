@@ -25,6 +25,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -99,6 +100,15 @@ inline constexpr int kPfFourLaneRows = 1536;
 inline constexpr int kPfMoeTwoCallRows = 2560;
 inline constexpr int kPfLaneAlign = 64;
 inline constexpr int kPfLanesMax = 4;  // (a card's split buffers are wired per lane)
+// Prompt-call graphs (ModelOptions::prefill_graphs). Calls of fewer than kPfGraphMaxRows rows only: from there the
+// split sums' copies run on the side queue beside the kernels (sends, lanes), and a graph replays its branches one
+// after another (measured: the copies in series cost what the replay saves at 128-256 rows, more above). A call
+// shape is recorded the kPfGraphRecordAt-th time it runs (one-off shapes never pay a recording); at most kPfGraphsMax
+// prompt-call graphs are kept (least recently replayed out first), each with its own split flag lines.
+inline constexpr int kPfGraphMaxRows = 128;
+inline constexpr int kPfGraphRecordAt = 2;
+inline constexpr int kPfGraphsMax = 32;
+inline constexpr int kPfGraphSeenMax = 4096;  // shapes counted but not recorded yet (the count restarts past it)
 // A decode step's rows by owner (model.cpp, "a decode step's rows by owner"): at four cards, steps of at least this
 // many rows run each row's residual mixers on one card. Below it every card runs every row.
 inline constexpr int kDecOwnerMinRows = 6;
@@ -172,6 +182,11 @@ struct ModelOptions {
   // (one submission per card instead of ~800 launches). Keys: rows, the parities, and the QSA grid
   // bound bucket. Profiled steps always run eagerly (they need per-launch events).
   bool graphs = true;
+  // Prompt-call graphs (prefill.cpp, "prompt-call graphs"): a prompt call of fewer than kPfGraphMaxRows rows replays
+  // its layers from a recorded graph per card once its shape has run kPfGraphRecordAt times. The same bits as the
+  // launches; the call's host submission (~1.5-2.6 ms of a 16-96-row call on two or four cards) goes. Off by default:
+  // a shape costs 10-60 ms to record and pays back only after ~20 calls of it.
+  bool prefill_graphs = false;
   int moe_gu_ksplit = 0;                // MoE gate_up k split (0 = the kernel default 8; probe --moe-gu-ks)
   int moe_dn_ksplit = 0;                // MoE down k split (0 = the kernel default 2); 1 = a null variant:
                                           // same precision, another fp32 summation order
@@ -610,6 +625,12 @@ class Model {
   // The drafter's pass graphs: recorded so far, ms recording + finalizing.
   int mtp_graphs_recorded() const;
   double mtp_graph_record_ms() const;
+  // Prompt-call graphs (ModelOptions::prefill_graphs): recorded so far, ms recording + finalizing, calls (or parts)
+  // replayed; set_prefill_graphs switches them from the next call on.
+  int pf_graphs_recorded() const { return pf_graphs_n_; }
+  double pf_graph_record_ms() const { return pf_graphs_ms_; }
+  int64_t pf_graphs_replayed() const { return pf_graphs_replayed_; }
+  void set_prefill_graphs(bool on) { opt_.prefill_graphs = on; }
   // Records, without running them, the step and drafter pass graphs of every QSA bound bucket up to max_bound (default:
   // the capacity) for every key recorded so far (call after a warm-up has recorded the first bucket's). Host state
   // unchanged; returns the graphs recorded. The graphs hold VRAM outside the placement budget.
@@ -801,6 +822,26 @@ class Model {
   struct PfRun;  // a prefill call between its parts (prefill.cpp)
   void pf_start(const int32_t *tokens, int m, int row_base, const std::function<void(int, int)> &on_rows, int32_t next_after);
   void pf_layers(int count);  // the next `count` layers of the pending call
+  // Prompt-call graphs (prefill.cpp): the next `count` layers from a recorded graph when the call has one (recorded
+  // here on the call's kPfGraphRecordAt-th run), else pf_layers. A recorded graph serves every call with the same key:
+  // everything the layers' launches take from the host.
+  struct PfGraphKey {
+    int rows = 0, layer0 = 0, layer_end = 0;  // the call's rows; the layers it (or this part of it) runs
+    int64_t qsa_bound = 0;                    // the QSA grid bound (bound_bucket of the call's end)
+    int pair_parity = 0, kv_parity = 0, moe_parity = 0;  // the prefill wires'
+    int hc_cur = 0, hc_lcur = 0, hc_lora_ld = 0;          // the call's HC state indices (every card's alike)
+    auto operator<=>(const PfGraphKey &) const = default;
+  };
+  struct PfGraphs;
+  std::unique_ptr<PfGraphs> pf_graphs_;
+  void pf_layers_run(int count);
+  [[nodiscard]] std::optional<PfGraphKey> pf_graph_key(int count) const;
+  bool pf_record_graph(const PfGraphKey &key, int count);  // false: the recording failed twice (the layers ran eagerly)
+  void pf_replay_graph(const PfGraphKey &key);
+  void pf_flag_set(int set);  // every card's split flag lines: set 0 = the launches', 1 + i = prompt-call graph flag set i
+  int pf_graphs_n_ = 0;
+  double pf_graphs_ms_ = 0;
+  int64_t pf_graphs_replayed_ = 0;
   // The layer-ahead fetch (ModelOptions::prefill_fetch, prefill.cpp): the lists of cold experts per layer to the cards
   // (as they stand at the call's start), and layer l's fetch into buffer l % 2 on every card (half 0 / 1 / 2 = all).
   void pf_fetch_lists(int m);

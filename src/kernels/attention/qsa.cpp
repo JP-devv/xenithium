@@ -1377,8 +1377,9 @@ sycl::event qsa_kv_move(sycl::queue &q, const QsaShape &s, const QsaCache *cache
 
 QsaEvents qsa_rows(sycl::queue &q, const QsaShape &s, int m, const bf16 *x, const QsaWeights &w, const QsaCache &c, const bf16 *rope,
                    const int32_t *words, int word_stride, int64_t pos0, const QsaScratch &sc, const QsaRowsScratch &rs, const PairRowsWire *wire,
-                   int wire_parity, bf16 *out) {
+                   int wire_parity, bf16 *out, std::optional<int64_t> bound) {
   if (m < 1 || pos0 + m > c.max_tokens) throw std::invalid_argument("qsa_rows: rows / capacity");
+  if (bound && (*bound < pos0 + m || *bound > c.max_tokens)) throw std::invalid_argument("qsa_rows: the bound must hold the call's rows and fit the cache");
   check_heads(s, "qsa_rows");
   if ((s.cards > 1) != (wire != nullptr)) throw std::invalid_argument("qsa_rows: a wire is needed exactly with more than one card");
   if (wire && wire->split && s.cards != 2 && s.cards != kWireCardsMax) throw std::invalid_argument("qsa_rows: the split sum is two- or four-card");
@@ -1389,8 +1390,8 @@ QsaEvents qsa_rows(sycl::queue &q, const QsaShape &s, int m, const bf16 *x, cons
   static_assert(kQsaRowsBatch % kM == 0, "batches start on a 4-row slice");
   if (qsa_kv_scaled(s.kv) && (!c.ks || !c.vs)) throw std::invalid_argument("qsa_rows: 8-bit KV needs scale pools");
   check_pair(s, rs.pend, rs.pair, m, "qsa_rows");
-  // score rows spaced by this call's blocks, not the capacity's (the same bits)
-  const int stride = static_cast<int>(qsa_score_words(static_cast<int>(pos0 + m)) / kM);
+  // score rows spaced by this call's blocks (or the bound's), not the capacity's (the same bits)
+  const int stride = static_cast<int>(qsa_score_words(static_cast<int>(bound ? *bound : pos0 + m)) / kM);
   QsaEvents e;
   // one launch when both bodies pair (m <= 16: direct qkv + one-tile idx; the same bits)
   e.idx = pf_dense_pair(q, m, w.qkv, x, s.hidden, PfOut{rs.y, nullptr, w.qkv.n}, w.idx, x, s.hidden, PfOut{rs.yi, nullptr, w.idx.n}, true, nullptr,
@@ -1436,7 +1437,7 @@ QsaEvents qsa_rows(sycl::queue &q, const QsaShape &s, int m, const bf16 *x, cons
   auto select_rows = [&](int b, int rows) {
     const SegW pos{words + static_cast<size_t>(b / kM) * word_stride, rec_stride, 0};  // == pos0 + b
     const QsaScratch u = batch_of(b);
-    const int blk_bound = static_cast<int>((pos0 + b + rows) / kQsaCompress);  // the batch's largest nblk
+    const int blk_bound = static_cast<int>((bound ? *bound : pos0 + b + rows) / kQsaCompress);  // >= the batch's largest nblk
     if (blk_bound <= kQsaTopBlocks) return false;
     e.score = traced(QsaStage::score, score<false>(q, rows, c, pos, blk_bound, u, stride));
     // prefill batches: one select launch up to kQsaPfChunk blocks (no merge launch); past it kQsaChunk-block chunks.

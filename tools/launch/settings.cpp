@@ -798,6 +798,18 @@ const char *brief_of(std::string_view key) {
        "Gives: + prompt reading speed on long prompts (32K tokens and more), much more with `XEN_PREFILL_CHUNK=8192` and `160`.\n"
        "Takes: - 3 x this many experts' worth of VRAM per card (160: 480 experts, 0.6 GiB) out of the experts kept in VRAM: - decode speed (most with several streams), - short prompts; 8,192-token chunks take 2.1 GiB more per card on top.\n"
        "Output: identical. Nothing to do on four cards (every expert in VRAM), on one card or with the MoE CPU path."},
+      {"XEN_PREFILL_GRAPHS",
+       "qwen38: a short prompt (under 128 tokens in one go, e.g. the next turn of a cached conversation) is read by replaying a recorded copy of its "
+       "work on each card instead of starting it piece by piece. A prompt length is recorded the second time it comes (in any conversation; "
+       "how long the conversation already is counts only in steps: up to 2K, 64K, then every 64K), and up to 32 are kept.\n"
+       "\n"
+       "`0`  off\n"
+       "`1`  on\n"
+       "\n"
+       "Gives: + 1-2 ms per short prompt on two or four cards (2-5 %; nothing on one card).\n"
+       "Takes: - 10-60 ms once per recorded length (the call that records it); it pays back only when the same lengths come again and again "
+       "(benchmarks, fixed-size requests).\n"
+       "Output: identical."},
       {"XEN_PREFILL_COLD_STAGE",
        "qwen38: VRAM for this many expert blobs per card, used to copy cold experts once per long prompt instead of reading them over PCIe again and again.\n"
        "\n"
@@ -1454,6 +1466,10 @@ std::vector<Spec> schema() {
   }
   {
     auto &s = add("XEN_GRAPHS", "Step graphs", num, Kind::Bool);
+    s.scope = Scope::Qwen38;
+  }
+  {
+    auto &s = add("XEN_PREFILL_GRAPHS", "Short prompts replay recorded graphs", num, Kind::Bool);
     s.scope = Scope::Qwen38;
   }
   {

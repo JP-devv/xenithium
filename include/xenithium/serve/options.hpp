@@ -37,6 +37,7 @@ struct Options {
   std::string prefill_wire = "auto";  // the prefill two-card sums: bf16 partials or fp32; auto = qwen35 bf16, qwen38 fp32
   int threads = 16;
   bool graphs = true;
+  bool prefill_graphs = false;  // qwen38: prompt calls of fewer than 128 rows replay recorded graphs (--prefill-graphs)
 
   // ---- prefill ----
   int prefill_chunk = 0;  // 0 = the arch's

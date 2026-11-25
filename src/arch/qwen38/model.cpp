@@ -504,6 +504,15 @@ Model::Model(const l0::Loader &loader, Fabric &fab, const std::string &dir, cons
           K.pf.split.flags = static_cast<uint32_t *>(fab.alloc_mailbox(c, k::kPairSplitFlagBytes));
           K.mem.push_back(K.pf.split.flags);
           q.memset(K.pf.split.flags, 0, k::kPairSplitFlagBytes);
+          K.pf.flag_lines[0] = K.pf.split.flags;
+          if (opt.prefill_graphs) {  // the prompt-call graphs' flag sets, one aligned slice each
+            constexpr size_t kSetStride = 4096;
+            static_assert(k::kPairSplitFlagBytes <= kSetStride);
+            auto *sets = static_cast<std::byte *>(fab.alloc_mailbox(c, kSetStride * kPfGraphsMax));
+            K.mem.push_back(sets);
+            q.memset(sets, 0, kSetStride * kPfGraphsMax);
+            for (int i = 0; i < kPfGraphsMax; ++i) K.pf.flag_lines[1 + i] = reinterpret_cast<uint32_t *>(sets + kSetStride * static_cast<size_t>(i));
+          }
           K.pf.split.error = K.pw.error;
           if (opt.prefill_wire_bf16) {  // the bf16 wire's stage (the peer's rows converted before the copy)
             K.pf.split.bf16 = true;
@@ -951,6 +960,9 @@ Model::~Model() {
                  st.timed_out ? "; switched off after a timeout" : "");
   }
   for (auto &p : cpu_pool_) p.reset();  // the pools read the host buffers K.mem frees below
+  if (pf_graphs_n_ > 0)
+    std::fprintf(stderr, "qwen38: prompt-call graphs: %d recorded (%.0f ms recording + finalizing), %lld calls replayed\n", pf_graphs_n_, pf_graphs_ms_,
+                 static_cast<long long>(pf_graphs_replayed_));
   try {
     save_ranking();  // the counts since the last save
   } catch (const std::exception &e) {
@@ -1873,7 +1885,9 @@ double Model::vram_free_mib() const {
   return f;
 }
 
-int Model::graphs_alive() const { return static_cast<int>((graphs_ ? graphs_->map.size() : 0) + (mtp_ ? mtp_->graphs.size() : 0)); }
+int Model::graphs_alive() const {
+  return static_cast<int>((graphs_ ? graphs_->map.size() : 0) + (mtp_ ? mtp_->graphs.size() : 0) + (pf_graphs_ ? pf_graphs_->map.size() : 0));
+}
 
 int Model::graph_room(bool all) {
   constexpr double kRoom = kGraphRoomMiB;
@@ -1904,9 +1918,14 @@ int Model::graph_room(bool all) {
     if (mtp_)
       for (auto i = mtp_->graphs.begin(); i != mtp_->graphs.end(); ++i)
         if (i->second.used < best) best = i->second.used, which = 1, mit = i;
+    decltype(pf_graphs_->map.begin()) pit;
+    if (pf_graphs_)
+      for (auto i = pf_graphs_->map.begin(); i != pf_graphs_->map.end(); ++i)
+        if (i->second.used < best) best = i->second.used, which = 2, pit = i;
     if (which < 0) break;
     if (which == 0) graphs_->map.erase(sit);
-    else mtp_->graphs.erase(mit);
+    else if (which == 1) mtp_->graphs.erase(mit);
+    else pf_graphs_->erase(pit);
     ++n;
   }
   if (first && !all)

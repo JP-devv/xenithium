@@ -71,6 +71,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <vector>
 #include <sycl/sycl.hpp>
 
@@ -289,6 +290,11 @@ QsaEvents qsa_store(sycl::queue &q, const QsaShape &s, int rows, const qsa_bf16 
 // word_stride >= kSegRec the words are segment records (rows.hpp) and slice 0's names the slot. Chains only:
 // the records' tree words are not read (its kernels are the chain instances), so a caller never passes a
 // tree step's records here.
+// bound: null = each 64-row batch's grid from its own last position (score / select only where a row passes 512 complete
+// blocks); set = one host bound for every batch (>= pos0 + m, <= the cache capacity), so the launches depend on the
+// bound, not on pos0, and a recorded graph of the call replays at any position under it. The same bits either way:
+// the score's work-groups past a row's own blocks return at once, the select is an exact top-k, and the attention
+// takes a row of <= 512 complete blocks whole without reading a selection.
 inline constexpr int kQsaRowsBatch = 64;  // rows per score / select / attn batch (a multiple of 4)
 struct QsaRowsScratch {
   float *y = nullptr;        // [rows_max + 4][qkv.n]
@@ -323,7 +329,7 @@ struct QsaRowsScratch {
 };
 QsaEvents qsa_rows(sycl::queue &q, const QsaShape &s, int m, const qsa_bf16 *x, const QsaWeights &w, const QsaCache &c, const qsa_bf16 *rope,
                    const int32_t *words, int word_stride, int64_t pos0, const QsaScratch &sc, const QsaRowsScratch &rs, const PairRowsWire *wire,
-                   int wire_parity, qsa_bf16 *out);
+                   int wire_parity, qsa_bf16 *out, std::optional<int64_t> bound = std::nullopt);
 
 // The select stage alone (tests): rows' keys in score [rows][stride], nblk[r] keys per row (device
 // words), top-512 -> sel / sel_n (candidate buffers sized for `rows`). bound = the largest nblk (grid size).

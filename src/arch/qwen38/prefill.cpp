@@ -50,7 +50,7 @@ void Model::prefill(const int32_t *tokens, int n, const std::function<void(int, 
   for (int r0 = 0; r0 < n; r0 += opt_.prefill_chunk) {
     const int m = std::min(opt_.prefill_chunk, n - r0);
     pf_start(tokens + r0, m, r0, on_rows, r0 + m < n ? tokens[r0 + m] : next_after);
-    pf_layers(cfg_.layers);
+    pf_layers_run(cfg_.layers);
     pf_finish();
   }
 }
@@ -93,7 +93,7 @@ void Model::prefill_begin(const int32_t *tokens, int n, int32_t next_after) {
 
 bool Model::prefill_advance(int layers) {
   if (!pf_run_) throw std::logic_error("qwen38 model: prefill_advance without a pending prefill call");
-  pf_layers(std::max(1, layers));
+  pf_layers_run(std::max(1, layers));
   if (pf_run_->l < cfg_.layers) {
     // the part's device time lands in its wall time (the engine's cost model times the parts); the
     // last part waits in the head
@@ -820,9 +820,7 @@ void Model::pf_layers(int count) {
   const int L = cfg_.layers, H = cfg_.hidden, W = hs_.shape.width(), per = ms_.shape.per_card();
   const int m = R.m, slices = R.slices;
   auto slice_rows = [&](int s) { return std::min(4, m - 4 * s); };
-  const size_t slot = static_cast<size_t>(R.slot);
   const int64_t pos0 = R.pos0;
-  const int gp0 = R.gp0;
   auto &cs = R.cs;
   auto rows_at = [&](bf16 *p, int s) { return p + static_cast<size_t>(s) * 4 * H; };
   const bool prof = pf_prof();
@@ -855,9 +853,8 @@ void Model::pf_layers(int count) {
           k::hc_combine(q, hs_.shape, m, st, blk);
           blk = nullptr;
         }
-        k::PleState ps = K.ple_st;
-        ps.ring += slot * ps.slot_elems;
-        k::ple_rows(q, ps_.shape, m, pos0, reinterpret_cast<const bf16 *>(pf_ple_), ps_.w[c], ps, K.pf.ple, st.residual());
+        // the position and the slot's ring from slice 0's record (a recorded call replays at any position, any slot)
+        k::ple_rows(q, ps_.shape, m, pos0, reinterpret_cast<const bf16 *>(pf_ple_), ps_.w[c], K.ple_st, K.pf.ple, st.residual(), K.pf.words);
       }
     }
     if (l == ps_.layer) pf_mark(1);
@@ -883,16 +880,14 @@ void Model::pf_layers(int count) {
     k::PairSplitSend send[kMaxCards];
     if (!cfg_.full_attention[l]) {
       // GDN over the chunk: replays the previous step's pending rows, commits through the last row
-      const int pnext = gp0 ^ 1;  // the slot's next decode step's parity: it reads win[pnext ^ 1]
       for (int c = 0; c < nc_; ++c) {
         Card &K = *cards_[static_cast<size_t>(c)];
         const k::GdnState &g = K.gst[static_cast<size_t>(l)];
         k::GdnRowsState rs;
-        rs.S = g.S + slot * g.slot_S;
-        rs.win_in = g.win[gp0 ^ 1] + slot * g.slot_win;
-        rs.win_out = g.win[pnext ^ 1] + slot * g.slot_win;
-        rs.log_y = g.y[gp0 ^ 1] + slot * g.slot_y;
-        rs.log_ab = g.ab[gp0 ^ 1] + slot * g.slot_ab;
+        // the slot's state at the sequence's parity, and the position, from slice 0's record (its slot and parity are
+        // the call's: a recorded call replays at any position, any slot)
+        rs.rec = K.pf.words;
+        rs.bufs = g;
         rs.accept = K.pf.words + k::kSegAccept;  // slice 0's accept = the previous step's rows
         rs.pos = opt_.gdn_scan ? static_cast<int>(R.pos0) : -1;  // chunks at absolute multiples of 64
         k::PairRowsWire pw = K.pf.pw;
@@ -922,7 +917,7 @@ void Model::pf_layers(int count) {
         qrs.trace = stage_trace(fab_, c, R.qsa_trace);
         qrs.pair_parity = pf_kv_parity_;
         sent[c] = k::qsa_rows(fab_.compute(c), qs_.shape_of(c), m, K.pf.xa, qs_.w[c][l], K.qc[static_cast<size_t>(l)], K.rope, K.pf.words, k::kSegRec, pos0, K.qsc,
-                    qrs, wire_of(pw), pf_pair_parity_, K.pf.ya).send;
+                    qrs, wire_of(pw), pf_pair_parity_, K.pf.ya, R.qsa_bound).send;
       }
       if (split) pf_split_sum([&](Card &K) { return K.pf.qsa.partial; }, [&](Card &K) { return K.pf.ya; }, false, 1, send_ok ? sent : nullptr);
       if (R.fetch) pf_fetch_some(pf_fetch_gap(l, 2), l, fetch_last);
@@ -1000,6 +995,169 @@ void Model::pf_layers(int count) {
   }
   pf_split_wait();  // the head, the drafter and decode steps between the parts read every row
   if ((pf_dprof() || pf_sprof()) && R.l == L) R.sub_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - R.t_sub0).count();
+}
+
+// ---- prompt-call graphs ---------------------------------------------------------------------------------------------
+// ModelOptions::prefill_graphs. A prompt call's layers (or a part's) recorded into one SYCL graph per card and
+// replayed, as the decode steps are (model.cpp, "step graphs"). The launches' host values are the key (PfGraphKey);
+// what changes from call to call lives on the device: the slice records (position, accepted rows, slot, GDN parity), the
+// token ids and the PLE rows (written by pf_start before the layers), the expert tables. The launches that took the
+// position or the sequence's buffers from the host read them from the call's first slice record instead, for every
+// call (the PLE block: position, the slot's ring; the GDN layers: the chunk split, the slot's state at its parity), and
+// the QSA indexer's grid takes the key's bound bucket while a graph records (the same bits: kernels::qsa_rows). So a
+// graph serves every slot and position under its bucket. The split sums' flag lines carry sequence numbers the
+// recording bakes in: each graph raises and waits on its own lines (Card::Pf::flag_lines), so a replay's first wait on
+// a line never meets its own number left over (a line only ever holds that graph's numbers, and a call writes each
+// line at least twice: two sums per layer). Calls of kPfGraphMaxRows rows and more (their copies beside the kernels on
+// the side queue, the lanes), the diagnostics (profiles, traces, calibration) and the layer-ahead fetch keep their
+// launches.
+namespace {
+static_assert(kPfGraphMaxRows <= kPfOwnerMinRows && kPfGraphMaxRows <= k::kPairSplitSendMinRows,
+              "a recorded prompt call must keep every copy on its compute queue (no lanes, no sends)");
+}  // namespace
+
+std::optional<Model::PfGraphKey> Model::pf_graph_key(int count) const {
+  const PfRun &R = *pf_run_;
+  const bool diagnostic = profiling_ || pf_trace_ || calib_cap_ || calib_hook_ || pf_prof_env() != nullptr;
+  if (!opt_.prefill_graphs || diagnostic || R.m >= kPfGraphMaxRows || !R.lanes.empty() || R.fetch || !ms_.shape.tp) return std::nullopt;
+  const k::HcState &st = R.cs[0];
+  return PfGraphKey{.rows = R.m,
+                    .layer0 = R.l,
+                    .layer_end = std::min(cfg_.layers, R.l + count),
+                    .qsa_bound = bound_bucket(R.pos0 + R.m),
+                    .pair_parity = pf_pair_parity_,
+                    .kv_parity = pf_kv_parity_,
+                    .moe_parity = pf_moe_parity_,
+                    .hc_cur = st.cur,
+                    .hc_lcur = st.lcur,
+                    .hc_lora_ld = st.lora_ld};
+}
+
+void Model::pf_layers_run(int count) {
+  const auto key = pf_graph_key(count);
+  if (!key) return pf_layers(count);
+  if (!pf_graphs_) pf_graphs_ = std::make_unique<PfGraphs>();
+  PfGraphs &G = *pf_graphs_;
+  if (!G.map.contains(*key)) {
+    if (G.seen.size() >= static_cast<size_t>(kPfGraphSeenMax)) G.seen.clear();
+    if (++G.seen[*key] < kPfGraphRecordAt) return pf_layers(count);
+    G.seen.erase(*key);
+    if (!pf_record_graph(*key, count)) return;  // the layers ran launch by launch
+  }
+  pf_replay_graph(*key);
+}
+
+void Model::pf_flag_set(int set) {
+  for (int c = 0; c < nc_; ++c) {
+    k::PairSplit &sp = cards_[static_cast<size_t>(c)]->pf.split;
+    sp.flags = cards_[static_cast<size_t>(c)]->pf.flag_lines[set];
+    if (nc_ == 2) sp.peer_flags = cards_[static_cast<size_t>(1 - c)]->pf.flag_lines[set];
+    if (nc_ == kMaxCards)
+      for (int d = 0; d < nc_; ++d) sp.flags_of[d] = cards_[static_cast<size_t>(d)]->pf.flag_lines[set];
+  }
+}
+
+// Records the pending call's next layers (from its current host state, nothing runs) as the graph of `key`, then sets
+// the host state back to the start: the caller replays it. On a failed finalize (device memory) every graph is evicted
+// and the recording retried once; a second failure runs the layers launch by launch and returns false.
+bool Model::pf_record_graph(const PfGraphKey &key, int count) {
+  namespace sx = sycl::ext::oneapi::experimental;
+  PfGraphs &G = *pf_graphs_;
+  PfRun &R = *pf_run_;
+  const bool split = nc_ > 1 && R.m >= kPfSplitMinRows;  // the call's sums wait on the split flag lines
+  if (split && !cards_[0]->pf.flag_lines[1]) throw std::logic_error("qwen38 model: prompt-call graphs need a model loaded with ModelOptions::prefill_graphs");
+  auto drain = [&] {
+    for (int c = 0; c < nc_; ++c) fab_.compute(c).wait();
+  };
+  auto record = [&]() -> PfGraphs::Entry {
+    graph_room();
+    if (G.map.size() >= static_cast<size_t>(kPfGraphsMax)) {  // the least recently replayed prompt-call graph goes
+      auto lru = std::min_element(G.map.begin(), G.map.end(), [](const auto &a, const auto &b) { return a.second.used < b.second.used; });
+      drain();
+      G.erase(lru);
+      ++graphs_evicted_;
+    }
+    PfGraphs::Entry e;
+    if (split) {
+      // (fewer graphs than sets: one is free) A free set's lines hold an evicted graph's numbers: zeroed on every card
+      // before any card replays (a peer's first flag must not land before this card's reset)
+      e.flag_set = G.free_flag_sets.back();
+      G.free_flag_sets.pop_back();
+      for (int c = 0; c < nc_; ++c) fab_.compute(c).memset(cards_[static_cast<size_t>(c)]->pf.flag_lines[e.flag_set], 0, k::kPairSplitFlagBytes);
+      drain();
+    }
+    std::vector<PfGraphs::Hc> start_hc;
+    for (const k::HcState &st : R.cs) start_hc.push_back({st.cur, st.lcur, st.lora_ld});
+    const int pp = pf_pair_parity_, kp = pf_kv_parity_, mp = pf_moe_parity_;
+    auto restore = [&] {  // the call's host state as before the recording
+      for (int c = 0; c < nc_; ++c) {
+        k::HcState &st = R.cs[static_cast<size_t>(c)];
+        st.cur = start_hc[static_cast<size_t>(c)].cur, st.lcur = start_hc[static_cast<size_t>(c)].lcur, st.lora_ld = start_hc[static_cast<size_t>(c)].lora_ld;
+      }
+      pf_pair_parity_ = pp, pf_kv_parity_ = kp, pf_moe_parity_ = mp;
+      R.l = key.layer0;
+      R.qsa_bound.reset();
+      pf_flag_set(0);
+    };
+    std::vector<sx::command_graph<sx::graph_state::modifiable>> g;
+    for (int c = 0; c < nc_; ++c) g.emplace_back(fab_.compute(c).get_context(), fab_.compute(c).get_device());
+    for (int c = 0; c < nc_; ++c) g[static_cast<size_t>(c)].begin_recording(fab_.compute(c));
+    pf_flag_set(e.flag_set);
+    R.qsa_bound = key.qsa_bound;
+    try {
+      pf_layers(count);
+    } catch (...) {
+      for (int c = 0; c < nc_; ++c) g[static_cast<size_t>(c)].end_recording();
+      restore();
+      if (e.flag_set > 0) G.free_flag_sets.push_back(e.flag_set);
+      throw;
+    }
+    for (int c = 0; c < nc_; ++c) g[static_cast<size_t>(c)].end_recording();
+    for (const k::HcState &st : R.cs) e.end_hc.push_back({st.cur, st.lcur, st.lora_ld});
+    e.end_pair = pf_pair_parity_, e.end_kv = pf_kv_parity_, e.end_moe = pf_moe_parity_;
+    restore();
+    try {
+      for (int c = 0; c < nc_; ++c) e.exec.push_back(g[static_cast<size_t>(c)].finalize());
+    } catch (const std::exception &x) {
+      if (e.flag_set > 0) G.free_flag_sets.push_back(e.flag_set);
+      throw GraphRecordError(std::string("qwen38 model: prompt-call graph finalize: ") + x.what());
+    }
+    return e;
+  };
+  const auto t0 = std::chrono::steady_clock::now();
+  try {
+    G.map.emplace(key, record());
+  } catch (const GraphRecordError &) {
+    graph_room(true);
+    try {
+      G.map.emplace(key, record());
+    } catch (const GraphRecordError &y) {
+      if (graphs_eager_++ == 0) std::fprintf(stderr, "qwen38: %s; this prompt call runs without a graph\n", y.what());
+      pf_layers(count);
+      return false;
+    }
+  }
+  ++pf_graphs_n_;
+  pf_graphs_ms_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+  return true;
+}
+
+// The pending call's next layers from the graph of `key` (its host state is the key's), then the host state the
+// recording left: the HC state indices, the layer, the wires' parities.
+void Model::pf_replay_graph(const PfGraphKey &key) {
+  PfGraphs::Entry &e = pf_graphs_->map.at(key);
+  PfRun &R = *pf_run_;
+  e.used = ++graph_tick_;
+  // every card's graph in flight together: the waits inside pair up across the cards
+  for (int c = 0; c < nc_; ++c) fab_.compute(c).ext_oneapi_graph(e.exec[static_cast<size_t>(c)]);
+  for (int c = 0; c < nc_; ++c) {
+    k::HcState &st = R.cs[static_cast<size_t>(c)];
+    const PfGraphs::Hc &h = e.end_hc[static_cast<size_t>(c)];
+    st.cur = h.cur, st.lcur = h.lcur, st.lora_ld = h.lora_ld;
+  }
+  R.l = key.layer_end;
+  pf_pair_parity_ = e.end_pair, pf_kv_parity_ = e.end_kv, pf_moe_parity_ = e.end_moe;
+  ++pf_graphs_replayed_;
 }
 
 void Model::pf_finish() {

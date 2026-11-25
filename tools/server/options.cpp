@@ -62,6 +62,9 @@
 // --prefill-fetch N [0] qwen38 on two cards: VRAM for N cold expert blobs per layer, three times per card; a prompt
 //   call of 4,096 rows and more copies each layer's cold experts (up to N) into it on the copy engine while the layers
 //   before it compute, instead of its MoE reading them over PCIe (0 = off); identical output
+// --prefill-graphs 0|1 [0] qwen38: a prompt call of fewer than 128 rows replays its layers from a recorded graph per
+//   card once its shape (rows, position bucket, wire parities; any slot) has run twice; identical output, 1-2 ms less
+//   per such call on two or four cards, 20-60 ms to record a shape
 // --kv-lend on|off [on] qwen38: the KV pool's pages no sequence holds keep cold experts in VRAM (given back, no copy,
 //   when the KV grows into them; refilled while the server is idle); identical output. On the dense 27B the pages keep
 //   the wide prefill matrices' oneDNN layouts instead (no repack per call, given back the same way); there
@@ -162,7 +165,7 @@
 // int4-rescore).
 //
 // --reserve also sizes qwen35's auto KV pool. MoE / qwen38-only options (--hot-rank, --graphs (also arch flint),
-// --prefill-moe / -dense, --decode-moe, --prefill-cold-stage, --prefill-fetch, --mtp) do not apply to it.
+// --prefill-moe / -dense, --decode-moe, --prefill-cold-stage, --prefill-fetch, --prefill-graphs, --mtp) do not apply to it.
 //
 // The prefix cache (qwen35, qwen38): --prefix-cache 0|1 [1] (finished requests leave their sequence on the slot and
 // snapshots of its state; a new request continues the longest cached prefix of its prompt), --prefix-cache-gib F [8]
@@ -255,6 +258,7 @@ std::vector<Flag> flags(serve::Options &o, std::string &kv_pool) {
       {"--prefill-dense", "w8a8|w8a8-row|w8a16", str(o.prefill_dense)},
       {"--prefill-cold-stage", "N", i32(o.prefill_cold_stage)},
       {"--prefill-fetch", "N", i32(o.prefill_fetch)},
+      {"--prefill-graphs", "0|1", on(o.prefill_graphs)},
       {"--kv-lend", "on|off", str(o.kv_lend)},
       {"--kv-lend-keep", "N", i64(o.kv_lend_keep)},
       {"--kv-lend-park-s", "S", f64(o.kv_lend_park_s)},

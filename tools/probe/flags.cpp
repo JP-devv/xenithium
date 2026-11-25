@@ -91,6 +91,10 @@ bool g_gdn_scan = true;
 int g_pf_cold_stage = 16;
 // --pf-fetch N: ModelOptions:prefill_fetch for every model command.
 int g_pf_fetch = 0;
+// --pf-graphs 0|1, --pf-graph-gate N, --pf-graph-sizes N,N (probe.hpp)
+bool g_pf_graphs = false;
+int g_pf_graph_gate = 0;
+std::string g_pf_graph_sizes = "16,32,64,96,127";
 // --moe-cpu off|auto|avx512|avx2 [off], --moe-cpu-pct P [70], --moe-cpu-threads N [8]: qwen38
 // ModelOptions:moe_cpu for probe model (the decode MoE's CPU path for cold experts; rank takes its own flags).
 std::string g_moe_cpu = "off";
