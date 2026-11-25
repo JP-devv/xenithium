@@ -3,6 +3,7 @@
 #include "xenithium/kernels/attention/trained_qsa_pages.hpp"
 #include "xenithium/kernels/gemm/pf_dense.hpp"
 #include "xenithium/kernels/pack.hpp"
+#include "xenithium/util/env.hpp"
 
 #include <algorithm>
 #include <bit>
@@ -316,7 +317,7 @@ struct Device::Impl {
   const bool stream=enabled("XEN_TRAINED_QSA_STREAM_PROJECTION");
   const bool half=enabled("XEN_TRAINED_QSA_POOL_FP16");
   const char *audit=fp16_audit_dir();
-  const bool bench=std::getenv("XEN_BENCH_VERIFY_LOG")!=nullptr;
+  const bool bench=util::env_flag("XEN_BENCH_VERIFY_LOG");
   size_t projection_words=0,host_bytes=0;
   uint16_t *host_projection=nullptr;
   // Projection, selector and host-to-device uploads run on the same in-order

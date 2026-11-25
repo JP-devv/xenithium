@@ -39,6 +39,7 @@
 #include "xenithium/kernels/residual/rmsnorm.hpp"
 #include "xenithium/model/arch.hpp"
 #include "xenithium/model/config.hpp"
+#include "xenithium/util/env.hpp"
 #include "xenithium/util/host_mem.hpp"
 
 namespace xenithium::arch::qwen35 {
@@ -1573,7 +1574,7 @@ void Model::note_prompt(int slot,int64_t total,int64_t restored) {
   const bool retained=qsa_resident_snapshots() && restored>0 && restored%k::kQsaPage==0 &&
       restored==position(slot) && qsa_covered_.at(slot)==restored;
   qsa_covered_.at(slot)=fresh?0:retained?restored:-1;
-  static const bool log=std::getenv("XEN_QSA_TRIAL_ROUTE_LOG")!=nullptr;
+  static const bool log=util::env_flag("XEN_QSA_TRIAL_ROUTE_LOG");
   if(log) std::fprintf(stderr,"QSA_TRIAL_PROMPT slot=%d tokens=%lld restored=%lld tracking=%d\n",slot,
                        static_cast<long long>(total),static_cast<long long>(restored),int(fresh || retained));
 }
@@ -2141,14 +2142,14 @@ void Model::verify_batch(const std::vector<SeqRows> &segs) {
       } else qsa_dense_rows_|=mask;
     }
   if(!qsa_step_sparse_) qsa_dense_rows_=0;
-  static const bool one128_audit=std::getenv("XEN_DSPINE_ONEUSER_AUDIT")!=nullptr;
+  static const bool one128_audit=util::env_flag("XEN_DSPINE_ONEUSER_AUDIT");
   if(one128_audit) for(const auto &g:segs) {
     const auto p=position(g.slot),covered=trained_qsa3_?qsa_covered_.at(g.slot):-1;
     std::fprintf(stderr,"ONE128_VERIFY slot=%d pos=%lld rows=%d verify=%s target=%s guard=%s\n",
       g.slot,static_cast<long long>(p),g.rows,g.parent?"tree":"chain",qsa_step_sparse_?"sparse":"dense",
       !trained_qsa3_?"qsa-off":qsa_step_sparse_?"eligible":covered!=p?"incomplete":p<kTrainedQsaShort?"short":tree_attn_?"tree-batch":"mixed");
   }
-  static const bool qsa_log=std::getenv("XEN_QSA_TRIAL_ROUTE_LOG")!=nullptr;
+  static const bool qsa_log=util::env_flag("XEN_QSA_TRIAL_ROUTE_LOG");
   if(qsa_log && trained_qsa3_) for(const auto &g:segs) {
     const auto pos=seqs_[g.slot].pos, covered=qsa_covered_[g.slot];
     std::fprintf(stderr,"QSA_TRIAL_ROUTE slot=%d pos=%lld rows=%d covered=%lld route=%s reason=%s\n",g.slot,
@@ -2847,7 +2848,7 @@ bool Model::pf_step(int layers) {
   static const char *pf_probe=std::getenv("XEN_PF_TOPK_REPLAY_DIR");
   const bool capture_chunk=pf_probe && *pf_probe && !pf_probe_done_ && !multi && slot_==pf_probe_slot_ && pos_==194560;
   if(capture_chunk && (!sparse_pf || m!=2048)) throw std::runtime_error("prefill top-k replay: tagged chunk did not take native 2048-row sparse FA");
-  const bool log_pf_dispatch=std::getenv("XEN_DSPINE_PREFILL_DISPATCH_LOG") && !multi &&
+  const bool log_pf_dispatch=util::env_flag("XEN_DSPINE_PREFILL_DISPATCH_LOG") && !multi &&
                              (pos_==32768 || pos_==190464 || pos_==260096);
   // trained QSA layers project the bf16 xn of every row (the selector index): their input norm stays on both cards' rows, not codes-only
   auto qsa_xn = [&](int l) { return trained_qsa3_ && trained_qsa_layer_[l] >= 0; };
@@ -3602,7 +3603,7 @@ std::vector<std::vector<int32_t>> Model::run_drafts(const std::vector<const bf16
     anc.push_back(next[r0 + segs[static_cast<size_t>(i)].keep - 1]);
   }
   if (dflash_ && !mtp_drafts(ns)) {  // the verify's rows are the context; the anchor is the token after a segment's kept rows
-    if(std::getenv("XEN_DSPINE_ONEUSER_AUDIT"))
+    if(util::env_flag("XEN_DSPINE_ONEUSER_AUDIT"))
       std::fprintf(stderr,"ONE128_DRAFT phase=decode engine=block-drafter slots=%d mtp_kv=%d\n",ns,mtp_?1:0);
     namespace ruby = util::ruby_round;
     auto &ru=ruby::r;
@@ -3628,7 +3629,7 @@ std::vector<std::vector<int32_t>> Model::run_drafts(const std::vector<const bf16
     const int di = depth_of(depth, i);
     if (static_cast<int>(out[i].size()) > di) out[i].resize(static_cast<size_t>(std::max(0, di)));
   }
-  if(std::getenv("XEN_DSPINE_ONEUSER_AUDIT"))
+  if(util::env_flag("XEN_DSPINE_ONEUSER_AUDIT"))
     std::fprintf(stderr,"ONE128_DRAFT phase=decode engine=mtp slots=%d mtp_kv=%d\n",ns,mtp_?1:0);
   if (dflash_) {  // MTP drafts; the DFlash context takes the verify's rows (a depth-0 pass: deferred)
     const double mtp_ms = draft_ms_;
@@ -3761,7 +3762,7 @@ std::vector<int32_t> Model::draft_after_prefill(int32_t first, int depth, int se
   for (size_t c = 0; c < cards_.size(); ++c)
     h[c] = hx >= 0 ? cards_[c]->pf_hx + static_cast<size_t>(hx) * cfg_.hidden : head_->card(static_cast<int>(c)).xn + static_cast<size_t>(pf_last_row_) * cfg_.hidden;
   if (dflash_ && !mtp_drafts(seqs)) {  // the prompt is in the context
-    if(std::getenv("XEN_DSPINE_ONEUSER_AUDIT"))
+    if(util::env_flag("XEN_DSPINE_ONEUSER_AUDIT"))
       std::fprintf(stderr,"ONE128_DRAFT phase=prefill engine=block-drafter slots=%d mtp_kv=%d\n",seqs,mtp_?1:0);
     double mtp_ms = 0;
     if (mtp_) {  // MTP's KV of the prompt's last row (with `first`), before the DFlash pass reuses the head
@@ -3773,7 +3774,7 @@ std::vector<int32_t> Model::draft_after_prefill(int32_t first, int depth, int se
     return d;
   }
   if (depth < 1) throw std::invalid_argument("qwen35 model: draft depth >= 1");
-  if(std::getenv("XEN_DSPINE_ONEUSER_AUDIT"))
+  if(util::env_flag("XEN_DSPINE_ONEUSER_AUDIT"))
     std::fprintf(stderr,"ONE128_DRAFT phase=prefill engine=mtp slots=%d mtp_kv=%d\n",seqs,mtp_?1:0);
   return mtp_run(h, 1, {DSeg{slot_, pos_ - 1, 1}}, &first, depth)[0];  // both: the prompt is in the DFlash context too
 }
