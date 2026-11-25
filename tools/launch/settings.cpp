@@ -422,11 +422,33 @@ const char *brief_of(std::string_view key) {
       {"XEN_DRAFT_GRAPHS",
        "Block drafter (DFlash 2 / DSpine): the most recorded drafter-pass graphs kept on the cards. Each holds about 10 MiB per card; once the cap is reached the least recently used one is dropped, and the log says so once.\n"
        "\n"
-       "`96`  the default\n"
+       "`empty`  the default: 96, or 72 with `XEN_STEP_GRAPHS` on\n"
        "\n"
        "Gives (lower): + VRAM headroom on tight cards.\n"
        "Takes (lower): - a recording (~20-40 ms) whenever a dropped step shape comes back.\n"
        "Limits: at least 4.\n"
+       "Output: the same."},
+      {"XEN_STEP_GRAPHS",
+       "qwen35 (Qwen3.8-27B): replay the decode step as a recorded GPU graph (with `XEN_GRAPHS` on; flint always does). Off by default.\n"
+       "\n"
+       "Gives: + decode speed when the CPU is the bottleneck: a step's ~2,000 kernel launches cost one replay. On a fast host: the same as without.\n"
+       "Takes: - ~42 ms the first time each step shape runs (recorded once), - about 7.5 MiB per step graph per card (`XEN_STEP_GRAPHS_MAX`); `XEN_DRAFT_GRAPHS` drops to 72 so the total stays the same.\n"
+       "Output: byte-identical in the short-context checks.\n"
+       "Note: not used while a host-reading diagnostic is set (tree / fp16 audits, score / pack checks)."},
+      {"XEN_STEP_GRAPHS_MAX",
+       "The most qwen35 step graphs kept (with `XEN_STEP_GRAPHS`); the least recently replayed is dropped at the cap.\n"
+       "\n"
+       "`32`  the default\n"
+       "\n"
+       "Gives (lower): + VRAM headroom. Takes (lower): - more re-recordings (~42 ms each) when step shapes vary.\n"
+       "Limits: at least 4.\n"
+       "Output: the same."},
+      {"XEN_GRAPH_ROOM_MIB",
+       "qwen35 step graphs: below this much free VRAM on the tighter card, each new step graph first drops 4 old ones. A recording that fails drops all of them and runs that step without a graph.\n"
+       "\n"
+       "`128`  the default\n"
+       "\n"
+       "Gives (higher): + VRAM headroom for everything else. Takes (higher): - fewer step graphs kept on tight cards.\n"
        "Output: the same."},
       {"XEN_PREFILL_MOE",
        "qwen38: precision of the expert activations while reading the prompt.\n"
@@ -1251,9 +1273,29 @@ std::vector<Spec> schema() {
   }
   {
     auto &s = add("XEN_DRAFT_GRAPHS", "Drafter pass graphs kept", spec, Kind::Int);  // the block drafter's (DFlash 2 / DSpine)
+    s.allow_empty = true;
     s.lo = 4;
-    s.choices = {"96", "48", "192"};
+    s.choices = {"", "96", "72", "48", "192"};
+    s.names = {{"", "default (96; 72 with step graphs)"}};
     s.unit = "graphs";
+  }
+  {
+    auto &s = add("XEN_STEP_GRAPHS", "Decode step graphs", spec, Kind::Bool);  // qwen35, opt-in
+    s.scope = Scope::Qwen35;
+  }
+  {
+    auto &s = add("XEN_STEP_GRAPHS_MAX", "Step graphs kept", spec, Kind::Int);
+    s.scope = Scope::Qwen35;
+    s.lo = 4;
+    s.choices = {"32", "16", "64"};
+    s.unit = "graphs";
+  }
+  {
+    auto &s = add("XEN_GRAPH_ROOM_MIB", "Step graphs: VRAM room", spec, Kind::Int);
+    s.scope = Scope::Qwen35;
+    s.lo = 0;
+    s.choices = {"128", "256", "512"};
+    s.unit = "MiB";
   }
   {
     auto &s = add("XEN_DRAFT_HEAD", "Draft head rows", spec, Kind::Choice);
