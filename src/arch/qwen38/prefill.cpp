@@ -770,7 +770,7 @@ void Model::pf_fetch_lists(int m) {
 
 // The bytes per card a gap's copies may take: gap 1 runs beside layer l's mixer and attention (from the previous MoE's
 // sum to layer l's attention send), gap 2 beside layer l's MLP mixer and MoE (to the MoE's send). Their lengths at
-// 8,192 rows on two cards (ms; probe timeline, round 288), for fewer rows the same (a 4,096-row call is link bound:
+// 8,192 rows on two cards (ms; measured on a probe timeline), for fewer rows the same (a 4,096-row call is link bound:
 // every gap filled), for more in proportion; at the host link's rate per card while both cards fetch.
 size_t Model::pf_fetch_gap(int l, int gap) const {
   constexpr double kGdnGapMs = 14, kQsaGapMs = 38, kMoeGapMs = 10, kGbPerS = 7.0;

@@ -86,7 +86,7 @@ struct OwnerFlags {  // one use's
   uint32_t *count = nullptr;  // this card: kOwnerCopyCountBytes of device memory, zeroed once (its sends)
   bool on() const { return count != nullptr; }
 };
-// Measured in the step (round 282): 16 rows +0.2 %, 20 rows -0.3 %, 24 rows -0.7 %, 28 rows -1.2 %, 64 rows -3.1 %.
+// Measured in the step: 16 rows +0.2 %, 20 rows -0.3 %, 24 rows -0.7 %, 28 rows -1.2 %, 64 rows -3.1 %.
 inline constexpr int kOwnerCopyMinRows = 24;
 inline constexpr size_t kOwnerCopyLineBytes = kWireCardsMax * 64, kOwnerCopyCountBytes = 64;
 // A share by copies. The owner writes its rows into the same rows of every other card's buffer, so the caller's order

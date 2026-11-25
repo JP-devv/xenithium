@@ -575,7 +575,7 @@ model::Budget Qwen38::budget(const model::Checkpoint &ck, const model::DeployPar
   }
   if (by_tokens) {
     // Every card attends its tokens with all q heads of its kv head: the partner's q heads (no gates) are replicated
-    // rows of the card's q_proj slice (an exchange of q per layer costs more, round 279's micro). o_proj stays split by
+    // rows of the card's q_proj slice (an exchange of q per layer costs more, measured in a micro test). o_proj stays split by
     // its own heads' columns after the pair's merge: one partial-softmax exchange per attention layer per step; the
     // selection needs none (the indexer is replicated).
     const double QD = static_cast<double>(c_.q_heads) * c_.head_dim;

@@ -42,7 +42,7 @@ void need(bool ok, const std::string &what) {
 
 // pinned host words (DFlash::host_): block ids, records, anchors, drafts
 // Four cards: a pass's sums of this many rows and more go as an owner sum + a share by copies (DFlash::submit).
-// Served (qwen38 TP4, round 286): the update gap -0.35 ms at 12 streams and -0.38 at 16 (32-64 rows a sum); from 24
+// Served (qwen38 TP4, measured): the update gap -0.35 ms at 12 streams and -0.38 at 16 (32-64 rows a sum); from 24
 // rows instead (6 / 7 streams) -0.1 / 0.0 ms, inside the spread, so 32.
 constexpr int kOwnerSumRows = 32;
 constexpr int kIdsOff = 0, kRecOff = k::kMaxRows, kAnchorOff = kRecOff + k::kMaxSegs * k::kSegRec, kDraftOff = kAnchorOff + k::kMaxSegs;

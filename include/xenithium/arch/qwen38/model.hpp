@@ -87,10 +87,10 @@ inline constexpr int kPfSplitMinRows = 24;
 inline constexpr int kPfOwnerMinRows = 128;  // (= kernels::kPairSplitSendMinRows: the modules send their partials from there)
 // The layer-ahead fetch (ModelOptions::prefill_fetch) from this many rows in a call: a shorter call's layer computes for
 // less time than its copies take, and the copies hold up its sums' sends on the one copy engine (2,048-row calls: 1,806
-// -> 1,635 tok/s with the fetch, round 288).
+// -> 1,635 tok/s with the fetch, measured).
 inline constexpr int kPfFetchMinRows = 4096;
 // The blobs per layer a 4,096-row call's fetch moves (in proportion to the call's rows, up to prefill_fetch): what the
-// host link carries per card while both cards compute a layer (round 288's sweep).
+// host link carries per card while both cards compute a layer (a measured sweep).
 inline constexpr int kPfFetchPer4K = 96;
 // The fetch's buffers per card, layer l's in buffer l % kPfFetchBufs: with three, layer l + 2's fetch starts behind
 // layer l's MoE (its buffer's last reader was layer l - 1's), two layers of compute before its own MoE.
