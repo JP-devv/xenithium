@@ -419,6 +419,15 @@ const char *brief_of(std::string_view key) {
        "Takes: - guesses for rare tokens (98,304 ids cover nearly all text on qwen35), - VRAM on the 27B with the MTP drafter alone: its own copy of the output rows, 0.23 GiB per card at 98,304.\n"
        "Note: qwen38 needs a multiple of 64.\n"
        "Output: the same."},
+      {"XEN_DRAFT_GRAPHS",
+       "Block drafter (DFlash 2 / DSpine): the most recorded drafter-pass graphs kept on the cards. Each holds about 10 MiB per card; once the cap is reached the least recently used one is dropped, and the log says so once.\n"
+       "\n"
+       "`96`  the default\n"
+       "\n"
+       "Gives (lower): + VRAM headroom on tight cards.\n"
+       "Takes (lower): - a recording (~20-40 ms) whenever a dropped step shape comes back.\n"
+       "Limits: at least 4.\n"
+       "Output: the same."},
       {"XEN_PREFILL_MOE",
        "qwen38: precision of the expert activations while reading the prompt.\n"
        "\n"
@@ -1239,6 +1248,12 @@ std::vector<Spec> schema() {
     s.choices = {"0", "32768", "65536", "98304"};
     s.names = {{"0", "full head"}};
     s.unit = "ids";
+  }
+  {
+    auto &s = add("XEN_DRAFT_GRAPHS", "Drafter pass graphs kept", spec, Kind::Int);  // the block drafter's (DFlash 2 / DSpine)
+    s.lo = 4;
+    s.choices = {"96", "48", "192"};
+    s.unit = "graphs";
   }
   {
     auto &s = add("XEN_DRAFT_HEAD", "Draft head rows", spec, Kind::Choice);
