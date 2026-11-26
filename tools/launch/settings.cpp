@@ -1009,10 +1009,34 @@ const char *brief_of(std::string_view key) {
        "\n"
        "Takes: - decode speed. Never use it to measure speed."},
       {"XEN_DRAFT_GRAPHS",
-       "Block drafter (DFlash 2 / DSpine): the most recorded drafter-pass graphs kept on the cards (a number, at least 4; default `96`). Each holds about 10 MiB per "
+       "Block drafter (DFlash 2 / DSpine): the most recorded drafter-pass graphs kept on the cards (a number, at least 4; default `96`, `72` with XEN_STEP_GRAPHS). Each holds about 10 MiB per "
        "card; once the cap is reached the least recently used one is dropped, and the log says so once.\n"
        "\n"
        "Lower: + VRAM headroom on tight cards. Takes: - a recording (~20-40 ms) whenever a dropped step shape comes back.\n"
+       "Output: the same."},
+      {"XEN_STEP_GRAPHS",
+       "The dense 27B and llama (flint always does): records each decode step shape once as a GPU graph per card and replays it, instead of launching the step's ~2,000 kernels one by one. Needs XEN_GRAPHS on (the default).\n"
+       "\n"
+       "`1`  replay recorded step graphs\n"
+       "`0`  plain launches (the default)\n"
+       "\n"
+       "Gives (1): + decode speed when the host CPU or its link is the bottleneck. On a fast host: the same.\n"
+       "Takes (1): - ~42 ms the first time each step shape runs, - about 7.5 MiB per step graph per card (XEN_STEP_GRAPHS_MAX); the drafter's pass graphs (XEN_DRAFT_GRAPHS) drop to 72 so the total stays about the same.\n"
+       "Note: off while XEN_QSA_SCORE_CHECK or XEN_QSA_PACK_CHECK is set."},
+      {"XEN_STEP_GRAPHS_MAX",
+       "The most decode step graphs kept (XEN_STEP_GRAPHS 1); the least recently replayed is dropped at the cap.\n"
+       "\n"
+       "`empty`  32 (the default)\n"
+       "\n"
+       "Lower: + VRAM headroom. Takes: - more re-recordings (~42 ms each) when step shapes vary.\n"
+       "Limits: at least 4.\n"
+       "Output: the same."},
+      {"XEN_GRAPH_ROOM_MIB",
+       "Decode step graphs (XEN_STEP_GRAPHS 1): below this much free VRAM on the tighter card, each new step graph first drops 4 old ones. A recording that fails drops all of them and runs that step without a graph.\n"
+       "\n"
+       "`empty`  128 MiB (the default)\n"
+       "\n"
+       "Higher: + VRAM headroom for everything else. Takes: - fewer step graphs kept on tight cards.\n"
        "Output: the same."},
       {"XEN_PREFILL_SHARE",
        "How the loop divides its time between reading new prompts and generating for the requests that are already answering. By default every loop turn runs one prompt call (or one part of a split call) next to the generation step, so a long prompt arriving slows down every stream that is generating while it is read. With a share `s` between 0 and 1, while any request generates, prompt reading gets about `s` of the loop's wall time and generation the rest; with nothing generating, prompts run at full speed again.\n"
@@ -1676,6 +1700,12 @@ std::vector<Spec> schema() {
     s.scope = Scope::Qwen38;
   }
   {
+    auto &s = add("XEN_STEP_GRAPHS", "Decode step graphs (qwen35 runtime)", num, Kind::Bool);
+    s.diag = true;
+    s.scope = Scope::Qwen35;
+    s.allow_empty = true;
+  }
+  {
     auto &s = add("XEN_PREFILL_GRAPHS", "Short prompts replay recorded graphs", num, Kind::Bool);
     s.scope = Scope::Qwen38;
   }
@@ -1966,6 +1996,22 @@ std::vector<Spec> schema() {
     s.diag = true;
     s.lo = 4;
     s.allow_empty = true;
+  }
+  {
+    auto &s = add("XEN_STEP_GRAPHS_MAX", "Decode step graphs kept", dg, Kind::Int);
+    s.diag = true;
+    s.scope = Scope::Qwen35;
+    s.lo = 4;
+    s.allow_empty = true;
+    s.unit = "graphs";
+  }
+  {
+    auto &s = add("XEN_GRAPH_ROOM_MIB", "Decode step graphs: VRAM room", dg, Kind::Int);
+    s.diag = true;
+    s.scope = Scope::Qwen35;
+    s.lo = 0;
+    s.allow_empty = true;
+    s.unit = "MiB";
   }
   {
     auto &s = add("XEN_PREFILL_SHARE", "Prompt time share while decoding", pf, Kind::Float);
@@ -2518,6 +2564,12 @@ std::string unused_reason(const Spec &s, std::string_view arch, const Values &va
       if (s.key == k) uses = true;
     if (!uses) return "not used by the stub engine";
   }
+  // Decode step graphs on the qwen35 runtime: flint always records them; the dense 27B and llama with XEN_STEP_GRAPHS
+  if (s.key == "XEN_STEP_GRAPHS" && arch == "flint") return "flint always replays step graphs (XEN_GRAPHS)";
+  if ((s.key == "XEN_STEP_GRAPHS" || s.key == "XEN_STEP_GRAPHS_MAX" || s.key == "XEN_GRAPH_ROOM_MIB") && v("XEN_GRAPHS") == "0")
+    return "needs XEN_GRAPHS on";
+  if ((s.key == "XEN_STEP_GRAPHS_MAX" || s.key == "XEN_GRAPH_ROOM_MIB") && arch != "flint" && v("XEN_STEP_GRAPHS") != "1")
+    return "needs XEN_STEP_GRAPHS 1";
   if (arch == "qwen38") {  // A drafter is XEN_MTP or the DFlash drafter (which replaces it); XEN_DRAFTER is qwen35's
     const bool df = !v("XEN_DRAFTER_MODEL").empty();
     if ((s.key == "XEN_DRAFT_VOCAB" || s.key == "XEN_ADAPTIVE_DEPTH" || s.key == "XEN_LOOKUP") && v("XEN_MTP").empty() && !df) return "needs a drafter (XEN_MTP or XEN_DRAFTER_MODEL)";

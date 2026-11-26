@@ -885,7 +885,10 @@ std::vector<std::vector<int32_t>> DFlash::pass(const std::vector<Seg> &segs, int
       // both cards drained (below), so an evicted graph is never in flight.
       static const size_t cap = [] {
         const char *e = std::getenv("XEN_DRAFT_GRAPHS");
-        return e ? static_cast<size_t>(std::max(4, std::atoi(e))) : size_t{96};
+        if (e) return static_cast<size_t>(std::max(4, std::atoi(e)));
+        // qwen35 decode step graphs (XEN_STEP_GRAPHS=1) share the same ~1 GiB per card: 72 pass graphs + 32 step graphs
+        const char *sg = std::getenv("XEN_STEP_GRAPHS");
+        return sg && sg[0] == '1' ? size_t{72} : size_t{96};
       }();
       while (graphs_.size() >= cap) {
         auto lru = graphs_.begin();
