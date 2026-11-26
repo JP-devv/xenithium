@@ -321,6 +321,7 @@ Chat templates: by default the checkpoint's own `chat_template.jinja` is rendere
 | --- | --- |
 | [docs/server-env.md](docs/server-env.md) | Every server setting: environment variable, flag, default, the measurements behind it |
 | [docs/launcher.md](docs/launcher.md) | The launcher TUI: screens, keys, files |
+| [docs/recommended-settings.md](docs/recommended-settings.md) | Swift-1.5 27B: the fastest measured settings per use case, and the pull request behind each |
 | [docs/bench-guide.md](docs/bench-guide.md) | How to benchmark a server with `xenithium-bench` |
 | [docs/bench.md](docs/bench.md) | The benchmark reference: options, scenarios, how each number is computed |
 | [docs/performance-hard-mode.md](docs/performance-hard-mode.md) | The hard-mode performance table |

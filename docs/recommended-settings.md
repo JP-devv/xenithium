@@ -1,15 +1,15 @@
 # Recommended settings: Qwen3.8-27B Swift-1.5 (GPTQ int4 baked)
 
-These are the settings we found fastest for each kind of use, with the command that starts them. Each one comes from measurements on two Arc Pro B60s (24 GB each, TP2, EPYC 7532 host). The settings we tried and rejected are listed at the end, so nobody has to test them again.
+These are the settings we found fastest for each kind of use, with the command that starts them. A contributor measured them on two Arc Pro B60s (24 GB each, TP2, EPYC 7532 host); "our build" below is their fork. The settings we tried and rejected are listed at the end, so nobody has to test them again.
 
-Every switch is described in [server-env](server-env.md) and [trained K8V4 QSA](trained-k8v4-qsa.md). To see which kernel each setting picks, read the kernel map (`docs/kernel-map.md`, added with #8). [Which PR adds each setting](#which-pr-adds-each-setting) lists what to merge for each switch, and how each PR was measured.
+Every switch is described in [server-env](server-env.md) and [trained K8V4 QSA](trained-k8v4-qsa.md). To see which kernel each setting picks, read the [kernel map](kernel-map.md). [Which PR adds each setting](#which-pr-adds-each-setting) names the pull request behind each switch and how it was measured.
 
 ## Pick a preset
 
 | you have | start with | what you get |
 |---|---|---|
-| the checkpoint + the trained QSA bank + the DSpine b16 drafter | `XEN_MODEL_ENV=swift15-27b-int4-baked-qsa scripts/start-server.sh` (needs PRs #3, #4, #6 and #8) | the fastest setup we know, below |
-| the checkpoint + the GPTQ DFlash 2 drafter only | `XEN_MODEL_ENV=swift15-27b-int4-baked scripts/start-server.sh` | no sparse attention; the best settings without the bank |
+| the checkpoint + the trained QSA bank + the DSpine b16 drafter | `XEN_MODEL_ENV=swift15-27b-int4-baked-qsa scripts/start-server.sh` | the fastest setup we know, below |
+| the checkpoint + the GPTQ DFlash 2 drafter only | no preset ships for it yet: the settings in [Without the bank](#without-the-bank-plain-preset) | no sparse attention; the best settings without the bank |
 
 The QSA preset is only used when you name it, because it needs the bank. Started without the bank, it refuses to load, and the checkpoint lookup never picks it on its own. Anything you put in front of the command overrides the preset for that run, for example `XEN_SLOTS=4 XEN_MODEL_ENV=... scripts/start-server.sh`.
 
@@ -42,11 +42,13 @@ xenithium-server --model ~/models/swift15-27b-int4-baked --tp 2 --card 0 --slots
   --yarn-tiers off --sample-threads 8 --max-queue 0 --queue-policy fifo --idle-timeout 3600
 ```
 
+**Greedy output is not byte-repeatable with trained QSA on.** Its selection follows the speculative step's shape, which the adaptive depth picks from timing. With this preset on 2x B70, a 16K-token prompt sent six times with the prefix cache off gave 1 of 5 identical repeats (5 of 5 with the bank unset, 5 of 5 with `XEN_ADAPTIVE_DEPTH=0`). Leave the bank unset where identical replies matter.
+
 ### What it measures, and on which build
 
-The newest numbers come from our fork build `v0.2.0-xq.21`. That build has kernel work that is **not in any PR yet** (see [Fork-only changes](#fork-only-changes-not-in-a-pr-yet)). With upstream plus #3-#9 and this command, expect the `v0.2.0-xq.11` column.
+The newest numbers come from our fork build `v0.2.0-xq.21`. That build has kernel work that is **not in any PR yet** (see [Fork-only changes](#fork-only-changes-not-in-a-pr-yet)). With this project's master (which carries #3-#9) and this command, expect the `v0.2.0-xq.11` column.
 
-| measured | xq.21 (current) | xq.11 (upstream + #3-#9) |
+| measured | xq.21 (current) | xq.11 (master with #3-#9) |
 |---|---|---|
 | single-stream decode, bench easy mix | **208 tok/s**, 4.95 tokens per step | about 140 tok/s |
 | decode step time, 8-row / 16-row step | 24.5 / 28.4 ms | - |
@@ -59,7 +61,7 @@ The newest numbers come from our fork build `v0.2.0-xq.21`. That build has kerne
 
 ## Which PR adds each setting
 
-A setting only works once its PR is in your build. Settings not listed here are already on master.
+Every setting below is on master; the table names the pull request that added it and how that request was measured.
 
 | PR | adds | how it was measured |
 |---|---|---|
@@ -67,7 +69,7 @@ A setting only works once its PR is in your build. Settings not listed here are 
 | #4 | draft trees on `--kv int8-v4` (`--drafter-tree 7` with int8-v4 KV) | 2x B60, one stream, DSpine b16, 8,007 input tokens, 400 greedy outputs, 16,384-token pool. Only `--drafter-tree` changed (0 vs 7): identical text |
 | #5 | `XEN_DRAFT_GRAPHS` (cap on the drafter's pass graphs, default 96) | 2x B60, DSpine b16, 6 slots, two `xenithium-bench --suite agents` runs on one boot: VRAM flat once the cap is reached, 0 failed. A reviewer's 2x B70 soak at 16 slots: 0 server errors |
 | #6 | DSpine b16 against this checkpoint's GPTQ int4 `lm_head` (`--drafter-model` = DSpine with this model) | 2x B60, TP2, 6 slots, the command above |
-| #7 | `--mtp-depth` up to 6 (MTP layer only, no block drafter) | a reviewer's 2x B70: depth 6 gives 3.04 vs 2.65 tokens per step, 22.0 vs 18.1 ms per step, agent mix 137 vs 146 tok/s. The default stays 3 |
+| #7 | `--mtp-depth` up to 6 (MTP layer only, no block drafter; on master it sets a lone sequence's depth) | a reviewer's 2x B70: depth 6 gives 3.04 vs 2.65 tokens per step, 22.0 vs 18.1 ms per step, agent mix 137 vs 146 tok/s. The default stays 3 |
 | #8 | `XEN_QSA_GATHER`, `XEN_QSA_XMX_SCORE`, `XEN_TRAINED_QSA_TREE`, `XEN_QSA_RESIDENT_SNAPSHOTS`, `XEN_QSA_RESIDENT_FORK_COPY`, `XEN_PREFILL_SHARE`, `XEN_TRAINED_QSA_PREFILL_MERGED`, `XEN_TRAINED_QSA_PREFILL_4SLOT_SINGLE_SEG`, `XEN_PF_SUBTILE_SKIP`, `XEN_REQ_LOG`, `--prefill-select` on int8-v4 KV, and the QSA preset | 2x B60, TP2, DSpine b16, K8V4 KV, 6 slots, the xq.11 column above |
 | #9 | `XEN_STEP_GRAPHS`, `XEN_STEP_GRAPHS_MAX`, `XEN_GRAPH_ROOM_MIB` (decode step graphs, opt-in) | 2x B60, TP2, 6 slots, the server held to a quarter of one core: 98 / 177 / 251 → 165 / 283 / 378 tok/s at 1 / 2 / 4 streams; the same as without on a fast host |
 | #12 | the DSpine b16 checkpoint's current architecture name (`DSpineDraftModel`) | host tests |
@@ -87,7 +89,7 @@ All of these start from the fastest setup; each row lists only what changes. The
 
 | use | change | why |
 |---|---|---|
-| **One person chatting or coding** | nothing | Trees run at up to 4 streams below 64k context, and decode stays flat out to 109k. |
+| **One person chatting or coding** | nothing | Draft trees run through 2 streams (`--drafter-tree-seqs 2`), and decode stays flat out to 109k. |
 | **Several coding agents or long chats at once** | nothing; keep `--slots 6` and the prefix cache | The prefix cache is per slot. With fewer slots, a fifth conversation evicts a parked 90k chat, and that chat's next turn re-reads its whole prompt (67-105 s). 6 slots give 104 / 149 / 178 / 213 / 226 / 240 tok/s total at 1-6 users with 80k context each. 7 or more slots need a smaller pool. |
 | **Users waiting on replies while someone pastes a huge document** | `XEN_PREFILL_SHARE=0.33` (already in the command) | While others decode, prompt reading is limited to about a third of the loop's time. A decoder next to a 112k prompt went from 47-51 to 75 tok/s, and the big prompt's time to first token didn't change. |
 | **Long documents / RAG (100k-220k prompts)** | nothing; keep `--prefill-select 256` | Reading a 239k prompt goes from 1,521 to 2,424 tok/s, with 8/8 needles at 32k and 121k. Teacher-forced NLL is within noise of exact attention. |
@@ -97,7 +99,7 @@ All of these start from the fastest setup; each row lists only what changes. The
 
 ## Without the bank (plain preset)
 
-The plain preset `swift15-27b-int4-baked` uses:
+No plain preset ships yet. The settings we use without the bank:
 - the GPTQ DFlash 2 drafter with 8-row segments, and draft trees through 2 streams;
 - prompt lookup;
 - int8 KV;

@@ -59,6 +59,8 @@ Six slots are the most that fit this pool next to the trained summaries and the 
 
 ## Qualification and remaining gaps
 
+Greedy output is not byte-repeatable with trained QSA on: the route (sparse or dense per row, the tiled or untiled scorer, XMX or FMA scores) follows the speculative step's shape, and the adaptive depth chooses the shapes from timing. With the preset on 2x B70, a 16K-token prompt sent six times with the prefix cache off gave 1 of 5 identical repeats; with the bank unset, or with `XEN_ADAPTIVE_DEPTH=0`, 5 of 5.
+
 For the change map, host regression coverage and adjacent-path test matrix, see [trained QSA validation](trained-qsa-validation.md). Repository benchmark reports and methodology remain under [benchmark](benchmark/README.md).
 
 The numbers below come from a matched downstream qualification build and its dense control, not from an end-to-end run of the public topic. Both arms used two Intel Arc Pro B60s, DSpine, a five-slot scheduler with stock admission, an 884,416-token pool (177,216 cap per request), and prefix caching with a 2 GiB budget. The candidate enabled tiled scoring and FP16 completed summaries. This patch keeps the qualified scoring, page walk and cache-safety code but does not include the downstream drafter changes or benchmark harness.
