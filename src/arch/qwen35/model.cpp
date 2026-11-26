@@ -1646,7 +1646,7 @@ bool Model::graph_step() const {
   static const bool on = [] {
     const char *e = std::getenv("XEN_STEP_GRAPHS");
     if (!e || e[0] != '1') return false;
-    for (const char *v : {"XEN_QSA_SCORE_CHECK", "XEN_QSA_PACK_CHECK", "XEN_QSA_STEPPROF"})
+    for (const char *v : {"XEN_QSA_SCORE_CHECK", "XEN_QSA_PACK_CHECK"})
       if (const char *x = std::getenv(v); x && *x) {
         std::fprintf(stderr, "qwen35: XEN_STEP_GRAPHS ignored: %s is set (the step runs eagerly)\n", v);
         return false;
@@ -1664,11 +1664,11 @@ void Model::run_graph(int rows, int seg_rows, int pb) {
   if (!graphs_) graphs_ = std::make_unique<Graphs>();
   const size_t C = cards_.size();
   const int mlp_p = mlp_->parity(), moe_p = moe_ ? moe_->parity() : 0;
-  // the bound bucket: 4096, 6144, 8192, 12288, 16384, ... (each <= 1.5x the last), at most cap
+  // flint keys and keeps its graphs as before (rows, segment rows, parities; no cap); the rest key every host value
+  // that steers a launch, with the attention bound as its kernel-variant class
+  const bool fl = cfg_.flint;
   int64_t bound = static_cast<int64_t>(cap_);
-  static const bool exact_bound = std::getenv("XEN_STEP_GRAPH_EXACT") != nullptr;  // diag: no bucket (every bound records)
-  if (pb >= 0 && !cfg_.flint && exact_bound) bound = pb;
-  else if (pb >= 0 && !cfg_.flint) {
+  if (pb >= 0 && !fl) {
     // the attention kernel's variant thresholds (gqa.cpp gqa_attn_group / pf_seg): record at the class's top value
     constexpr int64_t kCls[] = {32768, 65536, 131072, 196608};
     bound = static_cast<int64_t>(cap_);
@@ -1678,12 +1678,15 @@ void Model::run_graph(int rows, int seg_rows, int pb) {
   // the GDN replay bound as the core's template classes (a larger bound is exact): 1, 4, 8, 16, at most rows_max_
   const int acc_true = gdn_accept_max_;
   const int acc = cfg_.flint ? acc_true : std::min(rows_max_, acc_true <= 1 ? 1 : acc_true <= 4 ? 4 : acc_true <= 8 ? 8 : 16 > acc_true ? 16 : acc_true);
-  const std::array<int64_t, 13> key{rows, seg_rows, mix_parity_, mlp_p, moe_p, tree_attn_, tree_gdn_, qsa_step_sparse_,
-                                    static_cast<int64_t>(qsa_stage_rows_), static_cast<int64_t>(qsa_dense_rows_), acc, gdn_commit_, bound};
+  const std::array<int64_t, 13> key =
+      fl ? std::array<int64_t, 13>{rows, seg_rows, mix_parity_, mlp_p, moe_p}
+         : std::array<int64_t, 13>{rows, seg_rows, mix_parity_, mlp_p, moe_p, tree_attn_, tree_gdn_, qsa_step_sparse_,
+                                   static_cast<int64_t>(qsa_stage_rows_), static_cast<int64_t>(qsa_dense_rows_), acc, gdn_commit_, bound};
   auto it = graphs_->map.find(key);
   if (it == graphs_->map.end()) {
-    static const size_t cap = [] { const char *e = std::getenv("XEN_STEP_GRAPHS_MAX"); return e ? size_t(std::max(4, std::atoi(e))) : size_t(32); }();
-    static const double room = [] { const char *e = std::getenv("XEN_GRAPH_ROOM_MIB"); return e ? std::atof(e) : 128.0; }();
+    static const size_t max = [] { const char *e = std::getenv("XEN_STEP_GRAPHS_MAX"); return e && *e ? size_t(std::max(4, std::atoi(e))) : size_t(32); }();
+    const size_t cap = fl ? std::numeric_limits<size_t>::max() : max;
+    static const double room = [] { const char *e = std::getenv("XEN_GRAPH_ROOM_MIB"); return e && *e ? std::atof(e) : 128.0; }();
     auto evict_lru = [&](size_t n) {
       for (size_t c = 0; c < C; ++c) fab_.compute(c).wait();  // no evicted graph in flight
       for (size_t i = 0; i < n && !graphs_->used.empty(); ++i) {
@@ -1695,7 +1698,7 @@ void Model::run_graph(int rows, int seg_rows, int pb) {
         ++graphs_->evicted;
       }
     };
-    if (!graphs_->map.empty() && opt_.loader) {
+    if (!fl && !graphs_->map.empty() && opt_.loader) {
       double lo = 1e30;
       for (size_t c = 0; c < C; ++c) {
         const auto v = l0::vram_state(opt_.loader->info(fab_.rank_index(c)));
@@ -1760,10 +1763,6 @@ void Model::run_graph(int rows, int seg_rows, int pb) {
     }
     it = graphs_->map.emplace(key, std::move(e)).first;
     graphs_->record_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-    static const bool glog = std::getenv("XEN_DIAG_GRAPHS") != nullptr;
-    if (glog) std::fprintf(stderr, "DIAG_GRAPH step n=%zu rows=%d seg=%d tree=%d/%d sparse=%d stage=%x dense=%x acc=%d commit=%d bound=%lld record_ms=%.1f\n", graphs_->map.size(), rows, seg_rows,
-                           int(tree_attn_), int(tree_gdn_), int(qsa_step_sparse_), unsigned(qsa_stage_rows_), unsigned(qsa_dense_rows_), acc, int(gdn_commit_),
-                           static_cast<long long>(bound), std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
   }
   graphs_->used[key] = ++graphs_->tick;
   // both cards' graphs in flight together: the mailbox waits inside them pair up across the cards
@@ -1786,21 +1785,6 @@ void Model::run_layers(int rows, int seg_rows, int pb) {
   submit_layers(rows, seg_rows, pb, pr ? &ev : nullptr);
   submit_ms_ = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_submit_).count();
   head_->wait();
-  {
-    static const int every = [] { const char *e = std::getenv("XEN_DIAG_SUBMIT"); return e ? std::atoi(e) : 0; }();
-    if (every > 0) {
-      static double sub[4] = {}, wall[4] = {};
-      static int n[4] = {};
-      const int b = rows <= 8 ? 0 : rows <= 16 ? 1 : rows <= 32 ? 2 : 3;
-      sub[b] += submit_ms_;
-      wall[b] += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_submit_).count();
-      if (++n[b] == every) {
-        static const char *nm[4] = {"<=8", "<=16", "<=32", ">32"};
-        std::fprintf(stderr, "DIAG_SUBMIT rows%s steps=%d submit_ms=%.2f wall_ms=%.2f\n", nm[b], n[b], sub[b] / n[b], wall[b] / n[b]);
-        sub[b] = wall[b] = 0, n[b] = 0;
-      }
-    }
-  }
   if (!pr) return;
   for (const auto &e : ev.norms) prof_.norms += ev_us(e);
   for (const auto &e : ev.gev) {
