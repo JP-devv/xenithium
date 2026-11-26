@@ -1152,7 +1152,7 @@ const char *brief_of(std::string_view key) {
        "\n"
        "Gives (1): + prompt reading speed.\n"
        "Takes (1): - a small table in VRAM.\n"
-       "Needs: XEN_TRAINED_QSA_PREFILL_XMX 1 with the native 40-row groups; refused next to the prompt replay switches (XEN_PF_TOPK_*).\n"
+       "Needs: XEN_TRAINED_QSA_PREFILL_XMX 1 with the native 40-row groups.\n"
        "Output: the same."},
       {"XEN_TRAINED_QSA_SHARE_SCRATCH",
        "The selector's work buffers (projections, scores, candidates) each have their own VRAM by default. This lays them over one another, sized for the largest stage at a time.\n"
@@ -1184,47 +1184,6 @@ const char *brief_of(std::string_view key) {
        "Trained page selection diagnostic: one log line per stream per verifier step with the route its attention took and why: `covered` or `covered-tree` (selected), `short` (under the threshold), `incomplete` (history missing, e.g. resumed from the cache), `tree` (tree steps without XEN_TRAINED_QSA_TREE), `mixed`.\n"
        "\n"
        "Takes: - decode speed (very verbose). Never use it to measure speed."},
-      {"XEN_DSPINE_ONEUSER_AUDIT",
-       "Block drafter diagnostic: per verifier step, one `ONE128_VERIFY` line per stream (position, rows, tree or chain, selected or full attention and why), and one `ONE128_DRAFT` line per drafting pass naming the drafter that ran.\n"
-       "\n"
-       "Takes: - decode speed (very verbose). Never use it to measure speed."},
-      {"XEN_DSPINE_PREFILL_DISPATCH_LOG",
-       "Diagnostic: logs which attention kernels a single prompt's call uses at three fixed positions (32,768, 190,464 and 260,096 tokens), to check the long-prompt dispatch."},
-      {"XEN_BENCH_VERIFY_LOG",
-       "Benchmark diagnostic: one `BENCH_VERIFY` line per stream per verifier step and per prompt call, with host start and end timestamps, rows and committed tokens, for drawing timelines offline. Host clock only, no waits on the cards.\n"
-       "\n"
-       "Takes: - a little decode speed (log lines every step)."},
-      {"XEN_BENCH_RUBY_ROUNDS",
-       "Benchmark diagnostic for speculative decoding rounds.\n"
-       "\n"
-       "`1`  one `RUBY_ROUND` line per round with the host time of each stage (prepare, verify, picks, acceptance, drafting) and one `RUBY_SCALE` line with proposed and accepted tokens and their hashes\n"
-       "`2`  also times the cards' attention on six sampled 7-row selected steps past XEN_BENCH_CONTEXT_ROWS + 16 (two cards)\n"
-       "\n"
-       "Takes: - decode speed. Never use it to measure speed."},
-      {"XEN_BENCH_CONTEXT_ROWS",
-       "Benchmark diagnostic: the length of the benchmark's frozen prompt. The round timing samples (XEN_BENCH_RUBY_ROUNDS 2) start 16 tokens past it, and the prompt replay (XEN_PF_TOPK_PROMPT_IDS) reads that many token ids (8,200, 131,072 or 261,744).\n"
-       "\n"
-       "`empty`  261,744 tokens for the replay, samples from token 16"},
-      {"XEN_BENCH_FAIR_PREFILL",
-       "Benchmark scheduling: prompts of equal length are read in turns (the least-read first) instead of shortest-remaining first, so a burst of identical prompts reaches generation together. Other prompts keep the normal order.\n"
-       "\n"
-       "Takes: - the first of the burst answers later."},
-      {"XEN_BENCH_HOLD_DECODE_5X176073",
-       "Benchmark scheduling: requests with a 176,073-token prompt do not start generating until five of them are ready; then all five start together (`BENCH_HOLD_DECODE_RELEASE` in the log). One cohort per server start; other requests are unaffected. Only for a synchronized five-user long-context run."},
-      {"XEN_PF_TOPK_CHUNK",
-       "Selected prompt reading diagnostic: fixes the selector's candidate chunk at 8,192 blocks, instead of the size it derives from the context, to compare the picks.\n"
-       "\n"
-       "`8192`  8,192-block chunks (the one value accepted)\n"
-       "\n"
-       "Needs: XEN_TRAINED_QSA_PREFILL_XMX 1."},
-      {"XEN_PF_TOPK_PROMPT_IDS",
-       "Prompt replay diagnostic: a file of the frozen prompt's token ids (little-endian int32, XEN_BENCH_CONTEXT_ROWS of them). A request with exactly this prompt is tagged (`PF_TOPK_TAG` in the log) for the replay; the file must match XEN_PF_TOPK_PROMPT_SHA256."},
-      {"XEN_PF_TOPK_PROMPT_SHA256",
-       "Prompt replay diagnostic: the SHA-256 (64 hex digits) of the prompt ids in XEN_PF_TOPK_PROMPT_IDS; the server refuses a file that does not match its benchmark prompts."},
-      {"XEN_PF_TOPK_REPLAY_DIR",
-       "Selected prompt reading diagnostic: captures the tagged prompt's chunk at position 194,560 (2,048 rows), replays its scoring, picks and attention against a reference and writes the comparison to this folder; the server stops with an error when they disagree.\n"
-       "\n"
-       "Needs: XEN_TRAINED_QSA_PREFILL_XMX 1, one slot, 2,048-token prompt chunks."},
       {"XEN_QSA_PACK_CHECK",
        "Trained page selection diagnostic: for the first N steps on card 0, reads back the packed attention entries and checks them against a host reference; the log reports mismatches.\n"
        "\n"
@@ -1238,20 +1197,6 @@ const char *brief_of(std::string_view key) {
        "\n"
        "Needs: XEN_QSA_XMX_SCORE 1 and XEN_TRAINED_QSA_POOL_FP16 1.\n"
        "Takes: - decode speed during the checked steps."},
-      {"XEN_TRAINED_QSA_FP16_AUDIT_DIR",
-       "Trained page selection diagnostic: keeps an FP32 copy of one bank layer's summaries (model layer 27) next to the FP16 ones, replays the FP32 picks on six selected steps and writes how they differ to this folder.\n"
-       "\n"
-       "Needs: XEN_TRAINED_QSA_POOL_FP16 1, tiled scoring and five slots; the server refuses other setups.\n"
-       "Takes: - VRAM for the FP32 copy, - decode speed."},
-      {"XEN_TRAINED_QSA_TREE_AUDIT_DIR",
-       "Trained page selection diagnostic: on tree steps of model layer 27, compares the trained tree selection with its reference and writes the result to this folder.\n"
-       "\n"
-       "Needs: one slot, FP16 summaries with tiled scoring and the full bank, no other audit; the server refuses other setups.\n"
-       "Takes: - VRAM, - decode speed."},
-      {"XEN_TRAINED_QSA_TRACE_MARKER",
-       "Diagnostic: while the named file exists, logs for every stream and step the KV pages each row reads. Only without a trained bank (with XEN_TRAINED_QSA_DELTA_DIR set it logs nothing). Create and delete the file to trace a window of a run.\n"
-       "\n"
-       "Takes: - decode speed while tracing."},
       {"XEN_PF_DENSE_ONEDNN_LOG",
        "qwen38 diagnostic for the oneDNN prompt GEMMs of the dense trunk (XEN_PREFILL_GEMM onednn): one line per new matrix shape saying whether oneDNN or the engine's own kernel runs it (oneDNN is kept only where it gives the engine's bits)."},
       {"XEN_PF_DENSE_ONEDNN_SLOTS",
@@ -2151,76 +2096,6 @@ std::vector<Spec> schema() {
     s.allow_empty = true;
   }
   {
-    auto &s = add("XEN_DSPINE_ONEUSER_AUDIT", "Verifier step audit", dg, Kind::Bool);
-    s.diag = true;
-    s.scope = Scope::Qwen35;
-    s.allow_empty = true;
-  }
-  {
-    auto &s = add("XEN_DSPINE_PREFILL_DISPATCH_LOG", "Prompt dispatch log", dg, Kind::Bool);
-    s.diag = true;
-    s.scope = Scope::Qwen35;
-    s.allow_empty = true;
-  }
-  {
-    auto &s = add("XEN_BENCH_VERIFY_LOG", "Verifier timeline log", dg, Kind::Bool);
-    s.diag = true;
-    s.allow_empty = true;
-  }
-  {
-    auto &s = add("XEN_BENCH_RUBY_ROUNDS", "Verifier round timing", dg, Kind::Choice);
-    s.diag = true;
-    s.scope = Scope::Qwen35;
-    s.allow_empty = true;
-    s.choices = {"", "1", "2"};
-    s.names = {{"", "off"}, {"1", "1 (host stages)"}, {"2", "2 (+ device samples)"}};
-  }
-  {
-    auto &s = add("XEN_BENCH_CONTEXT_ROWS", "Benchmark prompt length", dg, Kind::Int);
-    s.diag = true;
-    s.scope = Scope::Qwen35;
-    s.lo = 0;
-    s.allow_empty = true;
-    s.unit = "tokens";
-  }
-  {
-    auto &s = add("XEN_BENCH_FAIR_PREFILL", "Equal prompts in turns", dg, Kind::Bool);
-    s.diag = true;
-    s.allow_empty = true;
-  }
-  {
-    auto &s = add("XEN_BENCH_HOLD_DECODE_5X176073", "Hold a 5-user benchmark cohort", dg, Kind::Bool);
-    s.diag = true;
-    s.allow_empty = true;
-  }
-  {
-    auto &s = add("XEN_PF_TOPK_CHUNK", "Prompt selection chunk", dg, Kind::Choice);
-    s.diag = true;
-    s.scope = Scope::Qwen35;
-    s.allow_empty = true;
-    s.choices = {"", "8192"};
-    s.names = {{"", "the selector's own (default)"}};
-  }
-  {
-    auto &s = add("XEN_PF_TOPK_PROMPT_IDS", "Replay prompt ids file", dg, Kind::Path);
-    s.diag = true;
-    s.scope = Scope::Qwen35;
-    s.allow_empty = true;
-    s.path_file = true;
-  }
-  {
-    auto &s = add("XEN_PF_TOPK_PROMPT_SHA256", "Replay prompt hash", dg, Kind::Text);
-    s.diag = true;
-    s.scope = Scope::Qwen35;
-    s.allow_empty = true;
-  }
-  {
-    auto &s = add("XEN_PF_TOPK_REPLAY_DIR", "Prompt selection replay folder", dg, Kind::Path);
-    s.diag = true;
-    s.scope = Scope::Qwen35;
-    s.allow_empty = true;
-  }
-  {
     auto &s = add("XEN_QSA_PACK_CHECK", "Gather pack check", dg, Kind::Int);
     s.diag = true;
     s.scope = Scope::Qwen35;
@@ -2235,25 +2110,6 @@ std::vector<Spec> schema() {
     s.lo = 0;
     s.allow_empty = true;
     s.unit = "steps";
-  }
-  {
-    auto &s = add("XEN_TRAINED_QSA_FP16_AUDIT_DIR", "FP16 summaries audit folder", dg, Kind::Path);
-    s.diag = true;
-    s.scope = Scope::Qwen35;
-    s.allow_empty = true;
-  }
-  {
-    auto &s = add("XEN_TRAINED_QSA_TREE_AUDIT_DIR", "Tree selection audit folder", dg, Kind::Path);
-    s.diag = true;
-    s.scope = Scope::Qwen35;
-    s.allow_empty = true;
-  }
-  {
-    auto &s = add("XEN_TRAINED_QSA_TRACE_MARKER", "Selection trace marker file", dg, Kind::Path);
-    s.diag = true;
-    s.scope = Scope::Qwen35;
-    s.allow_empty = true;
-    s.path_file = true;
   }
   {
     auto &s = add("XEN_PF_DENSE_ONEDNN_LOG", "oneDNN dense prompt GEMM log", dg, Kind::Bool);
@@ -2597,9 +2453,7 @@ bool trained_qsa_key(std::string_view key) {
                                      "XEN_QSA_RESIDENT_SNAPSHOTS", "XEN_QSA_RESIDENT_FORK_COPY", "XEN_TRAINED_QSA_DECODE_MIN_POS",
                                      "XEN_TRAINED_QSA_PREFILL_XMX", "XEN_TRAINED_QSA_PREFILL_MIN_POS", "XEN_TRAINED_QSA_PREFILL_4SLOT_SINGLE_SEG",
                                      "XEN_TRAINED_QSA_PREFILL_MERGED", "XEN_PF_SUBTILE_SKIP", "XEN_TRAINED_QSA_SHARE_SCRATCH",
-                                     "XEN_TRAINED_QSA_STREAM_PROJECTION", "XEN_QSA_TRIAL_ROUTE_LOG", "XEN_QSA_PACK_CHECK", "XEN_QSA_SCORE_CHECK",
-                                     "XEN_TRAINED_QSA_FP16_AUDIT_DIR", "XEN_TRAINED_QSA_TREE_AUDIT_DIR", "XEN_TRAINED_QSA_TRACE_MARKER",
-                                     "XEN_PF_TOPK_CHUNK", "XEN_PF_TOPK_PROMPT_IDS", "XEN_PF_TOPK_PROMPT_SHA256", "XEN_PF_TOPK_REPLAY_DIR"};
+                                     "XEN_TRAINED_QSA_STREAM_PROJECTION", "XEN_QSA_TRIAL_ROUTE_LOG", "XEN_QSA_PACK_CHECK", "XEN_QSA_SCORE_CHECK"};
   for (const char *k : keys)
     if (key == k) return true;
   return false;
@@ -2609,19 +2463,17 @@ bool trained_qsa_key(std::string_view key) {
 // combinations noted "refused"; the launcher shows them as unused with the setting they need.
 template <class Get>
 std::string trained_qsa_unused(const std::string &key, Get v) {
-  if (!trained_qsa_key(key) || key == "XEN_TRAINED_QSA_DELTA_DIR" || key == "XEN_TRAINED_QSA_TRACE_MARKER") return "";
+  if (!trained_qsa_key(key) || key == "XEN_TRAINED_QSA_DELTA_DIR") return "";
   if (v("XEN_TRAINED_QSA_DELTA_DIR").empty()) return "needs a trained bank (XEN_TRAINED_QSA_DELTA_DIR)";
   auto on = [&](const char *k) { return v(k) == "1"; };
   if (key == "XEN_TRAINED_QSA_TREE" && !on("XEN_TRAINED_QSA_TILED_SCORE")) return "needs tiled scoring (XEN_TRAINED_QSA_TILED_SCORE 1; refused without)";
   if (key == "XEN_QSA_XMX_SCORE" && !on("XEN_TRAINED_QSA_POOL_FP16")) return "needs FP16 summaries (XEN_TRAINED_QSA_POOL_FP16 1)";
   if (key == "XEN_QSA_SCORE_CHECK" && (!on("XEN_QSA_XMX_SCORE") || !on("XEN_TRAINED_QSA_POOL_FP16"))) return "needs the XMX scorer (XEN_QSA_XMX_SCORE 1, FP16 summaries)";
-  if (key == "XEN_TRAINED_QSA_FP16_AUDIT_DIR" && !on("XEN_TRAINED_QSA_POOL_FP16")) return "needs FP16 summaries (XEN_TRAINED_QSA_POOL_FP16 1)";
   if (key == "XEN_QSA_RESIDENT_SNAPSHOTS" && v("XEN_PREFIX_CACHE") != "1") return "needs the prefix cache (XEN_PREFIX_CACHE 1)";
   if (key == "XEN_QSA_RESIDENT_FORK_COPY" && !on("XEN_QSA_RESIDENT_SNAPSHOTS")) return "needs XEN_QSA_RESIDENT_SNAPSHOTS 1";
   if (key == "XEN_TRAINED_QSA_PREFILL_XMX" && !v("XEN_PREFILL_SELECT").empty() && v("XEN_PREFILL_SELECT") != "0")
     return "off while the long-prompt page selection is on (XEN_PREFILL_SELECT)";
-  if ((key == "XEN_TRAINED_QSA_PREFILL_MIN_POS" || key == "XEN_TRAINED_QSA_PREFILL_4SLOT_SINGLE_SEG" || key == "XEN_PF_SUBTILE_SKIP" ||
-       key == "XEN_PF_TOPK_CHUNK" || key == "XEN_PF_TOPK_REPLAY_DIR") &&
+  if ((key == "XEN_TRAINED_QSA_PREFILL_MIN_POS" || key == "XEN_TRAINED_QSA_PREFILL_4SLOT_SINGLE_SEG" || key == "XEN_PF_SUBTILE_SKIP") &&
       !on("XEN_TRAINED_QSA_PREFILL_XMX"))
     return "needs the selected prompt reading (XEN_TRAINED_QSA_PREFILL_XMX 1; refused without)";
   if (key == "XEN_TRAINED_QSA_PREFILL_4SLOT_SINGLE_SEG" && v("XEN_SLOTS") != "4") return "needs four slots (XEN_SLOTS 4; refused otherwise)";

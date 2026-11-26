@@ -324,7 +324,7 @@ void test_catalog(const std::string &root) {
     const Spec *bank = cat.find("XEN_TRAINED_QSA_DELTA_DIR"), *tile = cat.find("XEN_TRAINED_QSA_TILED_SCORE");
     const Spec *tree = cat.find("XEN_TRAINED_QSA_TREE"), *xmx = cat.find("XEN_QSA_XMX_SCORE"), *snap = cat.find("XEN_QSA_RESIDENT_SNAPSHOTS");
     const Spec *fork = cat.find("XEN_QSA_RESIDENT_FORK_COPY"), *pfx = cat.find("XEN_TRAINED_QSA_PREFILL_XMX"), *pfmin = cat.find("XEN_TRAINED_QSA_PREFILL_MIN_POS");
-    const Spec *merged = cat.find("XEN_TRAINED_QSA_PREFILL_MERGED"), *trace = cat.find("XEN_TRAINED_QSA_TRACE_MARKER");
+    const Spec *merged = cat.find("XEN_TRAINED_QSA_PREFILL_MERGED");
     Values nob = dv, b = dv;
     nob["XEN_TRAINED_QSA_DELTA_DIR"] = "";
     b = nob, b["XEN_TRAINED_QSA_DELTA_DIR"] = "/m/bank", b["XEN_PREFIX_CACHE"] = "1", b["XEN_PREFILL_SELECT"] = "0";
@@ -335,8 +335,9 @@ void test_catalog(const std::string &root) {
     pf["XEN_TRAINED_QSA_PREFILL_XMX"] = "1";
     pfsel["XEN_PREFILL_SELECT"] = "256";
     expect(bank && unused_reason(*bank, "qwen35", nob).empty() && tile && !unused_reason(*tile, "qwen35", nob).empty() && unused_reason(*tile, "qwen35", b).empty() &&
-               trace && unused_reason(*trace, "qwen35", nob).empty() && !cat.find("XEN_TRAINED_QSA_LAYER3_DELTA_DIR"),
-           "trained page selection: the switches wait for a bank (the bank folder and the trace marker do not); no layer-3 bank setting");
+               !cat.find("XEN_TRAINED_QSA_LAYER3_DELTA_DIR") && !cat.find("XEN_TRAINED_QSA_TRACE_MARKER") && !cat.find("XEN_PF_TOPK_REPLAY_DIR") &&
+               !cat.find("XEN_BENCH_VERIFY_LOG"),
+           "trained page selection: the switches wait for a bank (the bank folder does not); no layer-3 bank, trace or replay setting");
     expect(tree && !unused_reason(*tree, "qwen35", b).empty() && unused_reason(*tree, "qwen35", tiled).empty() && xmx && !unused_reason(*xmx, "qwen35", b).empty() &&
                unused_reason(*xmx, "qwen35", fp16).empty() && fork && !unused_reason(*fork, "qwen35", b).empty() && unused_reason(*fork, "qwen35", snaps).empty() &&
                snap && unused_reason(*snap, "qwen35", b).empty(),
