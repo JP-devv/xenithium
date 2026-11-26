@@ -356,7 +356,12 @@ std::string dot_chart(const std::vector<DotRow> &rows) {
     const auto yes = static_cast<size_t>(std::ranges::count(rows[i].yes, true));
     std::string pattern;  // the samples in order, ✓ / ✗
     for (const bool y : rows[i].yes) pattern += y ? "\xE2\x9C\x93" : "\xE2\x9C\x97";
-    const Tip tip{rows[i].label, {{"yes", std::to_string(yes) + " of " + std::to_string(rows[i].yes.size())}, {"in order", pattern}}};
+    Tip tip{rows[i].label, {{"yes", std::to_string(yes) + " of " + std::to_string(rows[i].yes.size())}, {"in order", pattern}}};
+    if (!rows[i].wrong.empty()) {
+      std::string names;
+      for (const std::string &name : rows[i].wrong) names += (names.empty() ? "" : ", ") + name;
+      tip.lines.push_back({"wrong", names});
+    }
     c.begin_group("dot", tip, 0, row_top, kChartWidth, kRowHeight);
     c.text(label_w - 8, mid + kTextDrop, "t", Anchor::end, shortened(rows[i].label, kMaxLabelChars));
     for (size_t d = 0; d < rows[i].yes.size(); ++d) c.circle(label_w + pitch / 2 + static_cast<double>(d) * pitch, mid, radius, rows[i].yes[d] ? "yes" : "no");

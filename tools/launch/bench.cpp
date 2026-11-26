@@ -167,6 +167,11 @@ void read_summary(const json::Value &v, BenchRun &r) {
   if (const std::string *mix = summary->get_string("decode_mix")) r.decode_mix = *mix;
   r.tokens_per_joule = number_at(*summary, "best_tokens_per_joule");
   if (const json::Value *quality = summary->get("quality_pct"); quality && quality->is_number()) r.quality_pct = quality->num;
+  if (const json::Value *misses = summary->get_array("quality_misses"))
+    for (const json::Value &m : misses->arr) {
+      const std::string *item = m.get_string("item"), *expected = m.get_string("expected"), *got = m.get_string("got"), *why = m.get_string("why");
+      r.quality_misses.push_back({item ? *item : "?", expected ? *expected : "", why && !why->empty() ? "(" + *why + ")" : "\"" + (got ? *got : std::string()) + "\""});
+    }
   auto each = [&](std::string_view key, auto &&take) {
     if (const json::Value *arr = summary->get_array(key))
       for (const json::Value &item : arr->arr) take(item);

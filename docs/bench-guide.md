@@ -169,7 +169,7 @@ full details.
 
 | scenario | what it does |
 |---|---|
-| `quality` | 34 questions with one checkable answer. A healthy model answers nearly all of them; a drop points at the build or a setting. |
+| `quality` | 34 questions with one checkable answer. A healthy model answers nearly all of them; a drop points at the build or a setting. Each wrong answer is listed first in the section, in red: the question, the expected answer and the one given. |
 | `needle` | One fact hidden in a long document. Found or not. |
 | `repeat` | The same request three times. Checks the replies are identical. |
 | `structured` | Replies constrained to a JSON schema. Checks every reply is valid. |

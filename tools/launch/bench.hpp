@@ -33,6 +33,10 @@ struct BenchRun {
   std::vector<std::pair<int, double>> concurrency;  // (level, aggregate_tps)
   double tokens_per_joule = 0;  // at the most efficient stream count; 0 = the run did not sample power
   double quality_pct = -1;  // share of the quality questions answered correctly; -1 = not asked
+  struct Miss {
+    std::string item, expected, got;  // got: the answer given, or why there was none in parentheses
+  };
+  std::vector<Miss> quality_misses;  // summary.quality_misses: its wrong answers
   std::vector<std::pair<std::string, std::string>> notes;  // env.notes (engine, binary...)
 };
 

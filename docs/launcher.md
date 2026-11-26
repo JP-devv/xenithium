@@ -114,8 +114,9 @@ Four tabs, `1`-`4` or `Tab`; the Chat tab is hidden for now, so the header shows
   rate (`pp@depth`), the decode rate at the deepest context (`dec@depth`) and the widest concurrency total
   (`conc@streams`), where the run measured them.
 - `Enter` opens a run's report: model, endpoint, host, the weighted decode with its per-category breakdown, the
-  prefill, decode-at-depth and concurrency tables, tokens per joule and the quality score where measured, then the
-  run's notes. Every scenario's charts are in the run's `report.html` (one self-contained file; its path is shown),
+  prefill, decode-at-depth and concurrency tables, tokens per joule and the quality score where measured (each wrong answer on a red line
+  of its own: the question's id, the expected answer and the one given), then the run's notes. In the log a
+  finished scenario's wrong answers are red lines marked `✗`. Every scenario's charts are in the run's `report.html` (one self-contained file; its path is shown),
   every table in `report.txt` (`xenithium-bench report <run>`; `xenithium-bench compare A B` sets two runs side by
   side). `Esc` goes back. A run started from the launcher samples the cards' power (the server is on this machine).
 - `r` runs `xenithium-bench` ([bench.md](bench.md)) against the running server (the served model's name from

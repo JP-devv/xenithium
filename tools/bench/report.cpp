@@ -199,6 +199,23 @@ json::Value run_power_json(const RunPower &power) {
   return obj;
 }
 
+json::Value miss_json(const Miss &m) {
+  json::Value obj = json::Value::object();
+  obj.set("item", json::Value::string(m.item));
+  obj.set("group", json::Value::string(m.group));
+  obj.set("asked", json::Value::string(m.asked));
+  obj.set("expected", json::Value::string(m.expected));
+  obj.set("got", json::Value::string(m.got));
+  if (!m.why.empty()) obj.set("why", json::Value::string(m.why));
+  return obj;
+}
+
+json::Value misses_json(const std::vector<Miss> &misses) {
+  json::Value arr = json::Value::array();
+  for (const Miss &m : misses) arr.push(miss_json(m));
+  return arr;
+}
+
 json::Value scenario_json(const ScenarioResult &s) {
   json::Value obj = json::Value::object();
   obj.set("id", json::Value::string(s.id));
@@ -228,6 +245,7 @@ json::Value scenario_json(const ScenarioResult &s) {
     rows.push(std::move(r));
   }
   obj.set("rows", std::move(rows));
+  if (!s.misses.empty()) obj.set("misses", misses_json(s.misses));
   return obj;
 }
 
@@ -266,6 +284,7 @@ json::Value headline_json(const Headline &h) {
   obj.set("peak_streams", json::Value::string(h.peak_streams));
   obj.set("best_tokens_per_joule", json::Value::real(h.best_tokens_per_joule));
   if (h.quality_pct >= 0) obj.set("quality_pct", json::Value::real(h.quality_pct));
+  if (!h.quality_misses.empty()) obj.set("quality_misses", misses_json(h.quality_misses));
   return obj;
 }
 
@@ -327,6 +346,24 @@ RunPower run_power_from(const json::Value &obj) {
   return power;
 }
 
+// Runs from before the misses kept a quality miss as a note: `id: expected "X", got "Y"` (Y "(no ANSWER line...)"
+// when there was none). Those notes become misses (without the question or the category, which they did not keep).
+void misses_from_notes(Row &row, std::vector<Miss> &misses) {
+  constexpr std::string_view kExpected = ": expected \"", kGot = "\", got \"";
+  std::erase_if(row.notes, [&](const std::string &note) {
+    const size_t e = note.find(kExpected), g = note.rfind(kGot);
+    if (e == std::string::npos || g == std::string::npos || g < e || note.size() < 2 || note.back() != '"') return false;
+    Miss m;
+    m.item = note.substr(0, e);
+    m.expected = note.substr(e + kExpected.size(), g - e - kExpected.size());
+    std::string got = note.substr(g + kGot.size(), note.size() - g - kGot.size() - 1);
+    if (got.size() >= 2 && got.front() == '(' && got.back() == ')') m.why = got.substr(1, got.size() - 2);
+    else m.got = std::move(got);
+    misses.push_back(std::move(m));
+    return true;
+  });
+}
+
 ScenarioResult scenario_from(const json::Value &obj) {
   ScenarioResult s;
   s.id = text_at(obj, "id"), s.title = text_at(obj, "title"), s.about = text_at(obj, "about"), s.first_error = text_at(obj, "first_error");
@@ -352,6 +389,11 @@ ScenarioResult scenario_from(const json::Value &obj) {
         for (const json::Value &n : notes->arr) row.notes.push_back(n.str);
       s.rows.push_back(std::move(row));
     }
+  if (const json::Value *misses = obj.get_array("misses"))
+    for (const json::Value &m : misses->arr)
+      s.misses.push_back({text_at(m, "item"), text_at(m, "group"), text_at(m, "asked"), text_at(m, "expected"), text_at(m, "got"), text_at(m, "why")});
+  else if (s.id == "quality")
+    for (Row &row : s.rows) misses_from_notes(row, s.misses);
   return s;
 }
 
@@ -415,10 +457,31 @@ Headline headline(const Run &run) {
       if (total > h.peak_total_tps) h.peak_total_tps = total, h.peak_streams = *streams;
       h.best_tokens_per_joule = std::max(h.best_tokens_per_joule, median_of(row, metric::kEfficiency));
     }
-  if (const ScenarioResult *quality = scenario_named(run, "quality"))
+  if (const ScenarioResult *quality = scenario_named(run, "quality")) {
     for (const Row &row : quality->rows)
       if (const Metric *score = metric_named(row, metric::kQualityScore); score && !score->samples.empty()) h.quality_pct = score->samples.front();
+    h.quality_misses = quality->misses;
+  }
   return h;
+}
+
+std::string misses_heading(const ScenarioResult &scenario) {
+  size_t asked = 0;
+  for (const Row &row : scenario.rows)
+    for (const Metric &m : row.metrics)
+      if (m.unit == kFlagUnit) asked += m.samples.size();
+  const size_t n = scenario.misses.size();
+  return std::to_string(n) + (n == 1 ? " wrong answer" : " wrong answers") + (asked >= n && asked > 0 ? " of " + std::to_string(asked) + " asked" : std::string());
+}
+
+std::string given_text(const Miss &miss) { return miss.why.empty() ? "\"" + miss.got + "\"" : "(" + miss.why + ")"; }
+
+std::vector<std::string> unique_notes(const ScenarioResult &scenario) {
+  std::vector<std::string> notes;
+  for (const Row &row : scenario.rows)
+    for (const std::string &note : row.notes)
+      if (std::ranges::find(notes, note) == notes.end()) notes.push_back(note);
+  return notes;
 }
 
 std::string to_json(const Run &run) {
@@ -567,8 +630,13 @@ std::string render_scenario(const ScenarioResult &scenario) {
     cells.insert(cells.end(), view.rows.begin(), view.rows.end());
     out += table(cells);
   }
-  for (const Row &row : scenario.rows)
-    for (const std::string &note : row.notes) out += std::string(kIndent) + "note: " + note + "\n";
+  if (!scenario.misses.empty()) {
+    // a line each, marked, before the notes: a wrong answer is a result, not a remark
+    out += std::string(kIndent) + "\xE2\x9C\x97 " + misses_heading(scenario) + ":\n";
+    for (const Miss &m : scenario.misses)
+      out += std::string(kIndent) + "  \xE2\x9C\x97 " + m.item + (m.group.empty() ? "" : " (" + m.group + ")") + ": expected \"" + m.expected + "\", got " + given_text(m) + "\n";
+  }
+  for (const std::string &note : unique_notes(scenario)) out += std::string(kIndent) + "note: " + note + "\n";
   if (scenario.power) out += std::string(kIndent) + power_line(scenario) + "\n";
   if (scenario.errors) out += std::string(kIndent) + "first error: " + scenario.first_error + "\n";
   return out;

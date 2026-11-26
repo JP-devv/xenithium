@@ -770,9 +770,49 @@ void test_end_to_end() {
             vision.rows[0].metrics[0].samples == std::vector<double>({0, 0}) && !vision.rows[0].notes.empty(),
         "run: vision sends a PNG per request and grades the answer (%d picture requests)", fake.image_chats());
   CHECK(quality.errors == 0 && quality.requests == 34 && quality.rows.size() == 7 && quality.rows[5].labels[0].second == "context" && quality.rows[6].labels[0].second == "all" &&
-            quality.rows[6].metrics[0].name == "score" && quality.rows[6].metrics[0].samples == std::vector<double>({0}) && quality.rows[6].notes.size() == 6,
-        "run: quality asks its 30 questions and 4 on a document, per category, and names wrong answers (%d requests, %zu rows)", quality.requests, quality.rows.size());
-  CHECK(b::headline(beyond).quality_pct == 0 && b::headline(run).quality_pct < 0, "headline: the quality score, and none where it was not asked");
+            quality.rows[6].metrics[0].name == "score" && quality.rows[6].metrics[0].samples == std::vector<double>({0}) && quality.rows[6].notes.empty() && quality.misses.size() == 34,
+        "run: quality asks its 30 questions and 4 on a document, per category, and keeps every wrong answer (%d requests, %zu rows, %zu misses)", quality.requests, quality.rows.size(),
+        quality.misses.size());
+  {
+    const b::Miss &first = quality.misses.front(), &last = quality.misses.back();
+    CHECK(first.item == b::quality_items()[0].id && first.group == b::quality_items()[0].category && first.asked == b::quality_items()[0].question &&
+              first.expected == b::quality_items()[0].answer && last.group == "context" && last.asked.size() < 200 && (first.why.empty() != first.got.empty()),
+          "run: a miss names its question, category and the question alone (the long-context one without its document: %zu characters)", last.asked.size());
+  }
+  CHECK(b::headline(beyond).quality_pct == 0 && b::headline(run).quality_pct < 0 && b::headline(beyond).quality_misses.size() == 34,
+        "headline: the quality score and its misses, and none where it was not asked");
+  {  // misses: kept by the run file, printed marked, shown first in their section and linked from the checks strip
+    std::string err;
+    const auto back = b::run_from_json(b::to_json(beyond), err);
+    const auto &q = back ? back->scenarios[2] : quality;
+    CHECK(back && q.misses.size() == 34 && q.misses[0].item == quality.misses[0].item && q.misses[0].asked == quality.misses[0].asked && q.misses[0].why == quality.misses[0].why,
+          "misses: results.json keeps them (%s)", err.c_str());
+    const std::string text = b::render_scenario(quality);
+    CHECK(text.find("\xE2\x9C\x97 34 wrong answers of 34 asked:") != std::string::npos && text.find("\xE2\x9C\x97 " + quality.misses[0].item + " (") != std::string::npos &&
+              text.find("note: " + quality.misses[0].item) == std::string::npos,
+          "misses: the text report marks each one, not as a note");
+    const std::string html = b::render_html(beyond);
+    const size_t section = html.find("<section class=\"sc\" id=\"quality\""), panel = html.find("<div class=\"miss\" id=\"quality-misses\""),
+                 table = html.find("<div class=\"tbl\"", section);
+    CHECK(section != std::string::npos && panel > section && panel < table && html.find("href=\"#quality-misses\"><span>quality</span> correct 0/34") != std::string::npos &&
+              html.find("<dt>expected</dt><dd class=\"want\">" + quality.misses[0].expected + "</dd>") != std::string::npos && html.find("a class=\"fig bad\" href=\"#quality-misses\"") != std::string::npos,
+          "misses: the page shows them first in the quality section, the checks strip and the quality figure link there");
+    b::ScenarioResult legacy;  // a run from before the misses: its wrong answers were notes
+    legacy.id = "quality";
+    legacy.rows.push_back(b::Row::note_only("format-reverse: expected \"enigne\", got \"enige\""));
+    legacy.rows.push_back(b::Row::note_only("code-loop: expected \"84\", got \"(no ANSWER line)\""));
+    b::Run old = beyond;
+    old.scenarios = {legacy};
+    std::string json = b::to_json(old);
+    const auto old_back = b::run_from_json(json, err);
+    const auto &lm = old_back ? old_back->scenarios[0].misses : legacy.misses;
+    CHECK(lm.size() == 2 && lm[0].item == "format-reverse" && lm[0].expected == "enigne" && lm[0].got == "enige" && lm[1].why == "no ANSWER line" && lm[1].got.empty() &&
+              old_back->scenarios[0].rows[0].notes.empty(),
+          "misses: an older run's wrong-answer notes are read as misses");
+    b::ScenarioResult twice;
+    twice.rows = {b::Row::note_only("same"), b::Row::note_only("same"), b::Row::note_only("other")};
+    CHECK(b::unique_notes(twice) == std::vector<std::string>({"same", "other"}), "notes: a text several rows carry is shown once");
+  }
   fake.refuse_images = true;
   const b::Run refused_run = b::execute(b::make_plan("", "vision", {}), session, info, nullptr);
   CHECK(refused_run.scenarios[0].errors == 0 && refused_run.scenarios[0].rows.size() == 1 && refused_run.scenarios[0].rows[0].notes[0].find("does not take images") != std::string::npos,

@@ -580,6 +580,7 @@ Style log_style(const std::string &l) {
       s.find("needs a value") != std::string::npos || s.find("out of memory") != std::string::npos)
     return th::err;
   if (s.rfind("launcher: the server", 0) == 0 || s.find("server: crashed") != std::string::npos) return th::err;
+  if (s.find("\xE2\x9C\x97") != std::string::npos) return th::err;  // a failed check (xenithium-bench marks wrong answers with it)
   if (s.find("warn") != std::string::npos || s.rfind("start-server:", 0) == 0) return th::warn;
   if (s.find("server: serving") != std::string::npos || s.find("server: stub engine") != std::string::npos) return th::ok;
   if (s.rfind("server:", 0) == 0) return th::acc2;
@@ -3394,6 +3395,8 @@ struct App::Impl {
     }
     if (r.tokens_per_joule > 0) line("efficiency " + fmt1(r.tokens_per_joule) + " tokens per joule of GPU board power, at the best stream count", th::dim);
     if (r.quality_pct >= 0) line("quality   " + fmt1(r.quality_pct) + " % of the checkable questions answered correctly", r.quality_pct >= kQualityWarnBelowPct ? th::dim : th::warn);
+    for (const BenchRun::Miss &m : r.quality_misses)  // each wrong answer on a line of its own, in the failure colour
+      line("          \xE2\x9C\x97 " + m.item + ": expected \"" + m.expected + "\", got " + m.got, th::err);
     line("page      " + tilde(join_path(r.path, "report.html")) + "   (charts; open it in a browser)", th::dim);
     line("tables    xenithium-bench report " + tilde(r.path) + "   (every scenario; compare A B sets two runs side by side)", th::dim);
     if (!r.notes.empty()) {

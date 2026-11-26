@@ -163,12 +163,14 @@ std::optional<Chart> range_of(const std::vector<const Row *> &rows, const ChartS
   return Chart{svg::range_chart(ranges, {unit, spec.x_label}), unit};
 }
 
-std::optional<Chart> dots_of(const std::vector<const Row *> &rows, const ChartSpec &spec) {
+std::optional<Chart> dots_of(const std::vector<const Row *> &rows, const ChartSpec &spec, const std::vector<Miss> &misses) {
   std::vector<svg::DotRow> dots;
   for (const Row *row : rows)
     if (const Metric *m = spec.metrics.empty() ? nullptr : metric_of(*row, spec.metrics.front()); m && !m->samples.empty()) {
-      svg::DotRow dot{*label_of(*row, spec.x_label), {}};
+      svg::DotRow dot{*label_of(*row, spec.x_label), {}, {}};
       for (const double sample : m->samples) dot.yes.push_back(sample > 0.5);
+      for (const Miss &miss : misses)
+        if (miss.group == dot.label) dot.wrong.push_back(miss.item);
       dots.push_back(std::move(dot));
     }
   if (dots.empty()) return std::nullopt;
@@ -185,7 +187,7 @@ std::optional<Chart> chart_of(const ScenarioResult &scenario, const ChartSpec &s
     case ChartKind::bars: return bars_of(rows, spec);
     case ChartKind::line: return line_of(rows, spec);
     case ChartKind::range: return range_of(rows, spec);
-    case ChartKind::dots: return dots_of(rows, spec);
+    case ChartKind::dots: return dots_of(rows, spec, scenario.misses);
   }
   return std::nullopt;
 }
@@ -195,24 +197,32 @@ std::optional<Chart> chart_of(const ScenarioResult &scenario, const ChartSpec &s
 struct Figure {
   std::string label, value, unit, detail;
   std::string href;  // the scenario the figure comes from
+  std::string alert;  // failures behind the figure ("1 wrong answer"): a line of its own in the failure colour
 };
+
+// The anchor of a scenario's misses panel.
+std::string misses_anchor(const std::string &scenario_id) { return scenario_id + "-misses"; }
 
 std::vector<Figure> figures_of(const Run &run) {
   const Headline h = headline(run);
   std::vector<Figure> figures;
   if (h.decode_tps > 0) {
     const std::string mix = h.decode_mix.empty() || h.decode_mix == "weighted" ? "weighted over " : "the " + h.decode_mix + " of ";
-    figures.push_back({"Decode", format_number(h.decode_tps), "tok/s", "one stream, " + mix + std::to_string(h.decode_by_category.size()) + " kinds of output", "#decode"});
+    figures.push_back({"Decode", format_number(h.decode_tps), "tok/s", "one stream, " + mix + std::to_string(h.decode_by_category.size()) + " kinds of output", "#decode", {}});
   }
-  if (h.peak_total_tps > 0) figures.push_back({"Throughput", format_number(h.peak_total_tps), "tok/s", "all streams together, at " + h.peak_streams + " streams", "#concurrency"});
+  if (h.peak_total_tps > 0) figures.push_back({"Throughput", format_number(h.peak_total_tps), "tok/s", "all streams together, at " + h.peak_streams + " streams", "#concurrency", {}});
   if (!h.prefill.empty() && h.prefill.back().tps > 0)
     figures.push_back({"Prompt processing", format_number(h.prefill.back().tps), "tok/s",
-                       "a " + h.prefill.back().depth + "-token prompt, first token after " + latency_text(h.prefill.back().ttft_ms), "#prefill"});
+                       "a " + h.prefill.back().depth + "-token prompt, first token after " + latency_text(h.prefill.back().ttft_ms), "#prefill", {}});
   if (!h.deep_decode.empty() && h.deep_decode.back().tps > 0)
-    figures.push_back({"Decode at depth", format_number(h.deep_decode.back().tps), "tok/s", "with " + h.deep_decode.back().depth + " tokens of context", "#deep-decode"});
+    figures.push_back({"Decode at depth", format_number(h.deep_decode.back().tps), "tok/s", "with " + h.deep_decode.back().depth + " tokens of context", "#deep-decode", {}});
   if (h.best_tokens_per_joule > 0)
-    figures.push_back({"Efficiency", format_number(h.best_tokens_per_joule), "tok/J", "tokens per joule of board power, at the best stream count", "#concurrency"});
-  if (h.quality_pct >= 0) figures.push_back({"Quality", format_number(h.quality_pct), "%", "of the checkable questions answered correctly", "#quality"});
+    figures.push_back({"Efficiency", format_number(h.best_tokens_per_joule), "tok/J", "tokens per joule of board power, at the best stream count", "#concurrency", {}});
+  if (h.quality_pct >= 0) {
+    const size_t wrong = h.quality_misses.size();
+    figures.push_back({"Quality", format_number(h.quality_pct), "%", "of the checkable questions answered correctly", wrong ? "#" + misses_anchor("quality") : "#quality",
+                       wrong ? "\xE2\x9C\x97 " + std::to_string(wrong) + (wrong == 1 ? " wrong answer" : " wrong answers") : std::string()});
+  }
   return figures;
 }
 
@@ -220,8 +230,8 @@ std::string figures_html(const std::vector<Figure> &figures) {
   if (figures.empty()) return {};
   std::string html = "<div class=\"figs\">";
   for (const Figure &f : figures)
-    html += "<a class=\"fig\" href=\"" + escaped(f.href) + "\"><div class=\"k\">" + escaped(f.label) + "</div><div class=\"n\">" + escaped(f.value) + "<small>" + escaped(f.unit) +
-            "</small></div><div class=\"d\">" + escaped(f.detail) + "</div></a>";
+    html += std::string("<a class=\"fig") + (f.alert.empty() ? "" : " bad") + "\" href=\"" + escaped(f.href) + "\"><div class=\"k\">" + escaped(f.label) + "</div><div class=\"n\">" + escaped(f.value) + "<small>" + escaped(f.unit) +
+            "</small></div><div class=\"d\">" + escaped(f.detail) + "</div>" + (f.alert.empty() ? std::string() : "<div class=\"w\">" + escaped(f.alert) + "</div>") + "</a>";
   return html + "</div>";
 }
 
@@ -249,9 +259,10 @@ std::string checks_html(const Run &run) {
         it->second.first += static_cast<int>(std::ranges::count_if(m.samples, [](double v) { return v > 0.5; }));
         it->second.second += static_cast<int>(m.samples.size());
       }
+    const std::string target = scenario.misses.empty() ? scenario.id : misses_anchor(scenario.id);
     for (const auto &[name, count] : flags)
-      items += std::string("<li") + (count.first == count.second ? "" : " class=\"bad\"") + "><a href=\"#" + escaped(scenario.id) + "\"><span>" + escaped(scenario.id) + "</span> " +
-               escaped(name) + " " + std::to_string(count.first) + "/" + std::to_string(count.second) + "</a></li>";
+      items += std::string("<li") + (count.first == count.second ? "" : " class=\"bad\"") + "><a href=\"#" + escaped(count.first == count.second ? scenario.id : target) + "\"><span>" +
+               escaped(scenario.id) + "</span> " + escaped(name) + " " + std::to_string(count.first) + "/" + std::to_string(count.second) + "</a></li>";
   }
   const int failed = failed_requests(run);
   std::string html = "<ul class=\"checks\"><li";
@@ -333,13 +344,29 @@ std::string table_html(const TableView &view) {
   return html + "</tbody></table></div></div>";
 }
 
+// A scenario's wrong answers, first in its section and in the failure colour: per miss the check, its category, the
+// question, and the expected answer beside the one given.
+std::string misses_html(const ScenarioResult &scenario) {
+  if (scenario.misses.empty()) return {};
+  std::string html = "<div class=\"miss\" id=\"" + escaped(misses_anchor(scenario.id)) + "\"><div class=\"mbar\"><b>\xE2\x9C\x97 " + escaped(misses_heading(scenario)) + "</b></div><ol>";
+  for (const Miss &m : scenario.misses) {
+    html += "<li><div class=\"mq\"><code>" + escaped(m.item) + "</code>" + (m.group.empty() ? std::string() : "<span>" + escaped(m.group) + "</span>") + "</div>";
+    // a question of several lines holds a program: kept as laid out
+    if (!m.asked.empty()) html += m.asked.find('\n') == std::string::npos ? "<p>" + escaped(m.asked) + "</p>" : "<pre>" + escaped(m.asked) + "</pre>";
+    html += "<dl><dt>expected</dt><dd class=\"want\">" + escaped(m.expected) + "</dd><dt>answer given</dt>";
+    html += m.why.empty() ? "<dd class=\"got\">" + escaped(m.got) + "</dd>" : "<dd class=\"none\">" + escaped(m.why) + "</dd>";
+    html += "</dl></li>";
+  }
+  return html + "</ol></div>";
+}
+
 std::string scenario_html(const ScenarioResult &scenario) {
   std::string html = "<section class=\"sc\" id=\"" + escaped(scenario.id) + "\"><h2><span class=\"ttl\">" + escaped(scenario.title) + "</span> <code>" + escaped(scenario.id) + "</code></h2>";
   if (!scenario.about.empty()) html += "<p class=\"about\">" + escaped(scenario.about) + "</p>";
   html += "<p class=\"meta\">" + duration_text(scenario.seconds) + std::string(kDot) + with_thousands(scenario.requests) + " requests";
   if (scenario.errors) html += std::string(kDot) + "<b>" + std::to_string(scenario.errors) + " failed</b>";
   if (scenario.power) html += std::string(kDot) + escaped(power_line(scenario));
-  html += "</p>";
+  html += "</p>" + misses_html(scenario);
 
   std::string charts;
   for (const ChartSpec &spec : scenario.charts)
@@ -350,8 +377,7 @@ std::string scenario_html(const ScenarioResult &scenario) {
 
   std::string notes;
   if (scenario.errors) notes += "<li class=\"err\">first error: " + escaped(scenario.first_error) + "</li>";
-  for (const Row &row : scenario.rows)
-    for (const std::string &note : row.notes) notes += "<li>" + escaped(note) + "</li>";
+  for (const std::string &note : unique_notes(scenario)) notes += "<li>" + escaped(note) + "</li>";
   if (!notes.empty()) html += "<ul class=\"notes\">" + notes + "</ul>";
   return html + "</section>";
 }
@@ -398,8 +424,12 @@ std::string setup_html(const RunInfo &i) {
 std::string nav_html(const Run &run, bool with_anatomy) {
   std::string html = "<nav aria-label=\"sections\"><a class=\"home\" href=\"#top\" title=\"to the top\">\xE2\x97\x86</a><div class=\"links\"><a href=\"#run\">run</a>";
   if (with_anatomy) html += "<a href=\"#request\">request</a>";
-  for (const ScenarioResult &s : run.scenarios)
-    html += "<a href=\"#" + escaped(s.id) + "\"" + (s.errors ? " class=\"err\" title=\"" + std::to_string(s.errors) + " failed\"" : std::string()) + ">" + escaped(s.id) + "</a>";
+  for (const ScenarioResult &s : run.scenarios) {
+    std::string mark;
+    if (s.errors) mark = " class=\"err\" title=\"" + std::to_string(s.errors) + " failed\"";
+    else if (!s.misses.empty()) mark = " class=\"err\" title=\"" + escaped(misses_heading(s)) + "\"";
+    html += "<a href=\"#" + escaped(s.id) + "\"" + mark + ">" + escaped(s.id) + "</a>";
+  }
   return html + "<a href=\"#setup\">setup</a></div></nav>";
 }
 

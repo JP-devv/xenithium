@@ -18,8 +18,7 @@ constexpr ParamSpec kParams[] = {
     {"kind", "prose", "corpus kind of that document"},
 };
 constexpr std::string_view kContextCategory = "context";
-constexpr size_t kWrongShown = 6;  // wrong answers named in the report
-constexpr size_t kAnswerShown = 60;  // characters of each
+constexpr size_t kAnswerShown = 120;  // characters of a wrong answer kept for the report
 
 // The facts planted in the long document, each on a line of its own at a share of the document's length.
 struct PlantedFact {
@@ -65,11 +64,11 @@ class Quality final : public Scenario {
   std::span<const ParamSpec> params() const override { return kParams; }
 
   ScenarioResult run(Session &session, const Params &params) const override {
-    Grader grader{session, static_cast<int>(params.integer("reply_tokens")), {}, {}, {}};
+    Grader grader{session, static_cast<int>(params.integer("reply_tokens")), {}, {}};
     for (const QualityItem &item : quality_items()) {
       std::string prompt(item.passage);
       if (!prompt.empty()) prompt += "\n\n";
-      grader.ask(item.id, item.category, prompt + std::string(item.question), item.kind, item.answer);
+      grader.ask(item.id, item.category, item.question, prompt + std::string(item.question), item.kind, item.answer);
     }
     session.progress("quality: the short questions done");
 
@@ -80,7 +79,7 @@ class Quality final : public Scenario {
       } else {
         // one document for the four questions: the first reads it, the rest may come from the prefix cache
         const std::string document = with_facts(session.document_prompt(params.text("kind"), depth, "", /*unique=*/true).text);
-        for (const ContextQuestion &q : kContextQuestions) grader.ask(q.id, kContextCategory, document + "\n\n" + std::string(q.question), q.kind, q.answer);
+        for (const ContextQuestion &q : kContextQuestions) grader.ask(q.id, kContextCategory, q.question, document + "\n\n" + std::string(q.question), q.kind, q.answer);
         session.progress("quality: the long-context questions done");
       }
     }
@@ -94,10 +93,10 @@ class Quality final : public Scenario {
     int reply_tokens;
     ScenarioResult result;
     std::vector<Row> rows;
-    std::vector<std::string> wrong;
 
-    void ask(std::string_view id, std::string_view category, const std::string &question, AnswerKind kind, std::string_view expected) {
-      ChatRequest request = session.greedy(question + std::string(answer_instruction()), reply_tokens);
+    // `question` as the report shows it; `prompt` as sent (with its passage or document)
+    void ask(std::string_view id, std::string_view category, std::string_view question, const std::string &prompt, AnswerKind kind, std::string_view expected) {
+      ChatRequest request = session.greedy(prompt + std::string(answer_instruction()), reply_tokens);
       request.ignore_eos = false;  // the reply ends where the model ends it
       // an answer needs no reasoning pass: asked without one unless the run turns thinking on, so the score does not
       // hang on how long a model thinks
@@ -107,9 +106,9 @@ class Quality final : public Scenario {
       const std::string given = answer_of(sample.text);
       const bool correct = is_correct(kind, expected, given);
       row_of(category).flag("correct").samples.push_back(correct ? 1 : 0);
-      if (!correct && wrong.size() < kWrongShown)
-        wrong.push_back(std::string(id) + ": expected \"" + std::string(expected) + "\", got \"" +
-                        (given.empty() ? std::string(sample.finish_reason == "length" ? "(no ANSWER line: the reply hit reply_tokens)" : "(no ANSWER line)") : given.substr(0, kAnswerShown)) + "\"");
+      if (!correct)
+        result.misses.push_back({std::string(id), std::string(category), std::string(question), std::string(expected), given.substr(0, kAnswerShown),
+                                 given.empty() ? (sample.finish_reason == "length" ? "no ANSWER line: the reply hit reply_tokens" : "no ANSWER line") : std::string()});
     }
 
     Row &row_of(std::string_view category) {
@@ -128,7 +127,6 @@ class Quality final : public Scenario {
       if (asked > 0) {
         Row all = Row::with_labels({{"category", "all"}});
         all.metric(std::string(metric::kQualityScore), "%", Better::higher).samples.push_back(100.0 * correct / asked);
-        all.notes = std::move(wrong);
         result.rows.push_back(std::move(all));
       }
       result.charts = {{ChartKind::dots, "Questions answered correctly", "category", {"correct"}, false}};
