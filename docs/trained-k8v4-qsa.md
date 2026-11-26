@@ -55,7 +55,7 @@ xenithium-server --model ~/models/swift15-27b-int4-baked --tp 2 --slots 6 --kv i
   --prefill-gemm onednn-all --prefill-gemm-rows 512 --kv-lend on --prefix-cache 1 --prefix-mark-min 2048
 ```
 
-Six slots are the most that fit this pool next to the trained summaries and the prefix cache on 24 GB cards. Leave the diagnostic switches (`XEN_QSA_TRIAL_ROUTE_LOG`, `XEN_PF_LOG`, the audit and check switches) unset in production.
+Six slots are the most that fit this pool next to the trained summaries and the prefix cache on 24 GB cards. Leave the diagnostic switches (`XEN_QSA_TRIAL_ROUTE_LOG`, `XEN_PF_LOG`, `XEN_QSA_SCORE_CHECK`, `XEN_QSA_PACK_CHECK`) unset in production.
 
 ## Qualification and remaining gaps
 

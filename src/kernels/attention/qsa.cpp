@@ -433,7 +433,7 @@ sycl::event qsa_trained_xmx_score(sycl::queue &q,const bf16 *query,const bf16 *k
 }
 
 
-// xq.11: the trained QSA decode tree scores on fp16 DPAS (trained_qsa_device.cpp index_scores_tile<Half, Tree>'s values up
+// The trained QSA decode tree scores on fp16 DPAS (trained_qsa_device.cpp index_scores_tile<Half, Tree>'s values up
 // to fp32 summation order). query fp32 [rows][4][128]; pool16 fp16 [slots][pitch][128]; scores [rows][pitch] fp32 bits.
 class QsaTrainedDecXmxK;
 sycl::event qsa_trained_dec_xmx_score(sycl::queue &q, const float *query, const sycl::half *pool16, const int32_t *rec, int stride,

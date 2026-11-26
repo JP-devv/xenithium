@@ -1,4 +1,3 @@
-#include "xenithium/util/ruby_round.hpp"
 #include "xenithium/arch/qwen35/step_model.hpp"
 
 #include "xenithium/core/sampler.hpp"
@@ -143,16 +142,10 @@ std::vector<std::vector<int32_t>> StepModelAdapter::accept(const std::vector<Spe
   std::vector<const int *> paths;
   bool any = false;
   for (const auto &x : a) paths.push_back(x.path), any |= x.path != nullptr;
-  namespace ruby = util::ruby_round;
-  auto &ru=ruby::r;
-  if(ru.step) ru.pack0=ruby::ns();
   if (any) m_.accept_batch(keep, paths);
   else m_.accept_batch(keep);
-  if(ru.step) ru.pack1=ruby::ns();
   // depth 0: pass 1 writes the drafter KV only (every slot's drafter KV stays complete for its later drafts)
-  if(ru.step) ru.draft0=ruby::ns();
   auto d = m_.draft_batch(nx, depth);
-  if(ru.step) ru.draft1=ruby::ns();
   for (int k = 0; k < vsegs_; ++k) d[static_cast<size_t>(k)].resize(std::min(d[static_cast<size_t>(k)].size(), static_cast<size_t>(std::max(a[static_cast<size_t>(k)].depth, 0))));
   return d;
 }

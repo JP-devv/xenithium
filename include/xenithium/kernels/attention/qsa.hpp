@@ -338,7 +338,7 @@ QsaEvents qsa_rows(sycl::queue &q, const QsaShape &s, int m, const qsa_bf16 *x, 
 sycl::event qsa_trained_xmx_pack_k(sycl::queue &q, const float *pool, int nkeys, qsa_bf16 *packed);
 sycl::event qsa_trained_xmx_pack_k(sycl::queue &q, const sycl::half *pool, int nkeys, sycl::ext::oneapi::bfloat16 *packed);
 sycl::event qsa_trained_xmx_pack_q(sycl::queue &q, const float *query, int rows, qsa_bf16 *packed);
-// xq.11 (qsa.cpp): trained QSA decode tree scores on fp16 DPAS; see there.
+// (qsa.cpp): trained QSA decode tree scores on fp16 DPAS; see there.
 sycl::event qsa_trained_dec_xmx_score(sycl::queue &q, const float *query, const sycl::half *pool16, const int32_t *rec, int stride,
                                       int layout, int rows, int pitch, int bound, uint32_t *scores, int32_t *eligible);
 sycl::event qsa_trained_xmx_score(sycl::queue &q, const qsa_bf16 *query, const qsa_bf16 *keys, int rows, int pos, int nkeys,

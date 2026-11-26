@@ -72,7 +72,6 @@ class StepModel {
   virtual int prefill_chunk() const = 0;    // most prompt tokens per prefill call
   virtual void begin(int slot) = 0;         // a fresh sequence on the slot (position 0)
   // Optional model metadata; does not influence admission, matching or batching.
-  virtual void note_prefill_probe_prompt(int,bool) {}
   virtual void note_prompt(int,int64_t,int64_t) {}  // slot, input length, logical restored length
   // n prompt tokens (1..prefill_chunk) on the slot after what it holds; then prefill_pick /
   // prefill_logits read the row of the last of them. next: the prompt token after these n (-1 =

@@ -26,7 +26,6 @@
 #include "xenithium/arch/llama/arch.hpp"
 #include "xenithium/arch/qwen35/arch.hpp"
 #include "xenithium/arch/qwen38/experts.hpp"
-#include "xenithium/arch/common/dflash_plan.hpp"
 #include "xenithium/arch/common/drafter_archs.hpp"
 #include "xenithium/arch/common/dspine_head.hpp"
 #include "xenithium/arch/qwen38/mtp.hpp"
@@ -1489,9 +1488,9 @@ int main() {
     real_model_llama();
     real_model_flint();
     real_model_qwen35_gptq();
-    qwen35_gptq_format();
     dflash_gptq_dequant();
     dspine_gptq_lm_head();
+    qwen35_gptq_format();
     dflash_gptq_plan();
     mtp35_plan();
     select_share();

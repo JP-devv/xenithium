@@ -992,16 +992,6 @@ GqaEvents gqa_decode(sycl::queue &q, const GqaShape &s, int rows, const bf16 *x,
   return e;
 }
 
-sycl::event gqa_replay_trained_attention(sycl::queue &q,const GqaShape &s,int rows,const GqaCache &c,
-                                        const GqaStep &step,const GqaWeights &w,const GqaScratch &sc) {
-  if(!step.trained_qsa.entries || !step.trained_qsa.counts || s.window)
-    throw std::invalid_argument("trained attention replay requires a packed plan");
-  const int ns=std::min(kGqaSplits,(step.pos_bound+kTile-1)/kTile);
-  const SegW sw{step.pos,step.stride,step.seg_rows,w.sinks};
-  gqa_attn_seg_trained_xl(q,s,rows,c,step,sc.q,sc.part,ns);
-  return merge_d<256,true,true>(q,s,rows,w.qkv_n(),sw,sc,step.trained_qsa.counts);
-}
-
 // ---- draft trees: the accepted path's K / V rows to their slots ----
 namespace {
 class GqaKvMoveK;

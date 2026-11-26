@@ -238,9 +238,6 @@ sycl::event gqa_attn_seg_xl(sycl::queue &q, const GqaShape &s, int rows, const G
 // gqa_kv_move: the page's keys are final).
 sycl::event gqa_attn_seg_sel_xl(sycl::queue &q, const GqaShape &s, int rows, const GqaCache &c, const int32_t *rec, int stride, int seg_rows,
                                 const gqa_bf16 *qb, float *part, int ns, int rm, const int32_t *sel, const int32_t *sel_n, bool pf = false);
-// Diagnostic: rerun just the native trained attention and gated merge on already prepared Q/K/V.
-sycl::event gqa_replay_trained_attention(sycl::queue &,const GqaShape &,int rows,const GqaCache &,
-                                        const GqaStep &,const GqaWeights &,const GqaScratch &);
 sycl::event gqa_attn_seg_trained_xl(sycl::queue &q, const GqaShape &s, int rows, const GqaCache &c, const GqaStep &step,
                                    const gqa_bf16 *qb, float *part, int ns);
 // Adapt native qsa_select's device buffers (ascending IDs [rows][512]) in the

@@ -28,7 +28,6 @@ class StepModelAdapter final : public core::StepModel {
   int max_rows() const override { return m_.step_rows(); }  // llama / flint: 8
   int prefill_chunk() const override { return m_.prefill_chunk(); }
   void begin(int slot) override;
-  void note_prefill_probe_prompt(int slot,bool match) override { m_.note_prefill_probe_prompt(slot,match); }
   void note_prompt(int slot,int64_t total,int64_t restored) override { m_.note_prompt(slot,total,restored); }
   void prefill(int slot, const int32_t *tokens, int n, int32_t next) override;
   // a call in parts of whole layers: other slots decode between the parts
