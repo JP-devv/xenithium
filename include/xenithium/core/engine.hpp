@@ -105,6 +105,9 @@ struct Event {
   std::vector<TokenLogprob> logprobs;         // one per token in `tokens`
   std::vector<TokenLogprob> prompt_logprobs;  // once, on the request's first event: one per prompt
                                               // token, [0] has NaN (nothing predicts it)
+  // Once, on the request's first event: the prompt tokens its prefill continued from the
+  // prefix cache instead of computing (0 on a cold start); -1 on every other event.
+  int32_t cached_tokens = -1;
 };
 
 class EventSink {

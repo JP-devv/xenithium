@@ -34,7 +34,10 @@ void add_decode_metrics(Row &row, const Sample &s) {
 void add_prefill_metrics(Row &row, const Sample &s) {
   row.metric(std::string(metric::kPromptTokens), "tokens", Better::none).samples.push_back(s.prompt_tokens);
   row.metric(std::string(metric::kTtft), "ms", Better::lower).samples.push_back(s.ttft_ms);
-  if (s.usage_reported) row.metric(std::string(metric::kPrefill), "tok/s", Better::higher).samples.push_back(s.prefill_tps());
+  if (s.usage_reported && !s.cached_unknown) row.metric(std::string(metric::kPrefill), "tok/s", Better::higher).samples.push_back(s.prefill_tps());
+  if (s.cached_unknown)
+    row.notes.push_back("prefill tok/s left out where the cached prompt tokens are unknown: the server does not report them per request, and another client's "
+                        "cache hits moved its server-wide counter during the request");
 }
 
 namespace {

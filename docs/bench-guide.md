@@ -277,7 +277,7 @@ URL=http://192.0.2.10:8000/v1 scripts/bench.sh lan      # an endpoint that alrea
 |---|---|
 | **decode tok/s** | Generated tokens per second after the first one. The prompt is not included. |
 | **TTFT** | Time to first token: connecting, waiting in the queue and reading the prompt. |
-| **prefill tok/s** | Prompt tokens the server had to read (not the cached ones), divided by the TTFT. |
+| **prefill tok/s** | Prompt tokens the server had to read (not the cached ones), divided by the TTFT. Missing when the server does not say how many were cached and another client was using its cache at the same time. |
 | **tok/update** | Tokens per streamed update. Above 1 means speculative decoding is accepting several tokens per step. |
 | **update gap** | Time between two updates: one decode step, as a client sees it. |
 | **tok/J** | Tokens per joule of GPU board energy (the same number as tok/s per watt). |

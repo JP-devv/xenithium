@@ -704,6 +704,9 @@ void test_end_to_end() {
         "end to end: a streamed reply - text, usage, %zu updates (the role chunk is not one): %s", s.update_ms.size(), s.error.c_str());
   CHECK(s.tokens_per_update() == 2 && s.decode_tps() > 0 && s.ttft_ms > 0 && s.wall_ms > s.ttft_ms && s.update_gap_ms() >= 1.5, "end to end: 2 tokens per update, a decode rate, TTFT < wall, gaps of the server's 2 ms (%.2f)",
         s.update_gap_ms());
+  b::Sample over = s;  // a cached count past the prompt (a server's bad report) prefills nothing, not a negative amount
+  over.cached_tokens = over.prompt_tokens + 100;
+  CHECK(over.prefill_tps() == 0, "end to end: cached tokens past the prompt give a zero prefill rate (%.1f)", over.prefill_tps());
   const b::Sample refused = b::Client(*endpoint, "other-model", caps, 10).chat(request);
   CHECK(!refused.ok && refused.http_status == 404 && refused.error.find("HTTP 404") != std::string::npos && refused.error.find("no such model") != std::string::npos,
         "end to end: a refused request carries the status and the body's head (%s)", refused.error.c_str());

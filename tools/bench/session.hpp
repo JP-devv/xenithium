@@ -76,7 +76,8 @@ class Session {
   std::string unique_line();
 
   // One request with nothing else in flight. Where the endpoint's usage does not say how many prompt tokens came from
-  // its prefix cache but its /metrics counts them, the sample's cached_tokens is that counter's growth over the request.
+  // its prefix cache but its /metrics counts them, the sample's cached_tokens is that counter's growth over the request;
+  // a growth past the prompt (another client's hits) leaves it unknown (-1).
   Sample chat_alone(const ChatRequest &request) const;
 
   // Sends the requests at once (request i after start_after_s[i] seconds, 0 when the span is shorter) and waits for all.

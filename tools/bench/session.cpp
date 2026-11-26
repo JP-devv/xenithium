@@ -93,8 +93,13 @@ Session::DocumentPrompt Session::document_prompt(std::string_view kind, int64_t 
 Sample Session::chat_alone(const ChatRequest &request) const {
   const auto before = counters();
   Sample sample = client_.chat(request);
+  // the counter is server-wide: growth beyond this prompt is another client's hits, and the request's share is unknown
   if (sample.ok && sample.cached_tokens < 0 && before)
-    if (const auto after = counters()) sample.cached_tokens = static_cast<int>(after->prefix_hit_tokens - before->prefix_hit_tokens);
+    if (const auto after = counters()) {
+      const double grew = after->prefix_hit_tokens - before->prefix_hit_tokens;
+      if (grew >= 0 && grew <= sample.prompt_tokens) sample.cached_tokens = static_cast<int>(grew);
+      else sample.cached_unknown = true;
+    }
   return sample;
 }
 

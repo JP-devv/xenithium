@@ -184,8 +184,11 @@ code.
 - **decode tok/s** is the tokens after the first streamed update over the time from the first update to the last, so
   it excludes the prompt. **TTFT** is from just before the connect to the first update that carries text, so it
   includes the connection, the queue and the prompt.
-- **prefill tok/s** is the prompt tokens the server had to process (its count, minus the tokens it reports as cached)
-  over the TTFT.
+- **prefill tok/s** is the prompt tokens the server had to process (its count, minus the tokens it reports as cached
+  in `usage.prompt_tokens_details.cached_tokens`) over the TTFT. A server that does not report them: a request sent
+  alone takes the growth of the `/metrics` prefix-cache counter over the request instead. That counter is
+  server-wide, so a growth larger than the prompt (another client's hits) leaves the cached count unknown and the
+  row without a prefill rate.
 - **tok/update** above 1 means the server sends several tokens per step (speculative decoding); **update gap** is the
   median time between two updates, the decode step as a client sees it.
 - A cell shows the median of its samples; latencies with four or more samples show `median / max`. Yes / no checks

@@ -434,7 +434,7 @@ class BatchEngine final : public Engine {
     std::vector<int> tree;  // their parent rows when they are a tree (StepModel::draft_parents)
     clock::time_point t_submit, t_admit;
     clock::time_point t_first{};       // XEN_REQ_LOG: its first emitted token
-    size_t cached = 0;                 // XEN_REQ_LOG: prompt tokens continued from the prefix cache
+    size_t cached = 0;                 // prompt tokens continued from the prefix cache (first event, XEN_REQ_LOG)
     uint32_t dec_steps = 0;            // XEN_REQ_LOG: decode steps it took part in
     uint64_t dec_peers = 0;            // XEN_REQ_LOG: the other requests in those steps, summed
     // (shared KV pool): the emitted tokens, the submitted prompt's length; a preempted request (its pages taken

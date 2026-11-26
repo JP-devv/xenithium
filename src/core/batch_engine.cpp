@@ -1930,6 +1930,7 @@ void BatchEngine::loop() {
       r.tier = tier;
       r.prefilled = static_cast<size_t>(start);
       r.pos = start;
+      if (!r.resumed) r.cached = static_cast<size_t>(start);  // preempted inside its prompt: its first token comes from this prefill
       active_.push_back(std::move(resume_.front()));
       resume_.pop_front();
       std::lock_guard<std::mutex> lk(stats_mu_);
@@ -2129,6 +2130,7 @@ void BatchEngine::loop() {
             pk[0].has_lp = true;
           }
           if (!r.prompt_lps.empty()) e.prompt_logprobs = std::move(r.prompt_lps);
+          if (!r.resumed) e.cached_tokens = static_cast<int32_t>(r.cached);
           const Finish f = emit(r, pk[0].tok, pk[0].has_lp ? &pk[0].lp : nullptr, e);
           // a first token that does not finish its request goes to the client here (before its first
           // drafts and the other requests' step); TTFT is taken when it is handed over
