@@ -103,7 +103,7 @@ std::vector<int32_t> StepModelAdapter::first_drafts(int slot, int32_t first, int
   // DFlash: the prefill put the whole prompt in the drafter's context, depth 0 runs nothing; both:
   // the drafter of a step of `sequences`
   const bool mtp = m_.mtp_drafts(std::max(1, sequences));
-  auto d = m_.draft_after_prefill(first, mtp ? std::clamp(depth, 1, m_.draft_depth_max()) : std::clamp(depth, 0, m_.draft_depth_max()), std::max(1, sequences));
+  auto d = m_.draft_after_prefill(first, mtp ? std::clamp(depth, 1, kDepth) : std::clamp(depth, 0, m_.draft_depth_max()), std::max(1, sequences));
   d.resize(std::min(d.size(), static_cast<size_t>(std::max(depth, 0))));
   return d;
 }

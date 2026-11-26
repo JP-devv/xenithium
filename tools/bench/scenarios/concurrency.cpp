@@ -26,8 +26,8 @@ class Concurrency final : public Scenario {
 
   ScenarioResult run(Session &session, const Params &params) const override {
     ScenarioResult result;
-    const auto prompts = session.prompts();
-    for (int64_t i = 0; i < params.integer("warmup"); ++i) (void)session.client().chat(session.sampled(prompts.front()));
+    const auto prompts = short_prompts();
+    for (int64_t i = 0; i < params.integer("warmup"); ++i) (void)session.client().chat(session.sampled(std::string(prompts.front().text), prompts.front().max_tokens));
 
     size_t next_prompt = 0;
     for (const int64_t level : params.integers("levels")) {
@@ -35,7 +35,7 @@ class Concurrency final : public Scenario {
       std::vector<ChatRequest> requests;
       for (int64_t i = 0; i < count; ++i) {
         const ShortPrompt &prompt = prompts[next_prompt++ % prompts.size()];
-        requests.push_back(session.sampled(prompt));
+        requests.push_back(session.sampled(std::string(prompt.text), prompt.max_tokens));
       }
       const PowerSpan power(session);
       const Clock::time_point started = Clock::now();

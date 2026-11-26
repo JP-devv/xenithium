@@ -15,6 +15,7 @@ namespace xenithium::core {
 
 namespace {
 using dsec = std::chrono::duration<double>;
+uint64_t g_depth_hist[16] = {};  // diagnostic (XEN_STEPSTAT): steps per a.depth
 constexpr int kTreePathMax = 64;  // a tree row's path tokens (a segment holds <= max_rows rows)
 
 // The leading rows of a draft tree that are a chain: row r's parent is row r - 1 (parents[0] = -1 is the fed token's
@@ -313,7 +314,6 @@ Finish BatchEngine::emit(Req &r, int32_t tok, TokenLogprob *lp, Event &ev) {
   ev.tokens[ev.n++] = tok;
   if (cfg_.lookup > 0) r.lk_hist.push_back(tok);
   if (kv_shared_ || pc_on_ || tiers_ > 1) r.out.push_back(tok);  // a preempted request re-prefills them; the parked history
-  if (r.generated == 0) r.t_first = clock::now();
   ++r.generated;
   r.next = tok;
   if (is_stop(r, tok)) {
@@ -379,7 +379,6 @@ int BatchEngine::cands_for(const std::vector<const Req *> &reqs) const {
 void BatchEngine::spec_step(const std::vector<size_t> &dec_in, std::vector<std::pair<size_t, Finish>> &done, uint64_t &gen_add) {
   const int N = static_cast<int>(dec_in.size());
   const auto t_step = clock::now();  // the step's time per (sequences, rows per sequence)
-  for (size_t i : dec_in) ++active_[i]->dec_steps, active_[i]->dec_peers += static_cast<uint64_t>(N - 1);
   std::vector<size_t> dec = dec_in;
   std::vector<int> rr(static_cast<size_t>(N)), off(static_cast<size_t>(N));  // rows and first row of each segment
   int sr = 1;
@@ -698,6 +697,23 @@ void BatchEngine::spec_step(const std::vector<size_t> &dec_in, std::vector<std::
     while (accepted < a.n && accepted + 1 < rk && a.next[accepted] == t[accepted + 1]) ++accepted;
     return accepted;
   };
+  static const bool step_stats = std::getenv("XEN_STEPSTAT") != nullptr;
+  if (step_stats) {  // one line per request: its speculative accounting
+    for (int k = 0; k < N; ++k) {
+      if (dec[static_cast<size_t>(k)] < 0) continue;  // a row with no request
+      Req &r = *active_[dec[static_cast<size_t>(k)]];
+      if (fin[static_cast<size_t>(k)] == Finish::none || r.st_done) continue;
+      r.st_done = true;
+      std::fprintf(stderr, "STEPSTAT prompt_len %zu steps %llu draft %llu acc %llu lk %llu df_yield %.2f lk_yield %.2f\n",
+                   r.prompt_len, static_cast<unsigned long long>(r.st_steps), static_cast<unsigned long long>(r.st_draft),
+                   static_cast<unsigned long long>(r.st_acc), static_cast<unsigned long long>(r.st_lk), static_cast<double>(r.df_yield),
+                   static_cast<double>(r.lk_yield));
+      std::fprintf(stderr, "DEPTHHIST");
+      for (int d = 0; d < 16; ++d) std::fprintf(stderr, " d%d=%llu", d, static_cast<unsigned long long>(g_depth_hist[d]));
+      std::fprintf(stderr, "  src_draft_depth(1)=%d src_draft_depth(2)=%d src_layout_depth(1)=%d wide_depth=%d wide_from=%d\n",
+                   m_.draft_depth(1), m_.draft_depth(2), m_.layout_depth(1), m_.wide_depth(), m_.wide_from());
+    }
+  }
   std::vector<size_t> going_i;
   for (int k = 0; k < N; ++k)
     if (fin[static_cast<size_t>(k)] == Finish::none) going_i.push_back(dec[static_cast<size_t>(k)]);
@@ -713,6 +729,13 @@ void BatchEngine::spec_step(const std::vector<size_t> &dec_in, std::vector<std::
     const int accepted = confirmed(k);
     if (!active_[dec[static_cast<size_t>(k)]]->lk_used) wide_acc = std::min(accepted, rk - 1);
     Req &r = *active_[dec[static_cast<size_t>(k)]];
+    if (step_stats && r.st_steps % 50 == 0) {
+      std::fprintf(stderr, "STEPACC slot %d rk %d drafts %zu acc %d d0 %d d1 %d next0 %d next1 %d\n", r.slot, rk,
+                   r.drafts.size(), accepted, r.drafts.empty() ? -1 : r.drafts[0],
+                   r.drafts.size() < 2 ? -1 : r.drafts[1], a.n > 0 ? a.next[0] : -1, a.n > 1 ? a.next[1] : -1);
+    }
+    r.st_steps += 1, r.st_draft += static_cast<uint64_t>(rk - 1), r.st_acc += static_cast<uint64_t>(accepted);
+    r.st_lk += r.lk_used ? 1u : 0u;
     if (r.lk_used) continue;  // the lookup's drafts: the drafter's acceptance is not observed
     depth_observe(r, rk - 1, std::min(accepted, rk - 1));
     if (cfg_.lookup > 0) r.df_yield += (static_cast<float>(std::min(accepted, rk - 1) + 1) - r.df_yield) * kLkAlpha;
@@ -751,13 +774,17 @@ void BatchEngine::spec_step(const std::vector<size_t> &dec_in, std::vector<std::
       if (fin[static_cast<size_t>(k)] != Finish::none) continue;
       lk_score(r);
       if (lk_depth > 0) lk_props[static_cast<size_t>(k)] = lk_propose(r, lk_depth);
-      lk_step = lk_step && !lk_props[static_cast<size_t>(k)].empty() && r.lk_yield > r.df_yield;
+      // a trial at every 5th drafting step of the request: without it equal priors would never break the tie
+      static const bool lk_trial_on = [] { const char *e = std::getenv("XEN_LK_TRIAL"); return e && *e == '1'; }();
+      const bool lk_trial = cfg_.lookup > 0 && lk_trial_on && (r.st_steps % 5) == 0;
+      lk_step = lk_step && !lk_props[static_cast<size_t>(k)].empty() && (r.lk_yield > r.df_yield || lk_trial);
     }
   size_t gi = 0;  // the going requests in order (req_depth)
   for (int k = 0; k < N; ++k) {
     auto &a = acc[static_cast<size_t>(k)];
     const bool goes = fin[static_cast<size_t>(k)] == Finish::none;
     a.depth = goes && !lk_step ? (uneq ? req_depth[gi] : depth) : 0;
+    if (a.depth >= 0 && a.depth < 16) ++g_depth_hist[a.depth];
     gi += goes;
     gen_add += static_cast<uint64_t>(a.n);
     const int rk = rv[static_cast<size_t>(k)];
@@ -1174,17 +1201,6 @@ std::vector<int> BatchEngine::pick_layout(const std::vector<size_t> &going) {
 
 void BatchEngine::retire(size_t i, Finish f) {
   Req &r = *active_[i];
-  static const bool req_log = util::env_flag("XEN_REQ_LOG");
-  if (req_log) {
-    const auto now = clock::now();
-    const bool any = r.generated > 0 && r.t_first != clock::time_point{};
-    const double ttft = any ? dsec(r.t_first - r.t_submit).count() : -1.0, dec_s = any ? dsec(now - r.t_first).count() : 0.0;
-    std::fprintf(stderr, "REQ_DONE id=%llu slot=%d prompt=%zu cached=%zu gen=%d ttft_s=%.2f decode_s=%.2f tok_s=%.1f steps=%u tok_per_step=%.2f peers=%.2f finish=%d\n",
-                 static_cast<unsigned long long>(r.id), r.slot, r.prompt_len, r.cached, r.generated, ttft, dec_s,
-                 dec_s > 0 && r.generated > 1 ? (r.generated - 1) / dec_s : 0.0, r.dec_steps,
-                 r.dec_steps ? static_cast<double>(r.generated) / r.dec_steps : 0.0,
-                 r.dec_steps ? static_cast<double>(r.dec_peers) / r.dec_steps : 0.0, static_cast<int>(f));
-  }
   if (r.slot >= 0) {
     if (pc_on_) pc_park(r, f);           // the slot keeps its sequence (pages, live state, snapshots)
     else if (kv_shared_) m_.kv_release(r.slot);  // the pages back to the pool
@@ -1653,6 +1669,14 @@ BatchEngine::PcCand BatchEngine::pc_find(const std::vector<int32_t> &T, int tier
         break;
       }
   }
+  if (const char *e = std::getenv("XEN_PC_TRACE"); e && *e == '1') {
+    static int printed = 0;
+    if (printed < 8) {
+      ++printed;
+      std::fprintf(stderr, "PCLOOKUP tier %d prompt %zu -> src %d R %lld snap %d rank %d (R 0 = no match)\n", tier, T.size(), best.src,
+                   static_cast<long long>(best.R), best.snap, best.rank);
+    }
+  }
   return best;
 }
 
@@ -1698,7 +1722,6 @@ int BatchEngine::place(const std::vector<int32_t> &T, int64_t need, bool use_cac
     m_.begin(slot);  // a fresh sequence (it drops the slot's pages) ...
     if (tiers_ > 1) m_.set_rope_tier(slot, tier);
     if (kv_shared_ && !m_.kv_reserve(slot, need)) throw std::logic_error("batch engine: pages taken between reserve and begin");  // ... taken again
-    m_.note_prompt(slot,static_cast<int64_t>(T.size()),0);
     return slot;
   }
   // 1. the longest usable cached prefix: a parked slot's live state or any slot's snapshot
@@ -1808,7 +1831,6 @@ int BatchEngine::place(const std::vector<int32_t> &T, int64_t need, bool use_cac
   if (pc_log && best.src >= 0)
     std::fprintf(stderr, "prefix: %lld of %lld prompt tokens from slot %d (%s) into slot %d\n", static_cast<long long>(start),
                  static_cast<long long>(TN), best.src, in_place ? (best.snap < 0 ? "live state" : "snapshot, in place") : "snapshot, copied", dst);
-  m_.note_prompt(dst,TN,start);
   return dst;
 }
 
@@ -1930,7 +1952,6 @@ void BatchEngine::loop() {
       r.tier = tier;
       r.prefilled = static_cast<size_t>(start);
       r.pos = start;
-      if (!r.resumed) r.cached = static_cast<size_t>(start);  // preempted inside its prompt: its first token comes from this prefill
       active_.push_back(std::move(resume_.front()));
       resume_.pop_front();
       std::lock_guard<std::mutex> lk(stats_mu_);
@@ -2045,7 +2066,6 @@ void BatchEngine::loop() {
       r->slot = slot;
       r->tier = tier;
       r->prefilled = static_cast<size_t>(start);
-      r->cached = static_cast<size_t>(start);
       r->pos = start;
       r->prompt_len = r->prompt.size();
       if (cfg_.lookup > 0) {  // the lookup's history starts from the prompt (a resumed request's holds its output too)
@@ -2130,7 +2150,6 @@ void BatchEngine::loop() {
             pk[0].has_lp = true;
           }
           if (!r.prompt_lps.empty()) e.prompt_logprobs = std::move(r.prompt_lps);
-          if (!r.resumed) e.cached_tokens = static_cast<int32_t>(r.cached);
           const Finish f = emit(r, pk[0].tok, pk[0].has_lp ? &pk[0].lp : nullptr, e);
           // a first token that does not finish its request goes to the client here (before its first
           // drafts and the other requests' step); TTFT is taken when it is handed over
@@ -2188,17 +2207,7 @@ void BatchEngine::loop() {
         }
         pf_pend_.group.clear();
       };
-      // XEN_PREFILL_SHARE=s (0<s<1): while other requests decode, prefill gets about s of the loop's wall time (a credit
-      // earned at s x loop time and spent by each prefill call / part); unset: one prefill call or part every loop.
-      static const double pf_share = [] { const char *v = std::getenv("XEN_PREFILL_SHARE"); return v && *v ? std::atof(v) : 0.0; }();
-      const bool pf_shared = decoding && pf_share > 0 && pf_share < 1;
-      const auto pf_now = clock::now();
-      if (!pf_shared) pf_credit_ms_ = 0;
-      else if (pf_loop_t_ != clock::time_point{}) pf_credit_ms_ = std::min(pf_credit_ms_ + pf_share * dsec(pf_now - pf_loop_t_).count() * 1e3, 250.0);
-      pf_loop_t_ = pf_now;
-      const bool pf_hold = pf_shared && pf_credit_ms_ < 0;
-      if (pf_hold) {
-      } else if (pf_pend_.active && !pf_pend_.group.empty()) {
+      if (pf_pend_.active && !pf_pend_.group.empty()) {
         if (!pf_pend_.finished) {  // the next part (all the rest once nothing decodes)
           const auto ta = clock::now();
           pf_pend_.finished = m_.prefill_advance(decoding ? pf_pend_.layers : m_.prefill_layers());
@@ -2407,12 +2416,13 @@ void BatchEngine::loop() {
             });
           });
         } else {
+          if (std::getenv("XEN_CHUNK_TRACE"))
+            std::fprintf(stderr, "PREFILL slot %d chunk %d base %zu of %zu\n", r.slot, n, r.prefilled, r.prompt.size());
           m_.prefill(r.slot, r.prompt.data() + r.prefilled, n, next);
         }
         complete(i, n, depth, rows_lp, fit, t0, dsec(clock::now() - t0).count() * 1e3, 1);
         }
       }
-      if (pf_shared && !pf_hold) pf_credit_ms_ -= dsec(clock::now() - pf_now).count() * 1e3;
     }
 
     // 4. one decode step over every request with a token to feed

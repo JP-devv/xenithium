@@ -314,9 +314,9 @@ json::Value output_items(const std::string &reasoning, const std::string &conten
   return out;
 }
 
-json::Value usage(long long input, long long cached, long long output, long long reasoning) {
+json::Value usage(long long input, long long output, long long reasoning) {
   Value in_d = Value::object();
-  in_d.set("cached_tokens", Value::integer(cached));
+  in_d.set("cached_tokens", Value::integer(0));
   Value out_d = Value::object();
   out_d.set("reasoning_tokens", Value::integer(reasoning));
   Value u = Value::object();

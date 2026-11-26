@@ -199,23 +199,6 @@ json::Value run_power_json(const RunPower &power) {
   return obj;
 }
 
-json::Value miss_json(const Miss &m) {
-  json::Value obj = json::Value::object();
-  obj.set("item", json::Value::string(m.item));
-  obj.set("group", json::Value::string(m.group));
-  obj.set("asked", json::Value::string(m.asked));
-  obj.set("expected", json::Value::string(m.expected));
-  obj.set("got", json::Value::string(m.got));
-  if (!m.why.empty()) obj.set("why", json::Value::string(m.why));
-  return obj;
-}
-
-json::Value misses_json(const std::vector<Miss> &misses) {
-  json::Value arr = json::Value::array();
-  for (const Miss &m : misses) arr.push(miss_json(m));
-  return arr;
-}
-
 json::Value scenario_json(const ScenarioResult &s) {
   json::Value obj = json::Value::object();
   obj.set("id", json::Value::string(s.id));
@@ -245,7 +228,6 @@ json::Value scenario_json(const ScenarioResult &s) {
     rows.push(std::move(r));
   }
   obj.set("rows", std::move(rows));
-  if (!s.misses.empty()) obj.set("misses", misses_json(s.misses));
   return obj;
 }
 
@@ -284,7 +266,6 @@ json::Value headline_json(const Headline &h) {
   obj.set("peak_streams", json::Value::string(h.peak_streams));
   obj.set("best_tokens_per_joule", json::Value::real(h.best_tokens_per_joule));
   if (h.quality_pct >= 0) obj.set("quality_pct", json::Value::real(h.quality_pct));
-  if (!h.quality_misses.empty()) obj.set("quality_misses", misses_json(h.quality_misses));
   return obj;
 }
 
@@ -346,24 +327,6 @@ RunPower run_power_from(const json::Value &obj) {
   return power;
 }
 
-// Runs from before the misses kept a quality miss as a note: `id: expected "X", got "Y"` (Y "(no ANSWER line...)"
-// when there was none). Those notes become misses (without the question or the category, which they did not keep).
-void misses_from_notes(Row &row, std::vector<Miss> &misses) {
-  constexpr std::string_view kExpected = ": expected \"", kGot = "\", got \"";
-  std::erase_if(row.notes, [&](const std::string &note) {
-    const size_t e = note.find(kExpected), g = note.rfind(kGot);
-    if (e == std::string::npos || g == std::string::npos || g < e || note.size() < 2 || note.back() != '"') return false;
-    Miss m;
-    m.item = note.substr(0, e);
-    m.expected = note.substr(e + kExpected.size(), g - e - kExpected.size());
-    std::string got = note.substr(g + kGot.size(), note.size() - g - kGot.size() - 1);
-    if (got.size() >= 2 && got.front() == '(' && got.back() == ')') m.why = got.substr(1, got.size() - 2);
-    else m.got = std::move(got);
-    misses.push_back(std::move(m));
-    return true;
-  });
-}
-
 ScenarioResult scenario_from(const json::Value &obj) {
   ScenarioResult s;
   s.id = text_at(obj, "id"), s.title = text_at(obj, "title"), s.about = text_at(obj, "about"), s.first_error = text_at(obj, "first_error");
@@ -389,11 +352,6 @@ ScenarioResult scenario_from(const json::Value &obj) {
         for (const json::Value &n : notes->arr) row.notes.push_back(n.str);
       s.rows.push_back(std::move(row));
     }
-  if (const json::Value *misses = obj.get_array("misses"))
-    for (const json::Value &m : misses->arr)
-      s.misses.push_back({text_at(m, "item"), text_at(m, "group"), text_at(m, "asked"), text_at(m, "expected"), text_at(m, "got"), text_at(m, "why")});
-  else if (s.id == "quality")
-    for (Row &row : s.rows) misses_from_notes(row, s.misses);
   return s;
 }
 
@@ -457,31 +415,10 @@ Headline headline(const Run &run) {
       if (total > h.peak_total_tps) h.peak_total_tps = total, h.peak_streams = *streams;
       h.best_tokens_per_joule = std::max(h.best_tokens_per_joule, median_of(row, metric::kEfficiency));
     }
-  if (const ScenarioResult *quality = scenario_named(run, "quality")) {
+  if (const ScenarioResult *quality = scenario_named(run, "quality"))
     for (const Row &row : quality->rows)
       if (const Metric *score = metric_named(row, metric::kQualityScore); score && !score->samples.empty()) h.quality_pct = score->samples.front();
-    h.quality_misses = quality->misses;
-  }
   return h;
-}
-
-std::string misses_heading(const ScenarioResult &scenario) {
-  size_t asked = 0;
-  for (const Row &row : scenario.rows)
-    for (const Metric &m : row.metrics)
-      if (m.unit == kFlagUnit) asked += m.samples.size();
-  const size_t n = scenario.misses.size();
-  return std::to_string(n) + (n == 1 ? " wrong answer" : " wrong answers") + (asked >= n && asked > 0 ? " of " + std::to_string(asked) + " asked" : std::string());
-}
-
-std::string given_text(const Miss &miss) { return miss.why.empty() ? "\"" + miss.got + "\"" : "(" + miss.why + ")"; }
-
-std::vector<std::string> unique_notes(const ScenarioResult &scenario) {
-  std::vector<std::string> notes;
-  for (const Row &row : scenario.rows)
-    for (const std::string &note : row.notes)
-      if (std::ranges::find(notes, note) == notes.end()) notes.push_back(note);
-  return notes;
 }
 
 std::string to_json(const Run &run) {
@@ -515,8 +452,6 @@ std::string to_json(const Run &run) {
   config.set("top_p", json::Value::real(i.sampling.top_p));
   config.set("top_k", json::Value::integer(i.sampling.top_k));
   config.set("thinking", json::Value::string(thinking_or_default(i.thinking)));
-  config.set("mode", json::Value::string(i.mode));
-  config.set("mode_version", json::Value::integer(i.mode_version));
   config.set("reply_length", json::Value::string(i.reply_length));
   config.set("corpus", json::Value::string(i.corpus));
   config.set("corpus_version", json::Value::integer(i.corpus_version));
@@ -554,13 +489,7 @@ std::optional<Run> run_from_json(std::string_view text, std::string &err) {
     i.seed = static_cast<uint64_t>(number_at(*config, "seed"));
     i.corpus_version = static_cast<int>(number_at(*config, "corpus_version"));
     i.corpus = text_at(*config, "corpus");
-    if (i.corpus.empty()) i.corpus = "hard";  // runs from before the second set read the engine's own code
-    i.mode = text_at(*config, "mode");
-    i.mode_version = std::max(1, static_cast<int>(number_at(*config, "mode_version")));
-    if (i.mode.empty()) {  // runs from before the modes: the set named "easy" then is the medium corpus now
-      if (i.corpus == "easy") i.corpus = "medium";
-      i.mode = i.corpus == "medium" ? "medium" : "hard";
-    }
+    if (i.corpus.empty()) i.corpus = "hard";  // runs from before the easy set read the engine's own code
     i.sampling = {.temperature = number_at(*config, "temperature"), .top_p = number_at(*config, "top_p"), .top_k = static_cast<int>(number_at(*config, "top_k")), .seed = std::nullopt};
   }
   if (const json::Value *power = root.get_object("power")) i.power = run_power_from(*power);
@@ -630,13 +559,8 @@ std::string render_scenario(const ScenarioResult &scenario) {
     cells.insert(cells.end(), view.rows.begin(), view.rows.end());
     out += table(cells);
   }
-  if (!scenario.misses.empty()) {
-    // a line each, marked, before the notes: a wrong answer is a result, not a remark
-    out += std::string(kIndent) + "\xE2\x9C\x97 " + misses_heading(scenario) + ":\n";
-    for (const Miss &m : scenario.misses)
-      out += std::string(kIndent) + "  \xE2\x9C\x97 " + m.item + (m.group.empty() ? "" : " (" + m.group + ")") + ": expected \"" + m.expected + "\", got " + given_text(m) + "\n";
-  }
-  for (const std::string &note : unique_notes(scenario)) out += std::string(kIndent) + "note: " + note + "\n";
+  for (const Row &row : scenario.rows)
+    for (const std::string &note : row.notes) out += std::string(kIndent) + "note: " + note + "\n";
   if (scenario.power) out += std::string(kIndent) + power_line(scenario) + "\n";
   if (scenario.errors) out += std::string(kIndent) + "first error: " + scenario.first_error + "\n";
   return out;
@@ -647,9 +571,9 @@ std::string render_run(const Run &run) {
   std::string out = "xenithium-bench run " + i.timestamp + "-" + i.name + "\n";
   out += std::string(kIndent) + "endpoint " + i.endpoint + ", model " + i.model + (i.context_tokens ? ", context " + with_thousands(i.context_tokens) + " tokens" : "") +
          (i.kv_pool_tokens ? ", KV pool " + with_thousands(i.kv_pool_tokens) + " tokens" : "") + "\n";
-  char line[520];
-  std::snprintf(line, sizeof(line), "mode %s v%d, suite %s, seed %llu, sampling T %.2f / top-p %.2f / top-k %d, thinking %.*s, replies %s, corpus %s v%d %s, %.0f s", i.mode.c_str(),
-                i.mode_version, i.suite.c_str(), static_cast<unsigned long long>(i.seed), i.sampling.temperature, i.sampling.top_p, i.sampling.top_k,
+  char line[480];
+  std::snprintf(line, sizeof(line), "suite %s, seed %llu, sampling T %.2f / top-p %.2f / top-k %d, thinking %.*s, replies %s, corpus %s v%d %s, %.0f s", i.suite.c_str(),
+                static_cast<unsigned long long>(i.seed), i.sampling.temperature, i.sampling.top_p, i.sampling.top_k,
                 static_cast<int>(thinking_or_default(i.thinking).size()), thinking_or_default(i.thinking).data(), i.reply_length.c_str(), i.corpus.c_str(), i.corpus_version, i.corpus_hash.c_str(),
                 i.seconds);
   out += std::string(kIndent) + line + "\n";
@@ -668,9 +592,6 @@ std::string render_compare(const Run &base, const Run &other) {
   if (base.info.corpus_hash != other.info.corpus_hash || base.info.corpus_version != other.info.corpus_version)
     out += "WARNING: the runs used different corpora or prompt sets (" + base.info.corpus + " version " + std::to_string(base.info.corpus_version) + " against " +
            other.info.corpus + " version " + std::to_string(other.info.corpus_version) + "): their prompts differ.\n";
-  if (base.info.mode != other.info.mode || base.info.mode_version != other.info.mode_version)
-    out += "WARNING: the runs measured in different modes (" + base.info.mode + " v" + std::to_string(base.info.mode_version) + " against " + other.info.mode + " v" +
-           std::to_string(other.info.mode_version) + "): their prompts and method differ, so their numbers do not compare.\n";
   if (base.info.model != other.info.model) out += "note: the runs are of different models.\n";
   if (base.info.reply_length != other.info.reply_length)
     out += "WARNING: the replies were of " + base.info.reply_length + " length against " + other.info.reply_length +

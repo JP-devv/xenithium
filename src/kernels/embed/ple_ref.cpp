@@ -8,7 +8,7 @@
 namespace xenithium::kernels {
 
 namespace {
-float bfr(double v) { return bf16_value(bf16_bits(static_cast<float>(v))); }
+float bfr(double v) { return bf16_value(bf16_bits_from_double(v)); }
 float bff(float v) { return bf16_value(bf16_bits(v)); }
 }  // namespace
 

@@ -68,7 +68,6 @@ std::string range_chart(const std::vector<RangeRow> &rows, const Axes &axes);
 struct DotRow {
   std::string label;
   std::vector<bool> yes;
-  std::vector<std::string> wrong;  // the checks behind its misses (named in the tooltip)
 };
 // One dot per yes / no sample, filled when yes, with the count beside it.
 std::string dot_chart(const std::vector<DotRow> &rows);

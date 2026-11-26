@@ -2,18 +2,14 @@
 // references (kernels/encoder/vit.hpp: position-grid sampling, 2-D rope), then the whole tower on a checkpoint's real
 // weights against the reference's output (HF Qwen3VLVisionModel in bf16 on the CPU: per
 // image the cosine of every token's row and the relative rms error, the tower split over two cards == on one card bit
-// for bit, and the encode time; then the image store on every card of a fabric of up to four cards (each card's embedding
-// gather reads the same image rows).
-#include <algorithm>
+// for bit, and the encode time.
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
-#include <memory>
 #include <random>
 #include <sstream>
-#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -21,7 +17,6 @@
 
 #include "xenithium/arch/common/vision.hpp"
 #include "xenithium/kernels/encoder/vit.hpp"
-#include "xenithium/kernels/head/head.hpp"
 #include "xenithium/kernels/pack.hpp"
 #include "xenithium/model/checkpoint.hpp"
 #include "xenithium/model/config.hpp"
@@ -404,67 +399,6 @@ void video_cases(const std::string &gold, const std::string &model_dir, const st
   }
 }
 
-// The image store on every card of the fabric (up to four, as many as the host has): each card's embedding gather of
-// an image's ids reads the rows the tower wrote, the same rows on every card, and a card past the store is refused
-// (a pointer read past the store's list would fault on the card).
-void store_cases(const std::string &model_dir) {
-  const auto cfg = m::ModelConfig::load(model_dir);
-  const m::VisionConfig vc = m::VisionConfig::parse(cfg);
-  if (!vc.present) return;
-  const auto ck = m::Checkpoint::open(model_dir);
-  const xenithium::l0::Loader loader = xenithium::l0::Loader::open();
-  constexpr size_t kMostCards = 4;  // the widest load an arch makes (qwen38 TP4)
-  std::vector<size_t> ids;
-  for (size_t c = 0; c < std::min(loader.size(), kMostCards); ++c) ids.push_back(c);
-  xenithium::Fabric fab(loader, ids, false);
-  constexpr int kMaxPatches = 1024;
-  constexpr int64_t kRows = 512;
-  const int32_t vocab = static_cast<int32_t>(m::ModelConfig::need_int(cfg.text(), "vocab_size"));
-  xenithium::arch::VisionStore store(fab, std::make_unique<xenithium::arch::VisionTower>(fab, ck, vc, kMaxPatches), vc, vocab, kRows);
-  CHECK(store.cards() == static_cast<int>(fab.size()), "the store holds rows on %d of %zu cards", store.cards(), fab.size());
-  bool refused = false;
-  try {
-    (void)store.pool(static_cast<int>(fab.size()));
-  } catch (const std::out_of_range &) {
-    refused = true;
-  }
-  CHECK(refused, "a card past the store is refused");
-
-  xenithium::util::Image im;  // a gradient, so the rows are not all equal
-  im.w = 160, im.h = 120;
-  im.rgb.resize(static_cast<size_t>(im.w) * im.h * 3);
-  for (size_t i = 0; i < im.rgb.size(); ++i) im.rgb[i] = static_cast<uint8_t>((i * 7) % 251);
-  m::VisionInput in;
-  std::string err;
-  CHECK(m::preprocess(vc, im, static_cast<int64_t>(kMaxPatches) * vc.patch * vc.patch, in, err), "%s", err.c_str());
-  const auto lease = store.add(std::move(in), err);
-  CHECK(lease != nullptr, "store add: %s", err.c_str());
-  if (!lease) return;
-  const int n = lease->tokens;
-  std::vector<int32_t> toks(static_cast<size_t>(n)), mapped(static_cast<size_t>(n));
-  for (int i = 0; i < n; ++i) toks[static_cast<size_t>(i)] = static_cast<int32_t>(lease->base + i);
-  store.prepare(toks.data(), n, mapped.data());
-
-  using hb = xenithium::kernels::head_bf16;
-  const int H = vc.out_hidden;
-  std::vector<std::vector<uint16_t>> rows(fab.size(), std::vector<uint16_t>(static_cast<size_t>(n) * H));
-  for (size_t c = 0; c < fab.size(); ++c) {
-    sycl::queue &q = fab.compute(c);
-    auto *dev_ids = static_cast<int32_t *>(fab.alloc(c, mapped.size() * 4 + 4096));
-    auto *out = static_cast<hb *>(fab.alloc(c, rows[c].size() * 2 + 4096));
-    auto *table = static_cast<hb *>(fab.alloc(c, static_cast<size_t>(H) * 2 + 4096));  // no id < vocab: never read
-    q.memcpy(dev_ids, mapped.data(), mapped.size() * 4).wait();
-    xenithium::kernels::embed_gather_ext(q, table, dev_ids, n, H, 1, out, static_cast<const hb *>(store.pool(static_cast<int>(c))), vocab).wait();
-    q.memcpy(rows[c].data(), out, rows[c].size() * 2).wait();
-    for (void *p : {static_cast<void *>(dev_ids), static_cast<void *>(out), static_cast<void *>(table)}) fab.release(p);
-  }
-  size_t nonzero = 0;
-  for (const uint16_t v : rows[0]) nonzero += v != 0;
-  CHECK(nonzero > rows[0].size() / 2, "card 0 gathered the image's rows (%zu of %zu values nonzero)", nonzero, rows[0].size());
-  for (size_t c = 1; c < fab.size(); ++c) CHECK(rows[c] == rows[0], "card %zu gathers the same image rows as card 0", c);
-  std::printf("  store on %zu cards: %d image tokens gathered on every card\n", fab.size(), n);
-}
-
 }  // namespace
 
 int main(int argc, char **argv) {
@@ -478,7 +412,6 @@ int main(int argc, char **argv) {
     linear_cases(q);
   }
   tower_cases(gold, model_dir, tag);
-  store_cases(model_dir);
   video_cases(argc > 4 ? argv[4] : XENITHIUM_SOURCE_DIR "/.spike/r168/golden/out", model_dir, tag);
   std::printf("%s: %d checks, %d failures\n", g_failures ? "FAIL" : "PASS", g_checks, g_failures);
   return g_failures ? 1 : 0;

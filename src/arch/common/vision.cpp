@@ -100,8 +100,6 @@ struct VisionTower::Card {
 };
 
 size_t VisionTower::bytes_on(const model::VisionConfig &v, int max_patches, int cards, int c) {
-  cards = std::min(cards, kMaxCards);
-  if (c >= cards) return 0;
   const int split = split_of(v, cards);
   const bool first = c == 0, last = c == cards - 1;
   int64_t params = 0;
@@ -116,7 +114,7 @@ size_t VisionTower::bytes(int c) const { return bytes_on(vc_, max_patches_, stat
 
 VisionTower::VisionTower(Fabric &fab, const model::Checkpoint &ck, const model::VisionConfig &vc, int max_patches) : fab_(fab), vc_(vc), max_patches_(max_patches) {
   if (!vc.present) throw std::invalid_argument("vision tower: the checkpoint has no vision_config");
-  const int ncards = std::min(static_cast<int>(fab.size()), kMaxCards);
+  const int ncards = static_cast<int>(std::min<size_t>(fab.size(), 2));
   split_ = split_of(vc, ncards);
   const int H = vc.hidden, I = vc.inter, M = vc.merged_dim(), N = max_patches;
   std::vector<uint16_t> buf;
@@ -187,7 +185,7 @@ VisionTower::VisionTower(Fabric &fab, const model::Checkpoint &ck, const model::
 }
 
 VisionTower::~VisionTower() {
-  for (const auto &C : cards_) fab_.compute(static_cast<size_t>(C->c)).wait();
+  for (size_t c = 0; c < fab_.size() && c < 2; ++c) fab_.compute(c).wait();
   for (void *p : owned_) fab_.release(p);
   if (host_) fab_.release(host_);
 }
@@ -251,12 +249,9 @@ VisionStore::Lease::~Lease() {
 VisionStore::VisionStore(Fabric &fab, std::unique_ptr<VisionTower> tower, const model::VisionConfig &vc, int64_t vocab, int64_t rows)
     : fab_(fab), tower_(std::move(tower)), vc_(vc), vocab_(vocab), rows_(rows) {
   next_base_ = vocab;
-  for (size_t c = 0; c < fab.size(); ++c) {  // every card's embedding gather reads the rows
+  for (size_t c = 0; c < std::min<size_t>(fab.size(), 2); ++c) {
     void *p = fab_.alloc(c, pool_bytes(vc, rows));
-    if (!p) {
-      for (void *q : pool_) fab_.release(q);  // the destructor does not run for a constructor that throws
-      throw std::runtime_error("vision store: out of device memory for the image rows on card " + std::to_string(c));
-    }
+    if (!p) throw std::runtime_error("vision store: out of device memory for the image rows");
     pool_.push_back(p);
   }
 }

@@ -92,7 +92,6 @@ struct Sample {
   int prompt_tokens = 0;
   int completion_tokens = 0;  // from the usage chunk; without one, the number of text events (see usage_reported)
   int cached_tokens = -1;  // usage.prompt_tokens_details.cached_tokens; -1 = not reported
-  bool cached_unknown = false;  // the cache served part of the prompt but how much is unknown (no prefill rate)
   bool usage_reported = false;
   std::string finish_reason;
   std::string text;  // the answer

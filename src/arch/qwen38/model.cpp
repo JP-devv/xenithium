@@ -2,12 +2,14 @@
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <thread>
 #include <filesystem>
 #include <future>
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <cstdlib>
 #include <fstream>
 #include <limits>
 #include <map>
@@ -17,6 +19,7 @@
 
 #include "xenithium/util/env.hpp"
 #include "xenithium/kernels/comm/wire.hpp"
+#include "xenithium/kernels/drafter/dflash.hpp"
 #include "xenithium/kernels/residual/hc.hpp"
 #include "xenithium/kernels/head/logprob.hpp"
 #include "xenithium/kernels/pack.hpp"
@@ -100,8 +103,6 @@ Model::Model(const l0::Loader &loader, Fabric &fab, const std::string &dir, cons
   if (nc_ == 1 && !opt.moe_tp) throw std::invalid_argument("qwen38 model: TP1 needs the expert TP layout (every expert whole on the card)");
   if (nc_ == 4 && !opt.moe_tp) throw std::invalid_argument("qwen38 model: TP4 needs the expert TP layout (every expert in quarters; there is no EP4)");
   if (nc_ != 2 && opt.calib) throw std::invalid_argument("qwen38 model: calibration runs at TP2");
-  if (opt.kv_split == k::QsaKvSplit::tokens && nc_ != kMaxCards)
-    throw std::invalid_argument("qwen38 model: the KV split by tokens needs four cards (TP4: the two cards of a kv head split its tokens)");
   const auto mc = model::ModelConfig::load(dir);
   const auto arch = model::open_arch(mc);
   cfg_ = Config::parse(mc);
@@ -137,9 +138,7 @@ Model::Model(const l0::Loader &loader, Fabric &fab, const std::string &dir, cons
 
   // ---- non-expert weights ----
   model::DeployParams p;
-  p.cards = nc_;
   p.context = cap_;
-  p.kv_shard = opt.kv_split == k::QsaKvSplit::tokens ? model::DeployParams::KvShard::tokens : model::DeployParams::KvShard::heads;
   p.kv_bytes = opt.kv == k::QsaKv::bf16 ? 2 : 1;
   p.kv_v4 = k::qsa_kv_v4(opt.kv);
   auto plan = arch->dense_plan(ck_, p);
@@ -209,9 +208,7 @@ Model::Model(const l0::Loader &loader, Fabric &fab, const std::string &dir, cons
   if (step_cap_ > k::kStepRows32 && (ms_.shape.rot || ms_.shape.a8 || !opt.moe_tp || opt.moe_cpu.mode != "off"))
     throw std::invalid_argument("qwen38 model: steps above 32 rows run the W4A16 experts tensor-parallel, without rotation and without the CPU path");
   gs_ = GdnSet::from(*dense_, cfg_, nc_);
-  qs_ = QsaSet::from(*dense_, cfg_, nc_, opt.kv, opt.kv_split);
-  qsa_ord_.assign(static_cast<size_t>(cfg_.layers), -1);
-  for (size_t i = 0; i < qs_.layers.size(); ++i) qsa_ord_[static_cast<size_t>(qs_.layers[i])] = static_cast<int>(i);
+  qs_ = QsaSet::from(*dense_, cfg_, nc_, opt.kv);
   ps_ = PleSet::from(*dense_, cfg_, nc_);
   if (head_->lora_ld() < hs_.down_ld) throw std::runtime_error("qwen38 model: head lora buffer narrower than a layer mixer's down output");
   if (opt.ple_dir.empty()) ple_tab_ = std::make_unique<PleTable>(ck_, cfg_, opt.ple_threads);
@@ -233,30 +230,16 @@ Model::Model(const l0::Loader &loader, Fabric &fab, const std::string &dir, cons
   // give the tables of the integer rule (ceil(context / trained)) bit for bit
   const k::QsaYarn yarn = k::qsa_yarn_for(cap_, cfg_.max_positions);
   yarn_factor_ = yarn.factor;
-  auto rope_h = k::qsa_rope_table(cap_, k::kQsaRot, cfg_.rope_theta, yarn);
-  // YaRN tiers (ModelOptions::yarn_tiers): the tiers below the context's factor follow its table (the last tier starts
-  // at row 0: a sequence there has the bits of one factor for all); a sequence's rows read row P + its tier's first row
-  if (opt.yarn_tiers && yarn.factor > 1.0 && cfg_.max_positions > 0) {
-    for (int64_t Lt = cfg_.max_positions; Lt < cap_; Lt *= 2) {
-      const k::QsaYarn yt = k::qsa_yarn_for(Lt, cfg_.max_positions);
-      const auto t = k::qsa_rope_table(Lt, k::kQsaRot, cfg_.rope_theta, yt);
-      tier_base_.push_back(static_cast<int64_t>(rope_h.size() / k::kQsaRopeRow));
-      tier_limit_.push_back(Lt);
-      tier_factor_.push_back(yt.factor);
-      rope_h.insert(rope_h.end(), t.begin(), t.end());
-    }
-    if (static_cast<int64_t>(rope_h.size() / k::kQsaRopeRow) > int64_t{2147483647}) throw std::invalid_argument("qwen38 model: YaRN tiers past int32 rows");
-  }
-  tier_base_.push_back(0);
-  tier_limit_.push_back(cap_);
-  tier_factor_.push_back(yarn.factor);
+  const auto rope_h = k::qsa_rope_table(cap_, k::kQsaRot, cfg_.rope_theta, yarn);
+  const bool copy_wire = nc_ == kMaxCards && util::env_flag("XEN_Q38_COPY_WIRE");
+  const bool direct_out = copy_wire && util::env_flag("XEN_Q38_COPY_DIRECT_OUT");
   for (int c = 0; c < nc_; ++c) {
     auto card = std::make_unique<Card>();
     Card &K = *card;
     auto &q = fab.compute(c);
-    auto dev = [&](size_t bytes) {
+    auto dev = [&](size_t bytes, bool peer_copy = false) {
       bytes = std::max<size_t>(bytes, 64);
-      void *ptr = fab.alloc(c, bytes);
+      void *ptr = peer_copy ? fab.alloc_mailbox(c, bytes) : fab.alloc(c, bytes);
       q.memset(ptr, 0, bytes);
       K.mem.push_back(ptr);
       return ptr;
@@ -265,16 +248,18 @@ Model::Model(const l0::Loader &loader, Fabric &fab, const std::string &dir, cons
     // rows past a step's live rows stay finite.
     const size_t R8 = static_cast<size_t>(Head::kRows);  // a step's rows (Head::kRows)
     const size_t act = R8 * H * 2;
+    if (std::getenv("XEN_Q38_VERIFY_NAN"))
+      K.nanwatch = static_cast<unsigned *>(dev(static_cast<size_t>(1 + (cfg_.layers + 7) / 8) * sizeof(unsigned)));
     K.xa = static_cast<bf16 *>(dev(act));
-    K.ya = static_cast<bf16 *>(dev(act));
+    K.ya = static_cast<bf16 *>(dev(act, direct_out));
     K.xm = static_cast<bf16 *>(dev(act));
-    K.ym = static_cast<bf16 *>(dev(act));
+    K.ym = static_cast<bf16 *>(dev(act, direct_out));
     K.seg = static_cast<int32_t *>(dev(sizeof(seg_words_)));
     K.rope = static_cast<bf16 *>(dev(rope_h.size() * 2));
     q.memcpy(K.rope, rope_h.data(), rope_h.size() * 2);
     // pair wire (n = hidden)
     if (nc_ > 1) {  // TP1 has no wire
-      K.pw.inbox = static_cast<uint32_t *>(fab.alloc_mailbox(c, k::pair_wire_words(H, nc_) * 4));
+      K.pw.inbox = static_cast<uint32_t *>(fab.alloc_kernel_mailbox(k::pair_wire_words(H, nc_) * sizeof(uint32_t)));
       K.mem.push_back(K.pw.inbox);
     }
     K.pw.error = static_cast<uint32_t *>(dev(64));
@@ -284,7 +269,7 @@ Model::Model(const l0::Loader &loader, Fabric &fab, const std::string &dir, cons
     K.msc.logits = static_cast<float *>(dev(R8 * ms_.w[c][0].router.n * 4));
     // One routing record per layer: the step's routing stays readable after it (no extra launch).
     K.msc.route = static_cast<k::MoeRoute *>(dev(sizeof(k::MoeRoute) * static_cast<size_t>(L)));
-    if (c == 0 && (!opt.rank_file.empty() || opt.exchange)) {  // the decode reads per (layer, expert), card 0 (both route alike)
+    if (c == 0 && !opt.rank_file.empty()) {  // the decode reads per (layer, expert), card 0 (both route alike)
       hits_ = static_cast<uint32_t *>(dev(static_cast<size_t>(L) * cfg_.experts * 4));
       hits_seen_.assign(static_cast<size_t>(L) * cfg_.experts, 0u);
     }
@@ -298,7 +283,7 @@ Model::Model(const l0::Loader &loader, Fabric &fab, const std::string &dir, cons
       K.msc.hs = static_cast<float *>(dev(k::moe_hs_elems(msh) * 4));
     }
     if (nc_ > 1) {
-      K.mw.inbox = static_cast<uint32_t *>(fab.alloc_mailbox(c, k::moe_wire_words(msh) * 4));
+      K.mw.inbox = static_cast<uint32_t *>(fab.alloc_kernel_mailbox(k::moe_wire_words(msh) * sizeof(uint32_t)));
       K.mem.push_back(K.mw.inbox);
     }
     K.mw.error = static_cast<uint32_t *>(dev(64));
@@ -344,7 +329,7 @@ Model::Model(const l0::Loader &loader, Fabric &fab, const std::string &dir, cons
     auto &sc = K.qsc;
     sc.y = static_cast<float *>(dev(R8 * qw.qkv.n * 4));
     sc.yi = static_cast<float *>(dev(R8 * qw.idx.n * 4));
-    sc.q = static_cast<bf16 *>(dev(R8 * qsh.attn_hq() * k::kQsaDim * 2));
+    sc.q = static_cast<bf16 *>(dev(R8 * qsh.hq() * k::kQsaDim * 2));
     sc.iq = static_cast<bf16 *>(dev(R8 * k::kQsaIdxHeads * k::kQsaIdxDim * 2));
     sc.nblk = static_cast<int32_t *>(dev(R8 * 4));
     sc.score = static_cast<uint32_t *>(dev(k::qsa_score_words(static_cast<int>(cap_), Head::kRows) * 4));
@@ -356,16 +341,6 @@ Model::Model(const l0::Loader &loader, Fabric &fab, const std::string &dir, cons
     sc.part = static_cast<float *>(dev(k::qsa_part_floats(qsh, Head::kRows) * 4));
     sc.attn = static_cast<bf16 *>(dev(R8 * qsh.o_k() * 2));
     sc.partial = static_cast<float *>(dev(R8 * H * 4));
-    if (qsh.kv_ways() > 1) {  // the KV split by tokens: the pair's merge states and its mailbox (a region per QSA layer + the MTP layer's)
-      const int regions = static_cast<int>(qs_.layers.size()) + 1;
-      kv_pair_region_words_ = k::qsa_pair_words(static_cast<int>(R8), qsh.hq());
-      sc.pend = static_cast<float *>(dev(k::qsa_pair_floats(static_cast<int>(R8), qsh.hq()) * 4));
-      sc.pair.inbox = static_cast<uint32_t *>(fab.alloc_mailbox(c, kv_pair_region_words_ * regions * 4));
-      K.mem.push_back(sc.pair.inbox);
-      for (int g = 0; g < regions; ++g) k::qsa_pair_init(q, sc.pair.inbox + kv_pair_region_words_ * g, static_cast<int>(R8), qsh.hq());
-      sc.pair.error = K.pw.error;
-      sc.pair.rows_max = static_cast<int>(R8);
-    }
     // PLE
     const auto &psh = ps_.shape;
     K.ple_st.slot_elems = k::ple_ring_elems(psh);
@@ -456,7 +431,7 @@ Model::Model(const l0::Loader &loader, Fabric &fab, const std::string &dir, cons
         }
         K.pf.mw.rows_max = R;
         if (nc_ > 1) {
-          K.pf.mw.inbox = static_cast<uint32_t *>(fab.alloc_mailbox(c, k::moe_rows_wire_words(msh, R) * 4));
+          K.pf.mw.inbox = static_cast<uint32_t *>(fab.alloc_kernel_mailbox(k::moe_rows_wire_words(msh, R) * 4));
           K.mem.push_back(K.pf.mw.inbox);
         }
         K.pf.mw.error = K.mw.error;
@@ -489,7 +464,7 @@ Model::Model(const l0::Loader &loader, Fabric &fab, const std::string &dir, cons
         K.pf.pw.rows_max = R;
         K.pf.pw.n_max = H;
         if (nc_ > 1) {
-          K.pf.pw.inbox = static_cast<uint32_t *>(fab.alloc_mailbox(c, k::pair_rows_wire_words(R, H, nc_) * 4));
+          K.pf.pw.inbox = static_cast<uint32_t *>(fab.alloc_kernel_mailbox(k::pair_rows_wire_words(R, H, nc_) * 4));
           K.mem.push_back(K.pf.pw.inbox);
         }
         K.pf.pw.error = K.pw.error;
@@ -504,15 +479,6 @@ Model::Model(const l0::Loader &loader, Fabric &fab, const std::string &dir, cons
           K.pf.split.flags = static_cast<uint32_t *>(fab.alloc_mailbox(c, k::kPairSplitFlagBytes));
           K.mem.push_back(K.pf.split.flags);
           q.memset(K.pf.split.flags, 0, k::kPairSplitFlagBytes);
-          K.pf.flag_lines[0] = K.pf.split.flags;
-          if (opt.prefill_graphs) {  // the prompt-call graphs' flag sets, one aligned slice each
-            constexpr size_t kSetStride = 4096;
-            static_assert(k::kPairSplitFlagBytes <= kSetStride);
-            auto *sets = static_cast<std::byte *>(fab.alloc_mailbox(c, kSetStride * kPfGraphsMax));
-            K.mem.push_back(sets);
-            q.memset(sets, 0, kSetStride * kPfGraphsMax);
-            for (int i = 0; i < kPfGraphsMax; ++i) K.pf.flag_lines[1 + i] = reinterpret_cast<uint32_t *>(sets + kSetStride * static_cast<size_t>(i));
-          }
           K.pf.split.error = K.pw.error;
           if (opt.prefill_wire_bf16) {  // the bf16 wire's stage (the peer's rows converted before the copy)
             K.pf.split.bf16 = true;
@@ -534,7 +500,7 @@ Model::Model(const l0::Loader &loader, Fabric &fab, const std::string &dir, cons
         r.attn = static_cast<bf16 *>(dev((rows + 4) * static_cast<size_t>(qs_.shape_of(c).o_k()) * 2));
         r.partial = static_cast<float *>(dev(rows * H * 4));
         const size_t rr = rows + 4, B = k::kQsaRowsBatch;
-        r.q = static_cast<bf16 *>(dev(rr * qs_.shape_of(c).attn_hq() * k::kQsaDim * 2));
+        r.q = static_cast<bf16 *>(dev(rr * qs_.shape_of(c).hq() * k::kQsaDim * 2));
         r.iq = static_cast<bf16 *>(dev(rr * k::kQsaIdxHeads * k::kQsaIdxDim * 2));
         r.nblk = static_cast<int32_t *>(dev(rr * 4));
         r.sel = static_cast<int32_t *>(dev(rr * k::kQsaTopBlocks * 4));
@@ -544,15 +510,6 @@ Model::Model(const l0::Loader &loader, Fabric &fab, const std::string &dir, cons
         r.cand_id = static_cast<int32_t *>(dev(B * 16 * k::kQsaTopBlocks * 4));
         r.cand_n = static_cast<int32_t *>(dev(B * 16 * 4));
         r.part = static_cast<float *>(dev(k::qsa_part_floats(qs_.shape_of(c)) / k::kQsaRows * B * 4));
-        if (qsh.kv_ways() > 1) {  // the split's merge states and mailbox for a call's rows (lanes by row offset)
-          const int RR = static_cast<int>(rr);
-          r.pend = static_cast<float *>(dev(k::qsa_pair_floats(RR, qsh.hq()) * 4));
-          r.pair.inbox = static_cast<uint32_t *>(fab.alloc_mailbox(c, k::qsa_pair_words(RR, qsh.hq()) * 4));
-          K.mem.push_back(r.pair.inbox);
-          k::qsa_pair_init(q, r.pair.inbox, RR, qsh.hq());
-          r.pair.error = K.pw.error;
-          r.pair.rows_max = RR;
-        }
       }
       {
         const auto &psh = ps_.shape;
@@ -635,6 +592,18 @@ Model::Model(const l0::Loader &loader, Fabric &fab, const std::string &dir, cons
       for (int d = 0; d < nc_; ++d) cards_[static_cast<size_t>(c)]->pf.sel[j].flags_of[d] = cards_[static_cast<size_t>(d)]->pf.sel[j].flags;
   if (nc_ == kMaxCards) {  // the four-card wires (TP4): every card's inbox in each, by the host
     k::WireQuad dq, mq, rq, mrq;  // decode pair / decode MoE / rows pair / rows MoE inboxes
+    if (copy_wire) {
+      fab.alloc_step_copy(attention_copy_, step_cap_, H, false, cards_[0]->mem);
+      fab.alloc_step_copy(moe_copy_, step_cap_, H, true, cards_[0]->mem);
+      if (direct_out) {
+        for (int c = 0; c < nc_; ++c) {
+          attention_copy_.outputs[c] = cards_[static_cast<size_t>(c)]->ya;
+          moe_copy_.outputs[c] = cards_[static_cast<size_t>(c)]->ym;
+        }
+      }
+      dq.copy = &attention_copy_;
+      mq.copy = &moe_copy_;
+    }
     for (int c = 0; c < nc_; ++c) {
       const Card &K = *cards_[static_cast<size_t>(c)];
       dq.inbox[c] = K.pw.inbox, mq.inbox[c] = K.mw.inbox, rq.inbox[c] = K.pf.pw.inbox, mrq.inbox[c] = K.pf.mw.inbox;
@@ -643,10 +612,6 @@ Model::Model(const l0::Loader &loader, Fabric &fab, const std::string &dir, cons
       Card &K = *cards_[static_cast<size_t>(c)];
       K.pw.quad = dq, K.mw.quad = mq, K.pf.pw.quad = rq;
       K.pw.quad.card = K.mw.quad.card = K.pf.pw.quad.card = c;
-      if (K.qsc.pair.inbox) {  // the KV split by tokens: the pair's mailboxes (card ^ 1)
-        K.qsc.pair.peer_inbox = cards_[static_cast<size_t>(c ^ 1)]->qsc.pair.inbox;
-        K.pf.qsa.pair.peer_inbox = cards_[static_cast<size_t>(c ^ 1)]->pf.qsa.pair.inbox;
-      }
       k::pair_wire_init(fab.compute(c), H, K.pw.inbox, nc_).wait();
       k::moe_wire_init(fab.compute(c), ms_.shape_of(c), K.mw.inbox).wait();
       k::pair_rows_wire_init(fab.compute(c), K.pf.pw.rows_max, K.pf.pw.n_max, K.pf.pw.inbox, nc_).wait();
@@ -677,6 +642,7 @@ Model::Model(const l0::Loader &loader, Fabric &fab, const std::string &dir, cons
     dop.prefill_rows = opt.prefill_chunk;
     dop.profile = opt.dflash_profile;
     dop.ctx_defer = opt.dflash_ctx_defer;
+    dop.copy_wire = attention_copy_.ready != nullptr;
     dop.conf_cut = opt.dflash_conf_cut;
     // draft trees (DDTree): trees of the 8-row block, verified on the tree rows of QSA / PLE / GDN; not beside the MTP
     // layer (its pass 1 writes KV over the verify's rows before the accept)
@@ -801,59 +767,10 @@ Model::Model(const l0::Loader &loader, Fabric &fab, const std::string &dir, cons
     const double free_now = known ? *std::min_element(vram_free.begin(), vram_free.end()) : 0.0;
     if (!known && opt.hot < 0) throw std::runtime_error("qwen38 model: sysman free VRAM unavailable; pass a hot count");
     int64_t fit = per_total;
-    double room = 0;
     if (known) {
       ls_.free_after_dense_gib = free_now / 1073741824.0;
-      room = free_now - (opt.reserve_gib + ls_.onednn_gib) * 1073741824.0;
+      const double room = free_now - (opt.reserve_gib + ls_.onednn_gib) * 1073741824.0;
       fit = std::clamp<int64_t>(static_cast<int64_t>(room / static_cast<double>(stride)), 0, per_total);
-    }
-    // Some experts stay cold: the live exchange's spare blobs and the prefill's layer-ahead fetch buffers, out of the hot
-    // experts (allocated now, so the count below sees them)
-    if ((opt.hot >= 0 ? std::min(opt.hot, fit) : fit) < per_total && opt.moe_tp && opt.moe_cpu.mode == "off") {
-      const int per = cfg_.experts;
-      size_t extra = 0;
-      for (int c = 0; c < nc_; ++c) {
-        Card &K = *cards_[static_cast<size_t>(c)];
-        if (opt.exchange)
-          for (int i = 0; i < opt.exchange_spares; ++i) {
-            auto *p = static_cast<uint8_t *>(fab.alloc(c, stride));
-            x_spare_mem_[c].push_back(p);
-            x_spare_[c].push_back(p);
-          }
-        if (opt.prefill_fetch > 0) {
-          auto dev = [&](size_t b) {
-            void *p = fab.alloc(c, std::max<size_t>(b, 4096));
-            K.mem.push_back(p);
-            return p;
-          };
-          for (int b = 0; b < kPfFetchBufs; ++b) {
-            K.pf.fbuf[b] = static_cast<uint8_t *>(dev(stride * static_cast<size_t>(opt.prefill_fetch)));
-            K.pf.ftab[b] = static_cast<const uint8_t **>(dev(static_cast<size_t>(per) * 8));
-            K.pf.fflag[b] = static_cast<uint8_t *>(dev(static_cast<size_t>(per)));
-          }
-          K.pf.htab = static_cast<const uint8_t **>(fab.alloc_host(static_cast<size_t>(L) * per * 8));
-          K.pf.hflag = static_cast<uint8_t *>(fab.alloc_host(static_cast<size_t>(L) * per));
-          K.mem.push_back(K.pf.htab);
-          K.mem.push_back(K.pf.hflag);
-          K.pf.hsrc.assign(static_cast<size_t>(L), {});
-          pf_fetch_cap_ = opt.prefill_fetch;
-          ls_.prefill_fetch = pf_fetch_cap_;
-          if (c == 0) {  // the fetch order: per layer by ranking (no ranking: by id)
-            pf_fetch_order_.resize(static_cast<size_t>(L) * per);
-            const bool ranked = so.rank && so.rank->size() == static_cast<size_t>(L) * cfg_.experts;
-            for (int l = 0; l < L; ++l) {
-              int16_t *o = pf_fetch_order_.data() + static_cast<size_t>(l) * per;
-              for (int i = 0; i < per; ++i) o[i] = static_cast<int16_t>(i);
-              if (ranked) {
-                const double *rk = so.rank->data() + static_cast<size_t>(l) * cfg_.experts;
-                std::stable_sort(o, o + per, [&](int16_t a, int16_t b) { return rk[a] > rk[b]; });
-              }
-            }
-          }
-        }
-        if (c == 0) extra = (x_spare_[0].size() + (pf_fetch_cap_ > 0 ? kPfFetchBufs * static_cast<size_t>(pf_fetch_cap_) : 0)) * stride;
-      }
-      if (known) fit = std::clamp<int64_t>(static_cast<int64_t>((room - static_cast<double>(extra)) / static_cast<double>(stride)), 0, per_total);
     }
     so.hot_per_card = opt.hot >= 0 ? std::min(opt.hot, fit) : fit;
     if (opt.hot >= 0 && so.hot_per_card < std::min(opt.hot, per_total)) ls_.hot_asked = opt.hot;
@@ -895,7 +812,7 @@ Model::Model(const l0::Loader &loader, Fabric &fab, const std::string &dir, cons
     K.tab = static_cast<const uint8_t **>(fab.alloc(c, t.size() * 8));
     K.mem.push_back(K.tab);
     fab.compute(c).memcpy(K.tab, t.data(), t.size() * 8).wait();
-    if (K.pf.moe.stage_cap > 0 || opt.moe_cpu.mode != "off" || pf_fetch_cap_ > 0) {  // cold flags for the prefill staging, the fetch and the CPU path
+    if (K.pf.moe.stage_cap > 0 || opt.moe_cpu.mode != "off") {  // cold flags for the prefill staging and the CPU path
       std::vector<uint8_t> cf(static_cast<size_t>(L) * per, 0);
       for (int l = 0; l < L; ++l)
         for (int i = 0; i < per; ++i) {
@@ -927,7 +844,6 @@ Model::Model(const l0::Loader &loader, Fabric &fab, const std::string &dir, cons
   }
   setup_moe_cpu(opt);
   lend_setup(opt, so.rank);
-  exchange_setup(opt, so.rank);
   dsprof_ = util::env_flag("XEN_DEC_PROFILE");
   if (dsprof_)
     for (int c = 0; c < nc_; ++c) {
@@ -944,15 +860,6 @@ Model::Model(const l0::Loader &loader, Fabric &fab, const std::string &dir, cons
 
 Model::~Model() {
   for (size_t c = 0; c < cards_.size(); ++c) fab_.compute(c).wait();
-  if (xpl_) {
-    for (int c = 0; c < nc_; ++c) fab_.copy(static_cast<size_t>(c)).wait();
-    std::fprintf(stderr, "qwen38: expert exchange: %lld experts moved in %lld rounds (%lld put off), %.1f ms of host time\n",
-                 static_cast<long long>(x_st_.swaps), static_cast<long long>(x_st_.rounds), static_cast<long long>(x_st_.deferred), x_st_.host_ms);
-  }
-  for (int c = 0; c < kMaxCards; ++c) {
-    for (void *p : x_spare_mem_[c]) fab_.release(p);
-    if (x_upd_[c]) fab_.release(x_upd_[c]);
-  }
   if (cpu_on_) {
     const auto st = moe_cpu_stats();
     std::fprintf(stderr, "qwen38: MoE CPU path: %llu requests, %llu experts (%.1f us per request)%s\n", static_cast<unsigned long long>(st.requests),
@@ -960,9 +867,6 @@ Model::~Model() {
                  st.timed_out ? "; switched off after a timeout" : "");
   }
   for (auto &p : cpu_pool_) p.reset();  // the pools read the host buffers K.mem frees below
-  if (pf_graphs_n_ > 0)
-    std::fprintf(stderr, "qwen38: prompt-call graphs: %d recorded (%.0f ms recording + finalizing), %lld calls replayed\n", pf_graphs_n_, pf_graphs_ms_,
-                 static_cast<long long>(pf_graphs_replayed_));
   try {
     save_ranking();  // the counts since the last save
   } catch (const std::exception &e) {
@@ -988,14 +892,6 @@ Model::~Model() {
 void Model::use_slot(int slot) {
   if (slot < 0 || slot >= slots()) throw std::invalid_argument("qwen38 model: no such slot");
   slot_ = slot;
-}
-
-void Model::set_rope_tier(int slot, int t) {
-  if (slot < 0 || slot >= slots()) throw std::invalid_argument("qwen38 model: no such slot");
-  if (t < 0 || t >= rope_tiers()) throw std::invalid_argument("qwen38 model: no YaRN tier " + std::to_string(t));
-  Seq &sq = seqs_[static_cast<size_t>(slot)];
-  if (sq.pos != 0) throw std::logic_error("qwen38 model: a sequence's YaRN tier is set at position 0");
-  sq.rope_delta = tier_base_[static_cast<size_t>(t)];
 }
 
 void Model::begin_sequence() {
@@ -1273,14 +1169,11 @@ void Model::kv_pool_alloc(int pool_pages) {
       return ptr;
     };
     auto pages = [&](k::QsaCache &cc, const k::QsaShape &s, std::vector<void *> &mem) {
-      // the KV split by tokens with draft trees: the tree step area's rows past the pool's (QsaCache::tree_row0)
-      const size_t area = s.kv_ways() > 1 && cc.tkc ? static_cast<size_t>(k::kQsaTreeAreaRows) * s.hkv() : 0;
-      cc.k = static_cast<uint8_t *>(dev(PP * k::qsa_page_kv_bytes(s) + area * k::kQsaDim * s.kv_elem(), mem));
-      cc.v = static_cast<uint8_t *>(dev(PP * k::qsa_page_v_bytes(s) + area * s.v_row_bytes(), mem));
-      cc.ks = static_cast<float *>(dev((PP * k::qsa_page_scale_floats(s) + area) * 4, mem));
-      cc.vs = static_cast<float *>(dev((PP * k::qsa_page_vscale_floats(s) + area * s.v_scale_bytes() / 4) * 4, mem));
+      cc.k = static_cast<uint8_t *>(dev(PP * k::qsa_page_kv_bytes(s), mem));
+      cc.v = static_cast<uint8_t *>(dev(PP * k::qsa_page_v_bytes(s), mem));
+      cc.ks = static_cast<float *>(dev(PP * k::qsa_page_scale_floats(s) * 4, mem));
+      cc.vs = static_cast<float *>(dev(PP * k::qsa_page_vscale_floats(s) * 4, mem));
       cc.kc = static_cast<bf16 *>(dev(PP * k::qsa_page_kc_elems() * 2, mem));
-      cc.tree_row0 = area ? static_cast<int>(PP * s.hkv() * s.page_tokens()) : -1;
     };
     Card &K = *cards_[static_cast<size_t>(c)];
     for (int l : qs_.layers) pages(K.qc[static_cast<size_t>(l)], qs_.shape_of(c), K.mem);
@@ -1294,16 +1187,6 @@ void Model::kv_pool_alloc(int pool_pages) {
     q.wait();
   }
   kvp_.clear_dirty();
-}
-
-k::QsaScratch Model::qsa_pair_region(const k::QsaScratch &sc, int region) const {
-  k::QsaScratch r = sc;
-  if (r.pair.inbox) {
-    r.pair.inbox += kv_pair_region_words_ * static_cast<size_t>(region);
-    r.pair.peer_inbox += kv_pair_region_words_ * static_cast<size_t>(region);
-    r.pair_parity = 0;
-  }
-  return r;
 }
 
 void Model::step(const int32_t *tokens, int rows) {
@@ -1459,6 +1342,8 @@ void Model::verify_batch(const std::vector<SeqRows> &segs) {
     const auto &g = segs[static_cast<size_t>(i)];
     int64_t toks[Head::kRows];
     for (int r = 0; r < g.rows; ++r) {
+      if (g.tokens[r] < 0 || g.tokens[r] >= cfg_.vocab)
+        throw std::runtime_error("qwen38 model: invalid verify token " + std::to_string(g.tokens[r]) + " at row " + std::to_string(r0 + r));
       toks[r] = g.tokens[r];
       tokens[r0 + r] = g.tokens[r];
     }
@@ -1491,7 +1376,6 @@ void Model::verify_batch(const std::vector<SeqRows> &segs) {
     const Seq &sq = seqs_[static_cast<size_t>(segs[static_cast<size_t>(i)].slot)];
     int32_t *w = seg_words_ + i * k::kSegRec;
     w[k::kSegPos] = static_cast<int32_t>(sq.pos);
-    w[k::kSegRope] = static_cast<int32_t>(sq.rope_delta);  // its YaRN tier's table rows (qsa.hpp)
     w[k::kSegAccept] = sq.last_rows;
     amax = std::max(amax, sq.last_rows);
     w[k::kSegParity] = sq.gdn_par;
@@ -1545,6 +1429,27 @@ void Model::verify_batch(const std::vector<SeqRows> &segs) {
     }
   }
   head_->wait();
+  if (cards_[0]->nanwatch) {
+    const char *names[] = {"attention input", "attention output", "MoE input", "MoE output"};
+    std::vector<unsigned> bits(static_cast<size_t>(1 + (cfg_.layers + 7) / 8));
+    static int reports = 0;
+    for (int c = 0; c < nc_ && reports < 32; ++c) {
+      const Card &K = *cards_[static_cast<size_t>(c)];
+      fab_.compute(c).memcpy(bits.data(), K.nanwatch, bits.size() * sizeof(unsigned)).wait_and_throw();
+      for (int l = 0; l < cfg_.layers; ++l) {
+        const unsigned stages = (bits[static_cast<size_t>(l / 8)] >> (4 * (l % 8))) & 15u;
+        if (!stages) continue;
+        uint32_t errors[2] = {};
+        fab_.compute(c).memcpy(errors, K.pw.error, sizeof(uint32_t)).wait_and_throw();
+        fab_.compute(c).memcpy(errors + 1, K.mw.error, sizeof(uint32_t)).wait_and_throw();
+        std::fprintf(stderr, "Q38NAN card %d rows %d layer %d %s (%s) attention wire %u MoE wire %u owner %d GDN0 local 0x%x\n",
+                     c, rows, l, names[std::countr_zero(stages)], cfg_.full_attention[l] ? "QSA" : "GDN",
+                     errors[0], errors[1], dec_by_owner(rows), bits.back());
+        ++reports;
+        break;
+      }
+    }
+  }
   for (int c = 0; c < nc_; ++c)
     if (__atomic_load_n(&ple_words_[32 + 16 * c], __ATOMIC_ACQUIRE) != 0u)
       throw std::runtime_error("qwen38 model: card " + std::to_string(c) + " timed out waiting for the step's PLE rows");
@@ -1552,7 +1457,6 @@ void Model::verify_batch(const std::vector<SeqRows> &segs) {
   t_.submit = std::chrono::duration<double, std::milli>(t2 - t1).count();
   t_.wait = since_ms(t2);
   if (rec_ && rec_->due()) save_ranking();  // once a period, the step done (a ~0.1 MB copy + the file)
-  exchange_tick();  // the live expert exchange's next stage (between steps: nothing reads a blob now)
   if (cpu_on_ && !cpu_timeout_seen_)  // a card gave up waiting for the pool (two host words per step)
     for (int c = 0; c < nc_; ++c)
       if (__atomic_load_n(&cpu_link_[c].mail->timeouts, __ATOMIC_RELAXED) != 0u && !cpu_timeout_seen_) {
@@ -1588,10 +1492,8 @@ void Model::verify_batch(const std::vector<SeqRows> &segs) {
 // dec_ple_combine), for a drafter feature (the streams' mean: dec_feature) and at the step's end (dec_final_mix:
 // lm_head, the MTP layer and the probes read every row on every card). Each row runs the same kernels on the same
 // values in the same order: the same bits.
-// The mode is a function of the step's rows alone, so a step graph's key does not change, and a recorded graph
-// replays every launch: below kernels::kOwnerCopyMinRows rows each is a mailbox kernel (its words are their own flags),
-// from there the sums and the mixers' shares go by peer copies whose flags count in device words (the copy path,
-// comm/wire.hpp: -0.7 % of a 24-row step, -1.2 % of a 32-row one, -3.1 % of a 64-row one).
+// The mode is a function of the step's rows alone, so a step graph's key does not change, and every launch is a
+// mailbox kernel (its words are their own flags), so a recorded graph replays it.
 namespace {
 // The residual streams' mailbox carries two messages a step: before the PLE block and after the final mixer.
 constexpr int kDecResParityPle = 0, kDecResParityEnd = 1;
@@ -1611,7 +1513,7 @@ void Model::dec_owner_init() {
   auto mailboxes = [&](size_t words) {
     k::OwnerMail mail;
     for (int c = 0; c < nc_; ++c) {
-      auto *inbox = static_cast<uint32_t *>(fab_.alloc_mailbox(static_cast<size_t>(c), words * sizeof(uint32_t)));
+      auto *inbox = static_cast<uint32_t *>(fab_.alloc_kernel_mailbox(words * sizeof(uint32_t)));
       cards_[static_cast<size_t>(c)]->mem.push_back(inbox);
       k::owner_mail_init(fab_.compute(c), inbox, words).wait();
       mail.inbox[static_cast<size_t>(c)] = inbox;
@@ -1635,61 +1537,18 @@ void Model::dec_owner_init() {
     K.own.mw.owner = on_card(moe_sum);
     K.own.xa = share(xa), K.own.xm = share(xm), K.own.out = share(out), K.own.feat = share(feat), K.own.res = share(res), K.own.sel = share(sel);
   }
-  // The copy path (kernels::OwnerFlags; steps of kOwnerCopyMinRows rows and more): per use every card's flag lines
-  // (mailbox memory) and its count line, zeroed.
-  auto zeroed = [&](int c, size_t bytes, bool mailbox = false) {
-    bytes = std::max<size_t>(bytes, 4096);
-    void *p = mailbox ? fab_.alloc_mailbox(static_cast<size_t>(c), bytes) : fab_.alloc(static_cast<size_t>(c), bytes);
-    cards_[static_cast<size_t>(c)]->mem.push_back(p);
-    fab_.compute(c).memset(p, 0, bytes).wait();
-    return p;
-  };
-  auto flags = [&]() {
-    std::array<k::OwnerFlags, k::kWireCardsMax> fl{};
-    std::array<uint32_t *, k::kWireCardsMax> lines{};
-    for (int c = 0; c < nc_; ++c) lines[static_cast<size_t>(c)] = static_cast<uint32_t *>(zeroed(c, k::kOwnerCopyLineBytes, true));
-    for (int c = 0; c < nc_; ++c) {
-      fl[static_cast<size_t>(c)].lines = lines;
-      fl[static_cast<size_t>(c)].count = static_cast<uint32_t *>(zeroed(c, k::kOwnerCopyCountBytes));
-    }
-    return fl;
-  };
-  // The mixer outputs' shares. The buffers are named per call (dec_mixer). Writing into a peer's buffer is safe by the
-  // step's order: a card's next share into xa (xm) follows its attention (MoE) owner sum of the layer, which needs every
-  // peer's partials, and a peer sends those after its kernels that read xa (xm).
-  for (k::OwnerShare Card::Own::*use : {&Card::Own::xa, &Card::Own::xm}) {
-    const auto fl = flags();
-    for (int c = 0; c < nc_; ++c) (cards_[static_cast<size_t>(c)]->own.*use).copy.flags = fl[static_cast<size_t>(c)];
-  }
-  // The owner sums: every card's receive buffer of the use; the MoE's also takes its rows' fp32 sums (MoeScratch::acc).
-  auto sum_copy = [&]() {
-    std::array<k::OwnerSumCopy, k::kWireCardsMax> cp{};
-    const auto fl = flags();
-    std::array<float *, k::kWireCardsMax> recv{};
-    for (int c = 0; c < nc_; ++c) recv[static_cast<size_t>(c)] = static_cast<float *>(zeroed(c, k::owner_sum_copy_elems(H) * sizeof(float)));
-    for (int c = 0; c < nc_; ++c) cp[static_cast<size_t>(c)].recv = recv, cp[static_cast<size_t>(c)].flags = fl[static_cast<size_t>(c)];
-    return cp;
-  };
-  const auto attn_copy = sum_copy(), moe_copy = sum_copy();
-  for (int c = 0; c < nc_; ++c) {
-    Card &K = *cards_[static_cast<size_t>(c)];
-    K.own.pw.copy = attn_copy[static_cast<size_t>(c)];
-    K.own.mw.copy = moe_copy[static_cast<size_t>(c)];
-    K.msc.acc = static_cast<float *>(zeroed(c, static_cast<size_t>(k::kMoeRows) * H * sizeof(float)));
-  }
 }
 
 k::HcEvents Model::dec_mixer(int c, int rows, const DecMixer &m) {
   auto &q = fab_.compute(c);
   if (!dec_by_owner(rows)) return k::hc_mixer(q, hs_.shape, rows, head_->state(c), m.block, *m.weights, head_->scratch(c), m.out);
   k::HcEvents e = k::hc_mixer_at(q, hs_.shape, k::owner_rows(c, rows), head_->state(c), m.block, *m.weights, head_->scratch(c), m.out);
-  k::OwnerShare share = *m.share;
-  if (share.copy.on()) {  // the copy path's buffers: every card's xa, or every card's xm
-    const bool xa = m.out == cards_[static_cast<size_t>(c)]->xa;
-    for (int d = 0; d < nc_; ++d) share.copy.buf[static_cast<size_t>(d)] = xa ? cards_[static_cast<size_t>(d)]->xa : cards_[static_cast<size_t>(d)]->xm;
-  }
-  e.up = k::owner_share(q, rows, cfg_.hidden, m.out, share, m.parity);
+  e.up = k::owner_share(q, rows, cfg_.hidden, m.out, *m.share, m.parity);
   return e;
+}
+
+bool Model::dec_by_owner(int rows) const {
+  return !attention_copy_.ready && nc_ == kMaxCards && rows >= kDecOwnerMinRows;
 }
 
 sycl::event Model::dec_ple_combine(int c, int rows, const bf16 *block) {
@@ -1743,6 +1602,17 @@ void Model::submit_step(int rows, int seg_key, int bound) {
   // tree rows (QSA / PLE / GDN tree instances); a replay of an accepted path (the GDN tree core)
   const bool tree = seg_key_tree(seg_key), gdn_tree = tree || seg_key_replay(seg_key);
   const bool by_owner = dec_by_owner(rows);  // the owner sums' wires (the mixers: dec_mixer)
+  const bool watch = cards_[0]->nanwatch != nullptr;
+  const auto trace = [&](int c, int l, int stage, const bf16 *out, bool owner_only) {
+    if (!watch) return;
+    const auto span = owner_only && by_owner ? k::owner_rows(c, rows) : k::RowRange{0, rows};
+    const int H = cfg_.hidden;
+    k::df_nanwatch(fab_.compute(c), span.rows() * H, out + static_cast<size_t>(span.lo) * H,
+                   cards_[static_cast<size_t>(c)]->nanwatch + l / 8, 1u << (4 * (l % 8) + stage));
+  };
+  if (watch)
+    for (int c = 0; c < nc_; ++c)
+      fab_.compute(c).memset(cards_[static_cast<size_t>(c)]->nanwatch, 0, static_cast<size_t>(1 + (L + 7) / 8) * sizeof(unsigned));
   marks_.clear();
   for (auto &m : dec_marks_) m.clear();
   for (auto &m : dec_nodes_) m.clear();
@@ -1780,6 +1650,7 @@ void Model::submit_step(int rows, int seg_key, int bound) {
       const auto he = dec_mixer(c, rows, {blk, &hs_.attn[c][l], K.xa, &K.own.xa, pair_parity_});
       mark(c, StepProfile::hc, he.norm, he.up);
       dec_stamp(c, StepProfile::hc);
+      trace(c, l, 0, K.xa, false);
       if (dflash_ && df_feat_at_[static_cast<size_t>(l)] >= 0)  // a drafter feature (the mixer combined the block)
         dec_feature(c, rows, df_feat_at_[static_cast<size_t>(l)]);
       const k::PairWire *pair_wire = by_owner ? &K.own.pw : wire_of(K.pw);
@@ -1787,7 +1658,7 @@ void Model::submit_step(int rows, int seg_key, int bound) {
         k::QsaStep qst{K.seg, bound, k::kSegRec, seg_rows};
         qst.tree = tree;
         qst.every = bound <= kDecEveryBound;  // the first bound bucket selects every block
-        k::QsaScratch qsc = qsa_pair_region(K.qsc, qsa_ord_[static_cast<size_t>(l)]);
+        k::QsaScratch qsc = K.qsc;
         qsc.stamps = dec_inner_stamps(c, kMarkQsa, k::kQsaStamped);
         // from kDecSelOwnerFrom tokens of step bound each owner scores and selects its own rows and shares their
         // selection (the same bits as every card selecting every row)
@@ -1807,9 +1678,16 @@ void Model::submit_step(int rows, int seg_key, int bound) {
         g.commit = gdn_commit;
         g.tree = gdn_tree, g.tree_S = K.tree_S;
         const auto e = k::gdn_decode(q, gs_.shape_of(c), rows, K.xa, gs_.w[c][l], g, step_parity_, K.gsc, pair_wire, pair_parity_, K.ya);
+        if (watch && l == 0) {
+          auto *flag = K.nanwatch + (L + 7) / 8;
+          k::df_nanwatch(q, rows * gs_.w[c][l].qkvz.n, K.gsc.y, flag, 1u, true);
+          k::df_nanwatch(q, rows * gs_.shape_of(c).val_w(), K.gsc.core, flag, 2u);
+          k::df_nanwatch(q, rows * cfg_.hidden, K.gsc.partial, flag, 4u, true);
+        }
         mark(c, StepProfile::gdn, e.qkvz, e.reduce);
         dec_stamp(c, StepProfile::gdn);
       }
+      trace(c, l, 1, K.ya, true);
     }
     if (gdn_cap_ && !cfg_.full_attention[l]) {  // calibration inputs (both cards submitted: safe to wait)
       const size_t H = static_cast<size_t>(cfg_.hidden), VWc = static_cast<size_t>(gs_.shape_of(0).val_w()), R = static_cast<size_t>(rows);
@@ -1828,6 +1706,7 @@ void Model::submit_step(int rows, int seg_key, int bound) {
       const auto he = dec_mixer(c, rows, {K.ya, &hs_.mlp[c][l], K.xm, &K.own.xm, moe_parity_});
       mark(c, StepProfile::hc, he.norm, he.up);
       dec_stamp(c, StepProfile::hc);
+      trace(c, l, 2, K.xm, false);
       k::MoeWeights w = ms_.w[c][l];
       w.blobs = K.tab + static_cast<size_t>(l) * per;
       k::MoeScratch sc = K.msc;
@@ -1839,6 +1718,7 @@ void Model::submit_step(int rows, int seg_key, int bound) {
                                     cpu_on_ ? &cpu_link_[c] : nullptr);
       mark(c, StepProfile::moe, me.router, me.combine);
       dec_stamp(c, StepProfile::moe);
+      trace(c, l, 3, K.ym, true);
       if (profiling_) moe_ev_[c][static_cast<size_t>(l)] = me;
     }
     moe_parity_ ^= 1;
@@ -1885,29 +1765,16 @@ double Model::vram_free_mib() const {
   return f;
 }
 
-int Model::graphs_alive() const {
-  return static_cast<int>((graphs_ ? graphs_->map.size() : 0) + (mtp_ ? mtp_->graphs.size() : 0) + (pf_graphs_ ? pf_graphs_->map.size() : 0));
-}
-
 int Model::graph_room(bool all) {
   constexpr double kRoom = kGraphRoomMiB;
   const double f0 = vram_free_mib();
   if (!all && (f0 < 0 || f0 >= kRoom)) return 0;
-  // A destroyed graph's memory goes back to the driver's pool, which the next recording reuses, not to what sysman
-  // reports free: once below the room, the card stays there. Evicting kGraphRoomEvict per new graph for good would
-  // shrink the population by one per first use until every step records its graph again (a server that has seen
-  // enough step shapes: decode at half speed). So the population shrinks only to its keep mark - the pool then holds
-  // the difference as slack for graphs larger than the ones they replace - and is held there. A failed recording
-  // (all) means the mark was too high for the pool: every graph goes and the mark drops.
-  const int alive = graphs_alive();
-  const bool first = graph_keep_ < 0;
-  if (first && !all) graph_keep_ = std::max(kGraphKeepMin, alive * kGraphKeepNum / kGraphKeepDen);
-  if (all && graph_keep_ > 0) graph_keep_ = std::max(kGraphKeepMin, std::min(graph_keep_, alive) * kGraphKeepNum / kGraphKeepDen);
-  const int want = all ? alive : alive > graph_keep_ ? std::min(kGraphRoomEvict, alive - graph_keep_ + 1) : alive == graph_keep_ ? 1 : 0;
-  if (want == 0) return 0;
   for (int c = 0; c < nc_; ++c) fab_.compute(c).wait();  // no evicted graph may be in flight
+  // A destroyed graph's memory goes back to the driver's pool, which the next recording reuses, not to what sysman
+  // reports free. So below the room each new graph evicts kGraphRoomEvict others (the least recently replayed); all =
+  // every one.
   int n = 0;
-  while (n < want) {
+  while (all || n < kGraphRoomEvict) {
     uint64_t best = UINT64_MAX;
     int which = -1;
     decltype(graphs_->map.begin()) sit;
@@ -1918,20 +1785,15 @@ int Model::graph_room(bool all) {
     if (mtp_)
       for (auto i = mtp_->graphs.begin(); i != mtp_->graphs.end(); ++i)
         if (i->second.used < best) best = i->second.used, which = 1, mit = i;
-    decltype(pf_graphs_->map.begin()) pit;
-    if (pf_graphs_)
-      for (auto i = pf_graphs_->map.begin(); i != pf_graphs_->map.end(); ++i)
-        if (i->second.used < best) best = i->second.used, which = 2, pit = i;
     if (which < 0) break;
     if (which == 0) graphs_->map.erase(sit);
-    else if (which == 1) mtp_->graphs.erase(mit);
-    else pf_graphs_->erase(pit);
+    else mtp_->graphs.erase(mit);
     ++n;
   }
-  if (first && !all)
-    std::fprintf(stderr, "qwen38: graphs: below %.0f MiB of free VRAM on the tighter card (%.0f) with %d graphs: new graphs now replace the least recently used, %d kept\n",
-                 kRoom, f0, alive, graph_keep_);
-  if (all) std::fprintf(stderr, "qwen38: graphs: a recording failed (%.0f MiB free): all %d evicted, %d kept from here\n", f0, n, graph_keep_);
+  if (n && graphs_evicted_ == 0)
+    std::fprintf(stderr, "qwen38: graphs: below %.0f MiB of free VRAM on the tighter card (%.0f): each new graph now evicts %d least recently used\n", kRoom, f0,
+                 kGraphRoomEvict);
+  if (all) std::fprintf(stderr, "qwen38: graphs: a recording failed (%.0f MiB free): all %d evicted\n", f0, n);
   graphs_evicted_ += n;
   return n;
 }
@@ -2153,6 +2015,14 @@ void Model::dec_finish() {
     }
     std::snprintf(b, sizeof b, " span %.3f / %.3f", d.span[0] / d.steps, d.span[1] / d.steps);
     std::fprintf(stderr, "%s%s\n", line.c_str(), b);
+    line = "decode stamps, MoE stages (ms per step, card 0 / 1):";
+    static constexpr const char *moe_stages[] = {"router", "route", "experts", "combine + all-reduce"};
+    static_assert(std::size(moe_stages) == kMoeStamped + 1);
+    for (int st = 0; st <= kMoeStamped; ++st) {
+      std::snprintf(b, sizeof b, " %s %.3f / %.3f;", moe_stages[st], d.moe[0][st] / d.steps, d.moe[1][st] / d.steps);
+      line += b;
+    }
+    std::fprintf(stderr, "%s\n", line.c_str());
     line = "decode stamps, QSA stages (ms per step, card 0 / 1):";
     for (int st = 0; st < static_cast<int>(k::QsaStage::kCount); ++st) {
       std::snprintf(b, sizeof b, " %s %.3f / %.3f;", k::qsa_stage_name(static_cast<k::QsaStage>(st)), d.qsa[0][st] / d.steps, d.qsa[1][st] / d.steps);
@@ -2390,187 +2260,6 @@ void Model::route_ids(int rows, std::vector<int32_t> &ids) {
   for (int l = 0; l < L; ++l)
     for (int r = 0; r < rows; ++r)
       for (int j = 0; j < K; ++j) ids[(static_cast<size_t>(l) * rows + r) * K + j] = rec[static_cast<size_t>(l)].ids[r][j];
-}
-
-// ---- the live expert exchange (ModelOptions::exchange) ------------------------------------------------------------
-// Every stage runs at a step boundary: the step before is done on both cards and none runs, so no kernel reads a blob
-// or a table entry while it changes (a split prompt call in flight would: the stage waits for its end). The copies go
-// on the copy queues and are not waited for: a stage that finds them running tries again at the next boundary.
-
-void Model::exchange_setup(const ModelOptions &opt, const std::vector<double> *rank) {
-  ls_.exchange = "off";
-  auto refuse = [&](const std::string &why) {
-    ls_.exchange = "off (" + why + ")";
-    for (int c = 0; c < nc_; ++c) {
-      for (void *p : x_spare_mem_[c]) fab_.release(p);
-      x_spare_mem_[c].clear();
-      x_spare_[c].clear();
-    }
-  };
-  if (!opt.exchange) return refuse("--expert-exchange off");
-  if (!opt.moe_tp || !experts_) return refuse("needs the expert TP layout");
-  if (cpu_on_ || opt.moe_cpu.mode != "off") return refuse("the MoE CPU path is on");
-  if (ls_.cold[0] == 0) return refuse("every expert is in VRAM");
-  if (!hits_ || x_spare_[0].empty()) return refuse("no spare VRAM blobs");
-  const int L = cfg_.layers, E = cfg_.experts, per = experts_->per_card();
-  if (per != E) return refuse("needs every expert on every card");
-  std::vector<uint8_t> hot(static_cast<size_t>(L) * E, 0);
-  for (int l = 0; l < L; ++l)
-    for (int e = 0; e < E; ++e) {
-      bool h = false;
-      experts_->blob(l, e, &h, 0);
-      hot[static_cast<size_t>(l) * E + e] = h ? 1 : 0;
-    }
-  model::PlacementOptions po;
-  po.budget = opt.exchange_budget;
-  po.max_swaps = static_cast<int>(x_spare_[0].size());
-  po.decay = opt.exchange_decay;
-  const bool prior = rank && rank->size() == hot.size();
-  xpl_ = std::make_unique<model::Placement>(L, E, std::move(hot), prior ? rank : nullptr, po);
-  lend_pos_.assign(static_cast<size_t>(L) * per, -1);
-  for (size_t k = 0; k < lend_cand_.size(); ++k)
-    lend_pos_[static_cast<size_t>(lend_cand_[k].first) * per + lend_cand_[k].second] = static_cast<int>(k);
-  x_seen_.assign(static_cast<size_t>(L) * E, 0u);
-  fab_.compute(0).memcpy(x_seen_.data(), hits_, x_seen_.size() * 4).wait();
-  for (int c = 0; c < nc_; ++c) x_upd_[c] = static_cast<XUpd *>(fab_.alloc_host(2 * x_spare_[c].size() * sizeof(XUpd)));
-  x_st_.on = true;
-  char b[200];
-  std::snprintf(b, sizeof b, "on: %zu spare blobs per card, a round every %d decode steps (up to %d per layer, %zu in all)", x_spare_[0].size(),
-                opt.exchange_period, opt.exchange_budget, x_spare_[0].size());
-  ls_.exchange = b;
-}
-
-void Model::exchange_apply(int c, const XUpd *u, int n) {
-  if (n <= 0) return;
-  Card &K = *cards_[static_cast<size_t>(c)];
-  const uint8_t **tab = K.tab;
-  uint8_t *cold = K.cold;
-  fab_.compute(static_cast<size_t>(c)).parallel_for(sycl::range<1>(static_cast<size_t>(n)), [=](sycl::id<1> i) {
-    const XUpd x = u[i];
-    tab[x.idx] = x.ptr;
-    if (cold) cold[x.idx] = static_cast<uint8_t>(x.flag);
-  });
-}
-
-void Model::exchange_tick() {
-  if (!xpl_) return;
-  const auto t0 = std::chrono::steady_clock::now();
-  ++x_step_;
-  const int per = experts_->per_card();
-  const size_t S = experts_->stride(), spares = x_spare_mem_[0].size();
-  auto copies_done = [&] {
-    for (int c = 0; c < nc_; ++c)
-      if (!fab_.copy(static_cast<size_t>(c)).done()) return false;
-    return true;
-  };
-  auto lent_at = [&](int k, int c) -> uint8_t * {
-    const auto &sl = lend_.slots()[static_cast<size_t>(k)];
-    return lend_buf_[c][static_cast<size_t>(sl.buf)] + sl.off;
-  };
-  if (xr_stage_ == 0) {
-    if (x_step_ % std::max(1, opt_.exchange_period) != 0) return;
-    if (pf_run_slot() >= 0) {
-      ++x_st_.deferred;
-      return;
-    }
-    // the reads since the last round (card 0's counters; the steps before are done)
-    std::vector<uint32_t> now(x_seen_.size());
-    fab_.compute(0).memcpy(now.data(), hits_, now.size() * 4).wait();
-    if (learn_) {
-      std::vector<double> delta(now.size());
-      for (size_t i = 0; i < now.size(); ++i) delta[i] = static_cast<double>(now[i] - x_seen_[i]);  // uint32 wrap-safe
-      xpl_->add_counts(delta);
-    }
-    x_seen_ = std::move(now);
-    // a lent expert is in VRAM already: it does not enter
-    std::vector<uint8_t> lent;
-    if (lend_n_ > 0) {
-      lent.assign(x_seen_.size(), 0);
-      for (int k = 0; k < lend_n_; ++k) lent[static_cast<size_t>(lend_cand_[static_cast<size_t>(k)].first) * per + lend_cand_[static_cast<size_t>(k)].second] = 1;
-    }
-    auto sw = xpl_->round(lent.empty() ? nullptr : &lent);
-    while (sw.size() > x_spare_[0].size()) xpl_->undo(sw.back()), sw.pop_back();
-    if (!sw.empty()) {
-      std::vector<std::vector<l0::Queue::CopyOp>> ops(static_cast<size_t>(nc_));
-      xr_.clear();
-      for (const auto &w : sw) {
-        XSwap x{w.layer, w.hot, w.cold, {}, {}, {}};
-        for (int c = 0; c < nc_; ++c) {
-          x.spare[c] = x_spare_[c].back();
-          x_spare_[c].pop_back();
-          x.host[c] = experts_->where(w.layer, w.cold, c);
-          x.vram[c] = experts_->where(w.layer, w.hot, c);
-          ops[static_cast<size_t>(c)].push_back({x.spare[c], x.host[c], S});
-        }
-        xr_.push_back(x);
-      }
-      for (int c = 0; c < nc_; ++c) fab_.copy(static_cast<size_t>(c)).copy_batch(ops[static_cast<size_t>(c)], false);
-      xr_stage_ = 1;
-    }
-  } else if (xr_stage_ == 1) {
-    if (pf_run_slot() >= 0 || !copies_done()) {
-      ++x_st_.deferred;
-      return;
-    }
-    // the cold experts enter: their entries to the spares
-    for (int c = 0; c < nc_; ++c) {
-      XUpd *u = x_upd_[c];
-      int m = 0;
-      for (const XSwap &x : xr_) {
-        const size_t e = static_cast<size_t>(x.layer) * per + x.cold;
-        u[m++] = {x.spare[c], static_cast<uint32_t>(e), 0u};
-        experts_->relocate(c, x.layer, x.cold, x.spare[c], true);
-        if (!tab_host_[c].empty()) tab_host_[c][e] = x.spare[c];
-        if (!cold_host_[c].empty()) cold_host_[c][e] = 0, cold_orig_[c][e] = 0;
-      }
-      exchange_apply(c, u, m);
-    }
-    // the hot experts leave: their blobs to the host slots the cold ones left (and to a lent slot the cold one held:
-    // it takes the cold one's place in the lending order; on the compute queue, behind the entries that left it)
-    std::vector<std::vector<l0::Queue::CopyOp>> back(static_cast<size_t>(nc_));
-    for (const XSwap &x : xr_) {
-      const size_t ec = static_cast<size_t>(x.layer) * per + x.cold, eh = static_cast<size_t>(x.layer) * per + x.hot;
-      const int k = lend_pos_[ec];
-      if (k >= 0) {
-        lend_cand_[static_cast<size_t>(k)] = {x.layer, x.hot};
-        lend_pos_[eh] = k;
-        lend_pos_[ec] = -1;
-      }
-      for (int c = 0; c < nc_; ++c) {
-        if (k >= 0 && k < lend_n_) fab_.compute(static_cast<size_t>(c)).memcpy(lent_at(k, c), x.vram[c], S);
-        back[static_cast<size_t>(c)].push_back({x.host[c], x.vram[c], S});
-      }
-    }
-    for (int c = 0; c < nc_; ++c) fab_.copy(static_cast<size_t>(c)).copy_batch(back[static_cast<size_t>(c)], false);
-    xr_stage_ = 2;
-  } else {
-    if (pf_run_slot() >= 0 || !copies_done()) {
-      ++x_st_.deferred;
-      return;
-    }
-    // the hot experts' entries to their host slots (or their lent slot), their VRAM slots to the spares
-    for (int c = 0; c < nc_; ++c) {
-      XUpd *u = x_upd_[c] + spares;
-      int m = 0;
-      for (const XSwap &x : xr_) {
-        const size_t e = static_cast<size_t>(x.layer) * per + x.hot;
-        const int k = lend_pos_[e];
-        const bool lent = k >= 0 && k < lend_n_;
-        uint8_t *at = lent ? lent_at(k, c) : x.host[c];
-        u[m++] = {at, static_cast<uint32_t>(e), lent ? 0u : 1u};
-        experts_->relocate(c, x.layer, x.hot, x.host[c], false);
-        if (!tab_host_[c].empty()) tab_host_[c][e] = at;
-        if (!cold_host_[c].empty()) cold_host_[c][e] = lent ? 0 : 1, cold_orig_[c][e] = 1;
-        x_spare_[c].push_back(x.vram[c]);
-      }
-      exchange_apply(c, u, m);
-    }
-    ++x_st_.rounds;
-    x_st_.swaps += static_cast<int64_t>(xr_.size());
-    xr_.clear();
-    xr_stage_ = 0;
-  }
-  x_st_.host_ms += since_ms(t0);
 }
 
 // ---- the hot-expert ranking recorded while serving ---------------------------------------------------------------

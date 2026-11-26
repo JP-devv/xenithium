@@ -30,36 +30,21 @@ namespace {
 
 constexpr int kDenseOneDnnRows = 1024;  // rows per call from which the int8 trunk runs on oneDNN
 
-// The rows a decode step may carry when --step-rows is 0 (the model's default). Four cards take the 64-row shape: the
-// budget follows the stream count (StepModelAdapter::step_rows_at: 16 rows below 6 streams, 32 from 6, 64 from 9), so
-// few streams keep their narrow steps. Its cost is the 64-row step's scratch (plan(): 0.42 GiB per card, 3-4 % of the
-// KV pool's tokens). One and two cards keep 16 (their wider steps are opt-in).
-constexpr int kDefaultStepRows = kernels::kStepRows16, kDefaultStepRowsTp4 = kernels::kMaxRows;
-int step_rows_of(const serve::Options &o) { return o.step_rows_or(o.tp == 4 ? kDefaultStepRowsTp4 : kDefaultStepRows); }
-
 // --vision 1 (serve::vision_plan): the tower's VRAM kept free through the reserve while the hot experts fill the cards;
 // the tower loads after the model.
 serve::VisionPlan vision_plan(const serve::Options &o, const model::ModelConfig &cfg) { return serve::vision_plan(o, cfg, o.tp); }
 
 ModelOptions model_options(const serve::Options &o, const model::ModelConfig &cfg) {
-  if (o.prefill_gemm == "onednn-all")  // (qwen35's int4 trunk only; this arch's trunk is int8)
-    throw serve::OptionError("--prefill-gemm onednn-all: every int4 prefill GEMM on oneDNN is built for the dense 27B (qwen35); arch qwen38 takes onednn|esimd");
   ModelOptions mo;
   mo.slots = o.slots;
-  mo.step_rows_cap = step_rows_of(o) > kernels::kStepRows32 ? kernels::kMaxRows : 0;  // 64-row steps (four cards)
+  mo.step_rows_cap = o.step_rows > kernels::kStepRows32 ? kernels::kMaxRows : 0;  // --step-rows 64 (four cards)
   mo.context = o.context;
-  mo.yarn_tiers = o.yarn_tiers == "on";  // YaRN per request past the trained positions
   mo.kv = o.kv == "bf16" ? kernels::QsaKv::bf16 : o.kv == "int8-v4" ? kernels::QsaKv::i8v4 : kernels::QsaKv::i8;
-  if (o.kv_split == "tokens" && o.tp != 4)  // two cards per kv head: four cards (2 kv heads)
-    throw serve::OptionError("--kv-split tokens: the two cards of a kv head split its tokens, so it needs four cards (--tp 4); at --tp " +
-                             std::to_string(o.tp) + " each card holds whole kv heads");
-  mo.kv_split = o.kv_split == "tokens" ? kernels::QsaKvSplit::tokens : kernels::QsaKvSplit::heads;
   // The MTP layer's KV in the target's dtype; its KV per token as a target QSA layer's (bf16: 1,088 B per card).
   mo.mtp_kv = mo.kv;
   mo.hot = o.hot > 0 ? o.hot : -1;  // 0 = measured from the free VRAM
   mo.reserve_gib = o.reserve_gib + vision_plan(o, cfg).max_gib();  // the tower's VRAM stays free for it
   mo.graphs = o.graphs;
-  mo.prefill_graphs = o.prefill_graphs;
   mo.prefill_chunk = o.prefill_chunk > 0 ? o.prefill_chunk : 4096;
   mo.prefill_moe_a8 = o.prefill_moe == "w4a8";
   mo.prefill_dense_a8 = o.prefill_dense == "w8a8" || o.prefill_dense == "w8a8-row";
@@ -70,9 +55,7 @@ ModelOptions model_options(const serve::Options &o, const model::ModelConfig &cf
   mo.prefill_dense_onednn = o.prefill_gemm == "onednn" && mo.prefill_chunk >= 2 * kDenseOneDnnRows ? kDenseOneDnnRows : 0;
   mo.decode_moe_a8 = o.decode_moe == "auto" ? -1 : o.decode_moe == "w4a8" ? 1 : 0;
   mo.prefill_cold_stage = o.prefill_cold_stage;
-  mo.prefill_fetch = o.prefill_fetch;
   mo.kv_lend = o.kv_lend == "on", mo.kv_lend_keep = o.kv_lend_keep;
-  mo.exchange = o.expert_exchange == "on";
   mo.gdn_w4 = o.gdn_w4 == "int4" ? 3 : o.gdn_w4 == "int4-qkvz" ? 1 : 0;
   mo.threads = o.threads;
   mo.mtp_dir = o.mtp;
@@ -133,7 +116,7 @@ std::string plan(const serve::Options &o, const model::ModelConfig &cfg, std::st
   constexpr double kDFlashGiB = 0.37;  // the DFlash drafter (no KV pages in the pool)
   const int chunk_rows = o.prefill_chunk > 0 ? o.prefill_chunk : 4096;
   // + the 64-row step's scratch (--step-rows 64: the MoE's per-slot partials at 64 rows)
-  const double kRuntimeGiB = 1.153 + 0.0525 * o.slots + 0.000533 * std::max(0, chunk_rows - 512) + (step_rows_of(o) > kernels::kStepRows32 ? 0.42 : 0.0);
+  const double kRuntimeGiB = 1.153 + 0.0525 * o.slots + 0.000533 * std::max(0, chunk_rows - 512) + (o.step_rows > 32 ? 0.42 : 0.0);
   serve::Options oo = o;
   oo.hot_rank.clear();  // the ranking does not move the counts
   const ModelOptions mo = model_options(oo, cfg);
@@ -143,7 +126,6 @@ std::string plan(const serve::Options &o, const model::ModelConfig &cfg, std::st
   model::DeployParams p;
   const int cards = o.tp;  // TP1, TP2 or TP4
   p.cards = cards, p.context = o.context, p.seqs = o.slots, p.kv_bytes = o.kv == "bf16" ? 2 : 1, p.kv_v4 = o.kv == "int8-v4", p.drafter = !mo.mtp_dir.empty();
-  p.kv_shard = mo.kv_split == kernels::QsaKvSplit::tokens ? model::DeployParams::KvShard::tokens : model::DeployParams::KvShard::heads;
   const model::Budget b = arch->budget(ck, p);
   serve::MemPlan m;
   m.arch = "qwen38", m.exact = false, m.cards = cards, m.card_gib = p.vram_gib;
@@ -217,27 +199,21 @@ class Backend final : public serve::Backend {
     if (ls.onednn_gib > 0)
       std::fprintf(stderr, "server: prefill trunk GEMMs on oneDNN from %d rows per call (--prefill-gemm onednn; %.3f GiB per card of repack slots)\n",
                    mo.prefill_dense_onednn, ls.onednn_gib);
-    serve::log_rope(m.capacity(), m.config().max_positions, m.yarn_factor(), nullptr, m.rope_tiers() > 1);
-    {
-      std::vector<std::pair<int64_t, double>> tiers;
-      for (int i = 0; i < m.rope_tiers(); ++i) tiers.emplace_back(m.rope_tier_limit(i), m.rope_tier_factor(i));
-      serve::log_rope_tiers(tiers);
-    }
+    serve::log_rope(m.capacity(), m.config().max_positions, m.yarn_factor());
     serve::log_ranking(m.ranking(), o_.hot_rank);
     std::fprintf(stderr, "server: MoE CPU path %s\n", ls.moe_cpu.c_str());  // --moe-cpu
     std::fprintf(stderr, "server: KV lending %s\n", ls.kv_lend.c_str());  // --kv-lend
-    std::fprintf(stderr, "server: expert exchange %s\n", ls.exchange.c_str());  // --expert-exchange
-    if (ls.prefill_fetch > 0)  // --prefill-fetch
-      std::fprintf(stderr, "server: prompt reads fetch each layer's cold experts ahead: %d blobs x %d per card\n", ls.prefill_fetch, kPfFetchBufs);
-    else
-      std::fprintf(stderr, "server: prompt reads fetch no cold experts ahead\n");
-    if (o_.prefill_graphs)  // --prefill-graphs
-      std::fprintf(stderr, "server: prompt calls of fewer than %d rows replay recorded graphs (a shape recorded on its run %d, up to %d kept)\n", kPfGraphMaxRows,
-                   kPfGraphRecordAt, kPfGraphsMax);
     adapter_ = std::make_unique<StepModelAdapter>(*model_);
     adapter_->set_depth(o_.mtp_depth);
-    adapter_->set_step_rows(step_rows_of(o_));  // --step-rows / XEN_STEP_ROWS, 0 = this setup's default
+    // 16 (the default), 32 or 8 (--step-rows / XEN_STEP_ROWS)
+    adapter_->set_step_rows(o_.step_rows_or(16));
     std::fprintf(stderr, "server: steps of up to %d rows\n", adapter_->max_rows());
+    if (const char *ds = std::getenv("XEN_STEPSTAT")) {  // diagnostic: what the depth path is handed
+      (void)ds;
+      std::fprintf(stderr, "DEPTHCFG depth_=%d seg_rows_max=%d draft_depth(1)=%d draft_depth(2)=%d layout_depth(1)=%d wide_depth=%d wide_from=%d max_rows=%d\n",
+                   adapter_->depth(), adapter_->seg_rows_max(), adapter_->draft_depth(1), adapter_->draft_depth(2),
+                   adapter_->layout_depth(1), adapter_->wide_depth(), adapter_->wide_from(), adapter_->max_rows());
+    }
     std::fprintf(stderr, "server: KV %s, %lld tokens (%.2f / %.2f GiB on the cards); one request up to %lld tokens (max_model_len)\n",
                  m.kv_shared() ? "pool shared by the slots" : "fixed per slot", static_cast<long long>(m.kv_pool_tokens()), m.kv_bytes(0) / 1073741824.0,
                  m.kv_bytes(m.cards() - 1) / 1073741824.0, static_cast<long long>(m.capacity()));

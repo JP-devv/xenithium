@@ -1,14 +1,11 @@
 // Gate for video input on the host: the reference's frame sampling, sizing, timestamps and pixels
 // (tests/data/vision/video/: goldens from the reference stack, and the ffmpeg frame
 // source against the reference decoder's frames (when an ffmpeg is installed).
-#include <unistd.h>
-
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <algorithm>
-#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -189,38 +186,6 @@ void golden_cases(const std::string &dir, const std::string &tokdir) {
   }
 }
 
-// A long clip's frame set in one decode: the sampler takes up to 768 frames per video, more than ffmpeg parses as one
-// flat select sum (~100 terms), so the decoder must deliver all of them. The clip is made here by the found ffmpeg.
-void long_video_cases() {
-  u::VideoTools tools;
-  std::string why;
-  if (!u::find_video_tools("ffmpeg", tools, why)) {
-    std::printf("  long video: %s (skipped)\n", why.c_str());
-    return;
-  }
-  constexpr int kFrames = 800, kMostSampled = 768;  // kMostSampled: video_max_frames
-  const std::string clip = (std::filesystem::temp_directory_path() / ("xen-long-video-" + std::to_string(::getpid()) + ".mp4")).string();
-  const std::string cmd = "'" + tools.ffmpeg + "' -nostdin -loglevel error -y -f lavfi -i testsrc2=size=32x32:rate=25:duration=" +
-                          std::to_string(kFrames / 25) + " -c:v mpeg4 -q:v 5 '" + clip + "'";
-  const int rc = std::system(cmd.c_str());
-  const std::string bytes = read_all(clip);
-  std::filesystem::remove(clip);
-  CHECK(rc == 0 && !bytes.empty(), "long video: ffmpeg made the %d-frame clip (exit %d)", kFrames, rc);
-  if (bytes.empty()) return;
-  std::vector<int64_t> want;  // evenly spread over the clip, as the sampler spreads them
-  for (int i = 0; i < kMostSampled; ++i) want.push_back(static_cast<int64_t>(i) * (kFrames - 1) / (kMostSampled - 1));
-  size_t got = 0;
-  int dims_bad = 0;
-  std::string err;
-  const bool ok = u::decode_video_frames(bytes, tools, want, 60,
-                                         [&](size_t, u::Image &&im) {
-                                           dims_bad += im.w != 32 || im.h != 32;
-                                           return true;
-                                         },
-                                         got, err);
-  CHECK(ok && got == want.size() && dims_bad == 0, "long video: %zu of %zu frames decoded in one pass (%s)", got, want.size(), err.c_str());
-}
-
 // The 27B's M-RoPE over text + an image + a video (the processor's layout: outer markers, per frame a timestamp and its
 // markers): each frame of a video takes the positions of an image of its grid (the reference splits a video into frames),
 // Mrope:row over the store's per-frame entries == HF get_rope_index (types 1 image, 2 video).
@@ -278,7 +243,6 @@ int main(int argc, char **argv) {
   unit_cases();
   golden_cases(dir, tokdir);
   mrope_cases(dir + "/mrope");
-  long_video_cases();
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
 }

@@ -18,7 +18,7 @@ target_link_libraries(xenithium_launch PUBLIC xenithium_model xenithium_util Thr
 xenithium_tool(xenithium-launch HOST SOURCES launch/main.cpp LIBS xenithium_launch)
 
 # The benchmark (tools/bench/main.cpp, docs/bench.md): scenarios against any OpenAI-compatible endpoint. Host only, no
-# engine code: JSON and TLS from xenithium_util. The corpus (bench/corpus/<set>/<kind>/<file>, sets medium and hard) is
+# engine code: JSON and TLS from xenithium_util. The corpus (bench/corpus/<set>/<kind>/<file>, sets easy and hard) is
 # embedded through a generator built first, so the tool is one binary. A library so tests/test_bench.cpp and the launcher's Bench tab share the code.
 xenithium_tool(xenithium-bench-embed HOST SOURCES bench/embed/main.cpp)
 file(GLOB_RECURSE XENITHIUM_BENCH_CORPUS CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/bench/corpus/*/*/*)
@@ -28,7 +28,7 @@ add_custom_command(OUTPUT ${XENITHIUM_BENCH_CORPUS_CPP}
   DEPENDS xenithium-bench-embed ${XENITHIUM_BENCH_CORPUS}
   COMMENT "Embedding the benchmark corpus")
 add_library(xenithium_bench STATIC
-  bench/stats.cpp bench/format.cpp bench/http_stream.cpp bench/client.cpp bench/corpus.cpp bench/prompts.cpp bench/mode.cpp bench/params.cpp
+  bench/stats.cpp bench/format.cpp bench/http_stream.cpp bench/client.cpp bench/corpus.cpp bench/prompts.cpp bench/params.cpp
   bench/counters.cpp bench/power.cpp bench/image.cpp bench/quality.cpp bench/session.cpp bench/report.cpp bench/svg_charts.cpp
   bench/html_assets.cpp bench/html_report.cpp bench/runner.cpp bench/registry.cpp
   bench/scenarios/common.cpp bench/scenarios/decode.cpp bench/scenarios/concurrency.cpp bench/scenarios/prefill.cpp
@@ -66,7 +66,7 @@ target_compile_options(xenithium-lookahead PRIVATE -O3)
 
 # Benchmarks and gates on the cards: one subcommand per op / model (tools/probe/main.cpp lists them).
 xenithium_tool(xenithium-probe
-  SOURCES probe/main.cpp probe/flags.cpp probe/moe.cpp probe/gdn.cpp probe/qsa.cpp probe/ple.cpp probe/model.cpp probe/pf_graphs.cpp probe/mtp.cpp probe/seqs.cpp probe/serve.cpp
+  SOURCES probe/main.cpp probe/peers.cpp probe/wiremin.cpp probe/flags.cpp probe/moe.cpp probe/gdn.cpp probe/qsa.cpp probe/ple.cpp probe/model.cpp probe/mtp.cpp probe/seqs.cpp probe/serve.cpp
           probe/prefix.cpp probe/qwen35.cpp probe/qwen35_gdn.cpp probe/qwen35_attn.cpp probe/qwen35_model.cpp probe/qwen35_dflash.cpp
           probe/qwen35_prefix.cpp probe/qwen35_select.cpp probe/qwen35_headx.cpp probe/llama.cpp probe/flint.cpp probe/rank.cpp probe/dflash38.cpp
   LIBS xenithium_kernels xenithium_arch xenithium_eval xenithium_gpu_engine)

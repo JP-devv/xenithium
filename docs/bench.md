@@ -1,8 +1,5 @@
 # xenithium-bench
 
-New to the tool? Start with the [benchmarking guide](bench-guide.md): modes, suites, scenarios and how to bench another
-endpoint, step by step. This page is the full reference.
-
 The engine's benchmark. One host binary (`build/xenithium-bench`, C++, no GPU and no engine code) that talks to an
 OpenAI-compatible endpoint over `/v1/chat/completions` with streaming, so it measures this server, a server on
 another machine, or any other engine or hosted API the same way.
@@ -29,7 +26,7 @@ build/xenithium-bench html    RUN [FILE]                   # the run's HTML page
 
 `scripts/bench.sh [name]` wraps a run: with no `URL` it checks that the cards are free, starts this tree's server from
 `server.env`, records every effective server flag and the host as notes, samples board power, runs the benchmark and
-stops the server; with `URL=...` it only runs against that endpoint. The launcher's Benchmark tab (`3`, then `r`) runs the
+stops the server; with `URL=...` it only runs against that endpoint. The launcher's Bench tab (`4`, then `r`) runs the
 same binary against the server it started ([launcher.md](launcher.md)).
 
 ## Options of `run`
@@ -49,12 +46,11 @@ same binary against the server it started ([launcher.md](launcher.md)).
 | `--seed N` | `1` | Request k of the run samples with seed N + k, so two builds draw the same tokens where their logits agree. |
 | `--temperature` `--top-p` `--top-k` | `0.7` `0.95` `20` | Sampling of the sampled scenarios. `--temperature 0` makes every scenario greedy. |
 | `--thinking default\|on\|off` | `default` | The model's thinking switch (`chat_template_kwargs.enable_thinking`), where the endpoint has one. |
-| `--mode easy\|medium\|hard` | `hard` | How easy the measured text is for a draft model, and so how high a drafting engine's decode rate reads: `hard` gives the published numbers, `easy` measures the way the usual public benchmarks do. A mode sets the defaults of `--corpus`, `--reply-length` and some scenario parameters; those options still override it. Recorded in the run file; `compare` warns when two runs differ in it. See [Modes](#modes). |
-| `--reply-length fixed\|natural` | the mode's: `fixed` for hard and medium, `natural` for easy | The sampled scenarios' replies. `fixed` sends `ignore_eos`: every reply runs to its `max_tokens`, so two builds are timed over the same number of tokens. `natural` lets the model end its reply, as a chat client sees it (rates then cover only the tokens that came). Greedy checks stay fixed. Recorded in the run file; `compare` warns when two runs differ in it. Read below why the two give different decode rates. |
+| `--reply-length fixed\|natural` | `fixed` | The sampled scenarios' replies. `fixed` sends `ignore_eos`: every reply runs to its `max_tokens`, so two builds are timed over the same number of tokens. `natural` lets the model end its reply, as a chat client sees it (rates then cover only the tokens that came). Greedy checks stay fixed. Recorded in the run file; `compare` warns when two runs differ in it. Read below why the two give different decode rates. |
 | `--context TOKENS` | the endpoint's `max_model_len` | The longest prompt to send. Depths past it are skipped and named in the report. An endpoint that does not report its context needs this, or every depth is tried. |
 | `--kv-pool TOKENS` | the endpoint's `kv_pool_tokens` | Tokens of context the endpoint holds for all requests at once. `long-agents` sizes its documents from it; this server reports it in `/v1/models`. |
 | `--timeout SECONDS` | `1800` | Per request. |
-| `--corpus hard\|medium\|DIR` | the mode's: `hard` for hard, `medium` for medium and easy | The text long prompts are cut from: `hard` = this engine's own code and documentation, `medium` = conventional template-made code and prose, `DIR` = another corpus (`DIR/<kind>/<files>`). The set, its version and hash are recorded; runs on different corpora do not compare. |
+| `--corpus hard\|easy\|DIR` | `hard` | The text long prompts are cut from: `hard` = this engine's own code and documentation, `easy` = conventional template-made code and prose, `DIR` = another corpus (`DIR/<kind>/<files>`). The set, its version and hash are recorded; runs on different corpora do not compare. |
 | `--power auto\|on\|off` | `auto` | Sample the GPUs' board power and clock while the run goes (below). `auto` = on when the URL is this machine's loopback address; `on` for a server on this machine reached by another address. |
 | `--strict` | off | Send OpenAI fields only: no probing for the extensions below. |
 
@@ -95,7 +91,7 @@ tokens the server counted, and those are what the rates are computed from.
 | `mixed` | One stream at 64K tokens of context generating with three short streams. | Decode tok/s of each class in the same steps. |
 | `arrivals` | An open-loop load: requests arriving at 0.5, 1 and 2 per second with random gaps (a Poisson process, drawn from the seed), whether or not the earlier ones are answered. | TTFT and whole-request latency per rate (median, spread, worst), tokens per second served and the most requests in flight. The rate at which the TTFT's tail and the requests in flight leave the ground is the load the endpoint sustains; a closed loop cannot show it, since there a slow server slows its own load. |
 | `vision` | A generated picture (a 3 x 3 grid of coloured squares, a PNG in a `data:` URL) with a question about one square, at 448, 896 and 1,344 pixels. Every picture is new. | TTFT, the prompt tokens a picture of that size costs, and whether the colour was named. An endpoint without image input is reported as skipped, not failed (this server: `XEN_VISION=1`). |
-| `quality` | Thirty questions with one checkable answer in five categories (arithmetic, reasoning, reading code, extraction from a passage, following a format), and four on facts planted across an 8K-token document, greedy. The reply ends with `ANSWER: ...`, which is graded. Asked without a reasoning pass unless the run has `--thinking on`. | Correct answers per category and the share over all; every wrong answer with its question, the expected answer and the one given (first in the page's section, linked from the checks strip and the Quality figure; `✗` lines in the text report). The questions are easy to middling on purpose: a healthy model answers nearly all, so a drop points at the build or a lossy setting, not at the model's limits. It is a canary, not a leaderboard score. |
+| `quality` | Thirty questions with one checkable answer in five categories (arithmetic, reasoning, reading code, extraction from a passage, following a format), and four on facts planted across an 8K-token document, greedy. The reply ends with `ANSWER: ...`, which is graded. Asked without a reasoning pass unless the run has `--thinking on`. | Correct answers per category and the share over all. The questions are easy to middling on purpose: a healthy model answers nearly all, so a drop points at the build or a lossy setting, not at the model's limits. It is a canary, not a leaderboard score. |
 | `long-agents` | 1, 2 and 4 agents at work on long contexts. First every agent's own document is read at once, then every agent produces 10K tokens over tasks of every kind (maths, code, edits, prose, JSON ...), turn by turn, each turn re-sending its conversation. The document length is not fixed: it is sized so that the most agents of the run together fill 75 % of the endpoint's KV pool (`pool_pct`; about 200K tokens each for four agents on a 1M-token pool), because what an endpoint can hold differs with the cards, their number and the KV format. Without a reported pool, 75 % of the context length per agent. `depth=N` fixes it. | Per number of agents: the prompt rate while all documents are read at once and each one's TTFT, decode tok/s per request and of all agents together, tokens per update, the TTFT of a turn on the cached context, power and tokens per joule; and a second table of decode tok/s per kind of output for each number of agents. |
 | `prefill-decode` | One agent's 64K-token prompt read alone, then a new one read while three agents generate on 32K-token contexts of their own. | The prompt's rate alone and beside them, the agents' token rate just before and while it is read, their longest pause, and the share of its own speed each side keeps (the two add up to about 100 % when the cards' time is only divided). |
 | `needle` | A passphrase sentence at 35 % of a 32K / 128K / 250K-token document, asked for at the end, greedy. | Found or not. The check to run after turning on a lossy long-context setting (`XEN_ATTN_SELECT`, `XEN_PREFILL_SELECT`, an int8-v4 KV cache). |
@@ -133,10 +129,6 @@ mean of rates reads high: half the tokens at 300 tok/s and half at 100 come out 
 |---|---|---|---|---|---|---|---|---|
 | `agent` (default) | 4 % | 19 % | 63 % | 0 | 3 % | 3 % | 4 % | 4 % |
 | `even` | 12.5 % | 12.5 % | 12.5 % | 12.5 % | 12.5 % | 12.5 % | 12.5 % | 12.5 % |
-| `easy` (the easy mode's) | 0 | 30 % | 20 % | 0 | 15 % | 15 % | 10 % | 10 % |
-
-`easy` is the exception to the harmonic mean: its figure is the weighted arithmetic mean of the categories' median
-rates, the figure the usual public benchmarks quote, and its row in the report says so.
 
 Or your own shares: `--set decode.weights=code:1,reasoning:3` (normalised to sum 1; a category left out weighs 0; an
 unknown name, category or share is refused before anything is sent).
@@ -184,11 +176,8 @@ code.
 - **decode tok/s** is the tokens after the first streamed update over the time from the first update to the last, so
   it excludes the prompt. **TTFT** is from just before the connect to the first update that carries text, so it
   includes the connection, the queue and the prompt.
-- **prefill tok/s** is the prompt tokens the server had to process (its count, minus the tokens it reports as cached
-  in `usage.prompt_tokens_details.cached_tokens`) over the TTFT. A server that does not report them: a request sent
-  alone takes the growth of the `/metrics` prefix-cache counter over the request instead. That counter is
-  server-wide, so a growth larger than the prompt (another client's hits) leaves the cached count unknown and the
-  row without a prefill rate.
+- **prefill tok/s** is the prompt tokens the server had to process (its count, minus the tokens it reports as cached)
+  over the TTFT.
 - **tok/update** above 1 means the server sends several tokens per step (speculative decoding); **update gap** is the
   median time between two updates, the decode step as a client sees it.
 - A cell shows the median of its samples; latencies with four or more samples show `median / max`. Yes / no checks
@@ -214,54 +203,26 @@ than this tool's default does, on the same server. The decode step is the same i
   than a story).
 - The headline is the agent mix (above) as a harmonic mean; a weighted arithmetic mean of the same rates reads higher.
   Compare per category.
-- `--mode easy` puts all of these on the common footing: natural replies, tasks whose replies repeat or reshape their
-  input, the `easy` mix as a weighted arithmetic mean. Its numbers are the ones to set beside other benchmarks'.
 - A run with failed requests has blank or partial rows (`errors` in the report): it is not a result.
 
 
-
-## Modes
-
-A drafting engine's decode rate depends on how well its draft guesses the text: the same build reads very differently
-on different prompts and with different ways of counting. `--mode` fixes one way, recorded in the run file with its
-version (`compare` warns across modes):
-
-| | `hard` (default) | `medium` | `easy` |
-|---|---|---|---|
-| long prompts | the `hard` corpus: this engine's own code and docs | the `medium` corpus: conventional template-made code and prose | the `medium` corpus |
-| short prompts (decode, concurrency, arrivals) | open tasks written from scratch, three per category | the same | tasks whose reply mostly repeats or reshapes the prompt's input (a diff, a whole edited file, JSON from given data, a fix of given code, a chat that goes on), four per category, shorter reply budgets |
-| replies | `fixed`: run to `max_tokens` | `fixed` | `natural`: end where the model ends them |
-| prefix cache on the short prompts | the same prompt is sent every pass | the same | every request starts with a new line: none is served from the cache |
-| decode samples per category | 9 (3 prompts x `passes` 3) | 9 | 20 (4 prompts x 5 passes, after 3 warm-up requests) |
-| decode headline | `agent` mix, harmonic mean | the same | `easy` mix, weighted arithmetic mean |
-
-`hard` gives the published numbers. `easy` measures the way the usual public benchmarks do, so its numbers are the ones
-to set beside theirs; it is not a measure of an agent's experience. `medium` sits between: the hard method over text
-a drafter guesses well, which moves the long-context scenarios more than the decode headline (prefill speed depends on
-the token count, not on the text).
-
-A mode only sets defaults. `--corpus`, `--reply-length` and `--set` override them (a suite's own parameter, such as
-`quick`'s single decode pass, stays as the suite sets it). The launcher's Benchmark tab picks the mode with `m`
-([launcher.md](launcher.md)), easy by default. Changing a prompt of the easy set changes the easy mode's numbers: bump
-its version in `tools/bench/mode.cpp` with it.
 
 ## The corpus
 
 Long prompts are cut from text embedded in the binary, two sets of `code` and `prose` in `tools/bench/corpus/<set>/`:
 
-- `hard` (the hard mode's, version 4): frozen snapshots of this engine's sources and of its documentation. Real text a
+- `hard` (the default, version 4): frozen snapshots of this engine's sources and of its documentation. Real text a
   drafter guesses least well: the strict measurement.
-- `medium` (the medium and easy modes', version 1): conventional, template-made code and prose - entity classes, CRUD
-  repositories and services, their tests, API clients, UI components, SQL, manifests; a travel guide, product manuals,
-  recipes, help-centre articles, local news. Regular text of the kind most public benchmarks use, made to be guessed
-  well by a drafter: its long-document numbers do not compare with `hard` runs. Runs made before the modes name this
-  set `easy`; the tool reads them as the medium mode.
+- `easy` (version 1): conventional, template-made code and prose - entity classes, CRUD repositories and services,
+  their tests, API clients, UI components, SQL, manifests; a travel guide, product manuals, recipes, help-centre
+  articles, local news. Regular text of the kind most public benchmarks use, made to be guessed well by a drafter:
+  its long-document numbers do not compare with `hard` runs.
 
-The sets are not kept in step with the tree, since two builds compare only on the same text. Changing a file of a set
-changes every prompt cut from it: bump its version (`kCorpusVersion` for hard, `kMediumCorpusVersion` for medium) and
-the hash pinned in `tests/test_bench.cpp` with it. A depth past the set's size repeats the text and the report says so
-(a repeated document is easier to process for some engines).
-
+`--corpus easy` picks the set (the launcher's Benchmark tab: `m`, easy by default); the short decode prompts are the same
+for both. The sets are not kept in step with the tree, since two builds compare only on the same text. Changing a
+file of a set changes every prompt cut from it: bump its version (`kCorpusVersion` for hard, `kEasyCorpusVersion` for
+easy) and the hash pinned in `tests/test_bench.cpp` with it. A depth past the set's size repeats the text and the report
+says so (a repeated document is easier to process for some engines).
 
 ## Adding a scenario
 

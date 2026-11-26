@@ -25,7 +25,6 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
-#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -47,7 +46,6 @@
 #include "xenithium/load/dense_store.hpp"
 #include "xenithium/model/checkpoint.hpp"
 #include "xenithium/model/kv_lend.hpp"
-#include "xenithium/model/placement.hpp"
 #include "xenithium/model/kv_pages.hpp"
 #include "xenithium/rt/fabric.hpp"
 
@@ -67,11 +65,7 @@ inline constexpr int kDenseReadAhead = 16;
 inline constexpr int kExpertPackThreads = 8;
 // The VRAM a first-use graph recording keeps free on the tighter card (graph_room)
 inline constexpr double kGraphRoomMiB = 64;
-// Below the room a new graph first costs kGraphRoomEvict others, so the driver's pool gains a graph's memory of slack
-// per recording, until the population is kGraphKeepNum / kGraphKeepDen of what it was when the room ran out (at least
-// kGraphKeepMin); from there it is held: one out per new graph.
-inline constexpr int kGraphRoomEvict = 2;
-inline constexpr int kGraphKeepNum = 3, kGraphKeepDen = 4, kGraphKeepMin = 16;
+inline constexpr int kGraphRoomEvict = 2;  // graphs evicted per new one below the room
 // kMaxCards: the most cards the model runs on (TP4); per-card arrays hold this many entries. kPfSplitMinRows: a prefill
 // call's two-card sums (GDN, QSA, MoE) split over the cards from this many rows (the generic kPairSplitMinRows is 64),
 // with the same bits; calls of fewer rows stay on the rows wire.
@@ -85,30 +79,11 @@ inline constexpr int kPfSplitMinRows = 24;
 // two of them (a live resume) may get fewer lanes. The MoE runs as one call over every lane under kPfMoeTwoCallRows
 // rows, else as two.
 inline constexpr int kPfOwnerMinRows = 128;  // (= kernels::kPairSplitSendMinRows: the modules send their partials from there)
-// The layer-ahead fetch (ModelOptions::prefill_fetch) from this many rows in a call: a shorter call's layer computes for
-// less time than its copies take, and the copies hold up its sums' sends on the one copy engine (2,048-row calls: 1,806
-// -> 1,635 tok/s with the fetch, measured).
-inline constexpr int kPfFetchMinRows = 4096;
-// The blobs per layer a 4,096-row call's fetch moves (in proportion to the call's rows, up to prefill_fetch): what the
-// host link carries per card while both cards compute a layer (a measured sweep).
-inline constexpr int kPfFetchPer4K = 96;
-// The fetch's buffers per card, layer l's in buffer l % kPfFetchBufs: with three, layer l + 2's fetch starts behind
-// layer l's MoE (its buffer's last reader was layer l - 1's), two layers of compute before its own MoE.
-inline constexpr int kPfFetchBufs = 3;
 inline constexpr int kPfTwoLaneRows = 384;
 inline constexpr int kPfFourLaneRows = 1536;
 inline constexpr int kPfMoeTwoCallRows = 2560;
 inline constexpr int kPfLaneAlign = 64;
 inline constexpr int kPfLanesMax = 4;  // (a card's split buffers are wired per lane)
-// Prompt-call graphs (ModelOptions::prefill_graphs). Calls of fewer than kPfGraphMaxRows rows only: from there the
-// split sums' copies run on the side queue beside the kernels (sends, lanes), and a graph replays its branches one
-// after another (measured: the copies in series cost what the replay saves at 128-256 rows, more above). A call
-// shape is recorded the kPfGraphRecordAt-th time it runs (one-off shapes never pay a recording); at most kPfGraphsMax
-// prompt-call graphs are kept (least recently replayed out first), each with its own split flag lines.
-inline constexpr int kPfGraphMaxRows = 128;
-inline constexpr int kPfGraphRecordAt = 2;
-inline constexpr int kPfGraphsMax = 32;
-inline constexpr int kPfGraphSeenMax = 4096;  // shapes counted but not recorded yet (the count restarts past it)
 // A decode step's rows by owner (model.cpp, "a decode step's rows by owner"): at four cards, steps of at least this
 // many rows run each row's residual mixers on one card. Below it every card runs every row.
 inline constexpr int kDecOwnerMinRows = 6;
@@ -120,11 +95,6 @@ inline constexpr int kDecEveryBound = 2048;
 
 struct ModelOptions {
   int64_t context = 8192;             // KV capacity of each sequence slot (rounded up to 64)
-  // YaRN per request past the trained positions (as qwen35's): the rope table holds one sub-table per tier (trained x
-  // 2^k positions at that length's factor; the last tier = the whole context at its factor, from row 0) and a sequence's
-  // segment records carry its tier's first table row (kSegRope, set_rope_tier), so a short request on a 1M server gets
-  // the bits of a server at the trained context. false = one factor for every request.
-  bool yarn_tiers = true;
   // Sequence slots: each has its own KV, GDN state, PLE ring and host context, allocated
   // before the placement (the experts get what is left). A step may run up to 4 of them at once
   // (step_batch); the drafter keeps a KV per slot.
@@ -134,10 +104,6 @@ struct ModelOptions {
   // partials are laid out by this, the drafter's step buffers too).
   int step_rows_cap = 0;
   kernels::QsaKv kv = kernels::QsaKv::i8;  // target KV (int8 + one scale per token and kv head)
-  // How the two cards of a kv head (four cards: 2 kv heads) store its KV (kernels/attention/qsa.hpp): heads = both all of
-  // its tokens; tokens = each every other token (a quarter of the K / V per card; the partner's q heads replicated, one
-  // pair exchange per attention layer, a numerics change). The MTP layer's KV follows. Four cards only.
-  kernels::QsaKvSplit kv_split = kernels::QsaKvSplit::heads;
   int64_t hot = -1;                   // hot experts per card; -1 = measured from free VRAM
   double reserve_gib = 0.25;  // VRAM left free per card after the experts (every allocation precedes them)
   int threads = 16;                   // load threads (dense + expert packing)
@@ -182,11 +148,6 @@ struct ModelOptions {
   // (one submission per card instead of ~800 launches). Keys: rows, the parities, and the QSA grid
   // bound bucket. Profiled steps always run eagerly (they need per-launch events).
   bool graphs = true;
-  // Prompt-call graphs (prefill.cpp, "prompt-call graphs"): a prompt call of fewer than kPfGraphMaxRows rows replays
-  // its layers from a recorded graph per card once its shape has run kPfGraphRecordAt times. The same bits as the
-  // launches; the call's host submission (~1.5-2.6 ms of a 16-96-row call on two or four cards) goes. Off by default:
-  // a shape costs 10-60 ms to record and pays back only after ~20 calls of it.
-  bool prefill_graphs = false;
   int moe_gu_ksplit = 0;                // MoE gate_up k split (0 = the kernel default 8; probe --moe-gu-ks)
   int moe_dn_ksplit = 0;                // MoE down k split (0 = the kernel default 2); 1 = a null variant:
                                           // same precision, another fp32 summation order
@@ -279,12 +240,6 @@ struct ModelOptions {
   // segments there once (most segments first) instead of reading it over PCIe once per segment; the
   // same bytes, so the same bits. 0 = off.
   int prefill_cold_stage = 16;
-  // The layer-ahead fetch (prefill.cpp pf_fetch_some): VRAM for this many cold expert blobs per layer, kPfFetchBufs
-  // times per card. A prefill call of kPfFetchMinRows rows and more on two cards copies each layer's cold experts (the
-  // first this many by id; the rest stay as they were) into a buffer on the copy engine while the layers before it
-  // compute, and the MoE reads them there: the host link's bytes overlap the compute instead of stalling the MoE. 0 =
-  // off. Taken from the hot experts (only when some are cold, with expert TP, without the MoE CPU path); the same bits.
-  int prefill_fetch = 0;
   // The PLE n-gram table from another checkpoint directory (the bake's int8 rows, or a BF16
   // source's table); empty = the model directory.
   std::string ple_dir;
@@ -317,17 +272,6 @@ struct ModelOptions {
   // back (its flag 2 again).
   bool kv_lend = false;
   int64_t kv_lend_keep = 32768;
-  // The live expert exchange (model/placement.hpp): the hot set follows the decode traffic while serving. Every
-  // exchange_period decode steps a round reads the cards' expert reads, and up to exchange_spares cold experts whose
-  // decayed score beats the weakest hot one of their layer change places with it (each layer keeps its hot count): the
-  // cold blob is copied into a spare VRAM blob on the copy queue, then the tables switch at a step boundary and the hot
-  // blob goes back to the host slot the cold one left (its VRAM slot is the next spare). Needs expert TP and cold
-  // experts, not the MoE CPU path; outputs are bit-identical to off (the same blobs, other addresses).
-  bool exchange = false;
-  int exchange_spares = 32;     // spare VRAM blobs per card: the most exchanges per round
-  int exchange_period = 4;      // decode steps between rounds
-  int exchange_budget = 16;     // exchanges per layer per round
-  double exchange_decay = 0.98;  // score decay per round
   // Pinned host memory for the prefix cache's snapshots (GiB over both cards; 0 = none). One snapshot = a slot's state
   // outside its KV pages: snap_bytes.
   double snap_gib = 0;
@@ -345,8 +289,6 @@ struct ModelLoadStats {
   int64_t hot_asked = -1;             // a pinned --hot past the VRAM left (minus the reserve): the count asked; -1 = not cut
   std::string moe_cpu;  // the CPU path's state line ("off", "on: avx512-bf16, 8 threads ...", or why not)
   std::string kv_lend;  // "off", "off (why)" or the lend state at load
-  std::string exchange;  // the live expert exchange: "off", "off (why)" or its setup
-  int prefill_fetch = 0;  // the layer-ahead fetch's blobs per layer (0: off)
   int64_t lent = 0;  // cold experts lent into the KV pool at load (per card)
   int64_t blob_mismatches = -1;       // -1 = not verified
   int bf16_overrides = 0;             // plan matrices switched int8 -> bf16 by ModelOptions::bf16_tensors
@@ -397,13 +339,6 @@ class Model {
   int64_t capacity() const { return cap_; }  // one request's most tokens (XEN_CONTEXT)
   // the static YaRN factor of the rotary table (1 = none: the context fits the trained positions; qsa_yarn_for)
   double yarn_factor() const { return yarn_factor_; }
-  // YaRN tiers (ModelOptions::yarn_tiers). rope_tiers() = 1: one factor (yarn_factor). Tier t holds positions
-  // < rope_tier_limit(t) at rope_tier_factor(t), ascending; the last = capacity() at yarn_factor(). set_rope_tier: the
-  // slot's fresh sequence (position 0, before its first prefill) runs in tier t; snapshots keep it.
-  int rope_tiers() const { return static_cast<int>(tier_limit_.size()); }
-  int64_t rope_tier_limit(int t) const { return tier_limit_.at(static_cast<size_t>(t)); }
-  double rope_tier_factor(int t) const { return tier_factor_.at(static_cast<size_t>(t)); }
-  void set_rope_tier(int slot, int t);
   int slots() const { return static_cast<int>(seqs_.size()); }
   int cards() const { return nc_; }  // 1 = TP1, 2 = TP2, 4 = TP4
   // The slot the single-sequence calls below act on (begin_sequence, step, verify, commit,
@@ -454,14 +389,6 @@ class Model {
   bool kv_blocks_lend(int slot) const;
   bool kv_reserve_lends(int slot, int64_t tokens) const;
   LendStats lend_stats() const;
-  // The live expert exchange (ModelOptions::exchange): rounds that moved experts, experts moved, rounds put off (a split
-  // prompt call in flight or the copies not done at a step boundary), host time in the step tail.
-  struct ExchangeStats {
-    bool on = false;
-    int64_t rounds = 0, swaps = 0, deferred = 0;
-    double host_ms = 0;
-  };
-  ExchangeStats exchange_stats() const { return x_st_; }
   void kv_trim(int slot, int64_t tokens);  // keep the pages of positions [0, tokens) only
   // ---- the prefix cache (ModelOptions:snap_gib) ----
   // A snapshot is what a slot's sequence holds outside its KV pages, at its position right after a prefill call: every
@@ -625,12 +552,6 @@ class Model {
   // The drafter's pass graphs: recorded so far, ms recording + finalizing.
   int mtp_graphs_recorded() const;
   double mtp_graph_record_ms() const;
-  // Prompt-call graphs (ModelOptions::prefill_graphs): recorded so far, ms recording + finalizing, calls (or parts)
-  // replayed; set_prefill_graphs switches them from the next call on.
-  int pf_graphs_recorded() const { return pf_graphs_n_; }
-  double pf_graph_record_ms() const { return pf_graphs_ms_; }
-  int64_t pf_graphs_replayed() const { return pf_graphs_replayed_; }
-  void set_prefill_graphs(bool on) { opt_.prefill_graphs = on; }
   // Records, without running them, the step and drafter pass graphs of every QSA bound bucket up to max_bound (default:
   // the capacity) for every key recorded so far (call after a warm-up has recorded the first bucket's). Host state
   // unchanged; returns the graphs recorded. The graphs hold VRAM outside the placement budget.
@@ -653,8 +574,8 @@ class Model {
   void set_gdn_scan(bool on) { opt_.gdn_scan = on; }
   // Image input. Prompt ids >= the vocabulary name image rows of the store (arch::VisionStore): prefill calls map them
   // for the device (encoding images on first use) and the embedding gathers read those rows; the PLE n-grams see the
-  // image token there. nullptr = text only. Throws when the store has no image rows on one of the model's cards.
-  void set_vision(VisionStore *v);
+  // image token there. nullptr = text only.
+  void set_vision(VisionStore *v) { vis_ = v; }
   bool moe_tp() const { return ms_.shape.tp; }
   StepProfile profile() const;
   // The decode step's module times under graph replay. XEN_DEC_PROFILE set (1): every recorded step graph carries a
@@ -812,7 +733,7 @@ class Model {
   static constexpr bool seg_key_replay(int key) { return (key & 8) != 0; }
   void submit_step(int rows, int seg_key, int bound);
   // A decode step's rows by owner (model.cpp, "a decode step's rows by owner")
-  bool dec_by_owner(int rows) const { return nc_ == kMaxCards && rows >= kDecOwnerMinRows; }
+  bool dec_by_owner(int rows) const;
   void dec_owner_init();  // the owner sums' and the shared buffers' mailboxes (four cards)
   struct DecMixer;        // one mixer of a step on one card: the block it combines, its weights, its output
   kernels::HcEvents dec_mixer(int c, int rows, const DecMixer &m);  // .up = the card's last launch of it
@@ -822,33 +743,6 @@ class Model {
   struct PfRun;  // a prefill call between its parts (prefill.cpp)
   void pf_start(const int32_t *tokens, int m, int row_base, const std::function<void(int, int)> &on_rows, int32_t next_after);
   void pf_layers(int count);  // the next `count` layers of the pending call
-  // Prompt-call graphs (prefill.cpp): the next `count` layers from a recorded graph when the call has one (recorded
-  // here on the call's kPfGraphRecordAt-th run), else pf_layers. A recorded graph serves every call with the same key:
-  // everything the layers' launches take from the host.
-  struct PfGraphKey {
-    int rows = 0, layer0 = 0, layer_end = 0;  // the call's rows; the layers it (or this part of it) runs
-    int64_t qsa_bound = 0;                    // the QSA grid bound (bound_bucket of the call's end)
-    int pair_parity = 0, kv_parity = 0, moe_parity = 0;  // the prefill wires'
-    int hc_cur = 0, hc_lcur = 0, hc_lora_ld = 0;          // the call's HC state indices (every card's alike)
-    auto operator<=>(const PfGraphKey &) const = default;
-  };
-  struct PfGraphs;
-  std::unique_ptr<PfGraphs> pf_graphs_;
-  void pf_layers_run(int count);
-  [[nodiscard]] std::optional<PfGraphKey> pf_graph_key(int count) const;
-  bool pf_record_graph(const PfGraphKey &key, int count);  // false: the recording failed twice (the layers ran eagerly)
-  void pf_replay_graph(const PfGraphKey &key);
-  void pf_flag_set(int set);  // every card's split flag lines: set 0 = the launches', 1 + i = prompt-call graph flag set i
-  int pf_graphs_n_ = 0;
-  double pf_graphs_ms_ = 0;
-  int64_t pf_graphs_replayed_ = 0;
-  // The layer-ahead fetch (ModelOptions::prefill_fetch, prefill.cpp): the lists of cold experts per layer to the cards
-  // (as they stand at the call's start), and layer l's fetch into buffer l % 2 on every card (half 0 / 1 / 2 = all).
-  void pf_fetch_lists(int m);
-  void pf_fetch_some(size_t bytes, int must, int last);
-  size_t pf_fetch_gap(int layer, int gap) const;
-  int pf_fetch_cap_ = 0;
-  std::vector<int16_t> pf_fetch_order_;  // [layer][expert]: the layer's experts by ranking, most routed first
   // The same for a call whose rows live on their owner card (prefill.cpp, "rows by owner")
   enum class PfMixer : uint8_t { attention, mlp };
   struct PfShared {  // one chunk buffer on every card: rows of row_bytes each
@@ -880,14 +774,10 @@ class Model {
   void pf_tr(const std::string &name, const sycl::ext::oneapi::bfloat16 *dev, int width);
   void run_graph(int rows, int seg_rows, int64_t need);
   void record_step_graph(int rows, int seg_rows, int64_t bound);  // from the current host state, not run
-  // Graphs hold VRAM outside the placement. Before a graph is recorded on first use, graph_room() evicts the least
-  // recently replayed step / drafter graphs (queues drained first) when the tighter card has less than kGraphRoomMiB
-  // free: kGraphRoomEvict of them while the population is above its keep mark (graph_keep_, set when the room first
-  // runs out), one at the mark, none below it (a destroyed graph's memory stays in the driver's pool for the next
-  // recording). all = evict every graph (a recording failed: the mark drops too). Returns the graphs evicted.
+  // Graphs hold VRAM outside the placement. Before a graph is recorded on first use, graph_room() evicts
+  // kGraphRoomEvict of the least recently replayed step / drafter graphs (queues drained first) when the tighter card
+  // has less than kGraphRoomMiB free; all = evict every graph. Returns the graphs evicted.
   int graph_room(bool all = false);
-  int graphs_alive() const;  // step + MTP layer graphs held
-  int graph_keep_ = -1;      // the population held below the room; < 0: the room has not run out yet
   double vram_free_mib() const;  // the tighter card (sysman); < 0 unknown
   const l0::Loader *loader_ = nullptr;
   uint64_t graph_tick_ = 0;
@@ -956,6 +846,7 @@ class Model {
   QsaSet qs_;
   PleSet ps_;
   std::vector<std::unique_ptr<Card>> cards_;
+  kernels::StepCopy attention_copy_{}, moe_copy_{};
   uint16_t *ple_pinned_ = nullptr;  // the step's PLE rows, bf16 [4][E]
   PfTrace *pf_trace_ = nullptr;
   MtpPrefill mtp_pf_ = MtpPrefill::rows;
@@ -973,8 +864,6 @@ class Model {
   std::unique_ptr<PfRun> pf_run_;   // the pending prefill call
   int64_t cap_ = 0;
   double yarn_factor_ = 1.0;
-  std::vector<int64_t> tier_limit_, tier_base_;  // per tier its positions and first row in the rope table
-  std::vector<double> tier_factor_;
   // The KV page table (host) and its device copy per card (read by every QSA layer and the drafter).
   model::KvPages kvp_;
   int32_t *kv_table_[kMaxCards] = {};
@@ -1002,37 +891,10 @@ class Model {
   int lend_n_ = 0, lend_keep_pages_ = 0, lend_refill_run_ = 0;
   uint64_t lend_ev_seen_ = 0;  // evictions already logged
   LendStats lend_st_;
-  // The live expert exchange (model.cpp, exchange_*). A round's exchanges go through three step boundaries: 1 the cold
-  // blobs to spares (copy queue), 2 the cold experts' entries to the spares + the hot blobs to the host slots the cold
-  // ones left (copy queue; a lent slot gets the hot blob too, on the compute queue), 3 the hot experts' entries to their
-  // host slot (or lent slot) and their VRAM slots to the spares. lend_pos_ = lend_cand_'s index of a blob, -1 none.
-  struct XSwap {
-    int layer, hot, cold;
-    uint8_t *spare[kMaxCards], *host[kMaxCards], *vram[kMaxCards];
-  };
-  struct XUpd {  // one table entry (pinned; read by the update launch)
-    const uint8_t *ptr;
-    uint32_t idx;
-    uint32_t flag;
-  };
-  void exchange_setup(const ModelOptions &opt, const std::vector<double> *rank);
-  void exchange_tick();
-  void exchange_apply(int c, const XUpd *u, int n);  // the entries (and cold flags) on card c's compute queue
-  std::unique_ptr<model::Placement> xpl_;
-  std::vector<XSwap> xr_;
-  int xr_stage_ = 0;
-  int64_t x_step_ = 0;
-  std::vector<uint8_t *> x_spare_[kMaxCards];
-  std::vector<uint8_t *> x_spare_mem_[kMaxCards];  // the spares' own allocations (released at exit)
-  XUpd *x_upd_[kMaxCards] = {};  // pinned [2][spares]: stage 2's and stage 3's entries
-  std::vector<uint32_t> x_seen_;
-  std::vector<int> lend_pos_;
-  ExchangeStats x_st_;
   // The snapshot store (host buffers allocated on first use and kept), a device staging buffer per card, the fork's
   // page pairs per card.
   struct SnapRec {
     int64_t pos = 0;
-    int64_t rope_delta = 0;  // the sequence's YaRN tier (Seq::rope_delta)
     int gdn_par = 0;
     kernels::PleContext ple;
     bool used = false;
@@ -1048,7 +910,6 @@ class Model {
   // One sequence slot's host state.
   struct Seq {
     int64_t pos = 0;
-    int64_t rope_delta = 0;           // its YaRN tier's first rope table row (records' kSegRope; 0 = the last tier)
     int last_rows = 0;                // rows committed by its previous step (the GDN accept count)
     int gdn_par = 0;                  // its GDN parity (window / pending log); flips per step and chunk
     kernels::PleContext ple_ctx;      // its n-gram context (advances at commit)
@@ -1103,15 +964,6 @@ class Model {
   int step_parity_ = 0, pair_parity_ = 0, moe_parity_ = 0;
   int pf_moe_parity_ = 0;  // the prefill MoE wire's (moe_rows)
   int pf_pair_parity_ = 0; // the prefill pair wire's (gdn_rows, qsa)
-  // The KV split by tokens (ModelOptions::kv_split): the pairs' mailboxes of the attention merge. Decode: a region per QSA
-  // layer and one for the MTP layer (qsa_pair_region), each used once a step, so the module sums between two uses of
-  // a region keep the partner past its last read (parity 0 throughout, graph-safe). Prefill: one mailbox, its parity
-  // flipped per qsa_rows call (pf_kv_parity_; the target's layers and the MTP layer's, lanes by row offset).
-  size_t kv_pair_region_words_ = 0;  // words of one decode region
-  std::vector<int> qsa_ord_;         // [layer]: the QSA layer's index (its decode region), -1 for the others
-  int pf_kv_parity_ = 0;
-  // A copy of `sc` with the pair's mailbox at decode region `region` (qs_.layers.size() = the MTP layer's).
-  kernels::QsaScratch qsa_pair_region(const kernels::QsaScratch &sc, int region) const;
   uint32_t pf_split_seq_ = 0;  // the last sequence number on the split sums' flag lines
   uint64_t *pf_stamps_[kMaxCards] = {};  // XEN_PF_PROFILE=3 stamp words per card, allocated on first use
   // XEN_DEC_PROFILE: decode stamp words per card, the marks of the step being recorded (part, word), totals

@@ -105,10 +105,7 @@ struct PleRowsScratch {
   ple_bf16 *x = nullptr;      // [rows_max][S*H] conv inputs
   PfA8 a8;                    // set = the kv GEMM runs W8A8 (pf_dense.hpp)
 };
-// rec: null (st.ring is the sequence's ring), or the call's first slice record on the device (rows.hpp): the kernels
-// then read the position (kSegPos, instead of pos0) and the slot (kSegSlot: its ring, st.slot_elems apart from st.ring)
-// from it, so one recorded launch serves every position and slot. The same bits.
 PleEvents ple_rows(sycl::queue &q, const PleShape &s, int m, int64_t pos0, const ple_bf16 *emb_host, const PleWeights &w, const PleState &st,
-                   const PleRowsScratch &sc, ple_bf16 *res, const int32_t *rec = nullptr);
+                   const PleRowsScratch &sc, ple_bf16 *res);
 
 }  // namespace xenithium::kernels

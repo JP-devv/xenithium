@@ -1,6 +1,4 @@
 #include "xenithium/arch/common/dflash.hpp"
-#include "xenithium/arch/common/drafter_archs.hpp"
-#include "xenithium/arch/common/dspine_head.hpp"
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -9,7 +7,6 @@
 #include <chrono>
 #include <functional>
 #include <cmath>
-#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -41,10 +38,6 @@ void need(bool ok, const std::string &what) {
 }
 
 // pinned host words (DFlash::host_): block ids, records, anchors, drafts
-// Four cards: a pass's sums of this many rows and more go as an owner sum + a share by copies (DFlash::submit).
-// Served (qwen38 TP4, measured): the update gap -0.35 ms at 12 streams and -0.38 at 16 (32-64 rows a sum); from 24
-// rows instead (6 / 7 streams) -0.1 / 0.0 ms, inside the spread, so 32.
-constexpr int kOwnerSumRows = 32;
 constexpr int kIdsOff = 0, kRecOff = k::kMaxRows, kAnchorOff = kRecOff + k::kMaxSegs * k::kSegRec, kDraftOff = kAnchorOff + k::kMaxSegs;
 constexpr int kPfRecOff = kDraftOff + k::kMaxSegs * k::kMaxRows;
 constexpr int kKeysOff = (kPfRecOff + k::kSegRec + 1) / 2 * 2;  // the block rows' top-16 keys (uint64, 8-byte aligned)
@@ -59,7 +52,7 @@ bool DFlashConfig::is_dflash(const std::string &dir) {
   try {
     const auto mc = ModelConfig::load(dir);
     for (const auto &a : mc.architectures())
-      if (is_block_drafter_arch(a)) return true;
+      if (a == "DFlash2DraftModel" || a == "DFlashDraftModel") return true;
   } catch (const std::exception &) {
   }
   return false;
@@ -68,8 +61,8 @@ bool DFlashConfig::is_dflash(const std::string &dir) {
 DFlashConfig DFlashConfig::load(const std::string &dir, int max_block) {
   const auto mc = ModelConfig::load(dir);
   bool arch = false, ds = false;
-  for (const auto &a : mc.architectures()) arch |= a == kDFlash2Arch, ds |= is_dspine_arch(a);
-  need(arch || ds, "architectures names none of " + block_drafter_arch_names() + " (" + dir + ")");
+  for (const auto &a : mc.architectures()) arch |= a == "DFlash2DraftModel", ds |= a == "DFlashDraftModel";
+  need(arch || ds, "architectures does not name DFlash2DraftModel or DFlashDraftModel (" + dir + ")");
   const json::Value &t = mc.root();
   DFlashConfig c;
   c.kind = ds && !arch ? Kind::dspine : Kind::dflash2;
@@ -138,15 +131,51 @@ DFlashConfig DFlashConfig::load(const std::string &dir, int max_block) {
   need(c.block >= 2 && c.block <= k::kStepRows16, "block_size 2..16 (a verify segment's rows)");
   need(!c.target_layers.empty() && c.mask_id >= 0 && c.mask_id < c.vocab, "target_layer_ids / mask_token_id");
   need(c.window >= 2, "sliding_window");
-  // GPTQ int4 Linears (dflash_dense_plan): the loader reads scale x (code - 8) per 128-k group, in order
-  if (const json::Value *q = t.get("quantization_config"); q && !q->is_null()) {
-    need(ModelConfig::str_or(*q, "quant_method", "") == "gptq", "quantization_config: quant_method gptq");
-    need(ModelConfig::need_int(*q, "bits") == 4 && ModelConfig::need_int(*q, "group_size") == k::kW4Group, "quantization_config: bits 4, group_size 128");
-    const json::Value *sym = q->get("sym"), *act = q->get("desc_act");
-    need(sym && sym->is_bool() && sym->b, "quantization_config: sym true");
-    need(!act || !act->is_bool() || !act->b, "quantization_config: desc_act true (act order) is not implemented");
-  }
   return c;
+}
+
+std::vector<model::DenseSpec> dflash_dense_plan(const model::Checkpoint &ck, const DFlashConfig &cfg, int dense_bytes) {
+  using S = model::DenseSpec;
+  if (dense_bytes != 1 && dense_bytes != 2 && dense_bytes != 4) throw std::invalid_argument("dflash plan: dense_bytes 1 (int8), 2 (bf16) or 4 (int4 by RTN)");
+  const S::Store mat = dense_bytes == 2 ? S::Store::bf16 : S::Store::i8;
+  const S::Store big = dense_bytes == 4 ? S::Store::w4r : mat;  // q, o, gate | up, down
+  std::vector<S> out;
+  auto add = [&](std::string name, S::Split split, S::Store store, int layer, std::vector<std::string> append = {}) {
+    if (!ck.find(name)) throw std::runtime_error("dflash plan: missing " + name);
+    for (const auto &a : append)
+      if (!ck.find(a)) throw std::runtime_error("dflash plan: missing " + a);
+    S sp;
+    sp.name = std::move(name);
+    sp.split = split;
+    sp.store = store;
+    sp.append = std::move(append);
+    sp.comp = model::Component::mtp;
+    sp.layer = layer;
+    out.push_back(std::move(sp));
+  };
+  const bool ds = cfg.kind == DFlashConfig::Kind::dspine;
+  add("fc.weight", S::Split::cols, mat, 0);
+  add("hidden_norm.weight", S::Split::replicate, S::Store::raw, 0);
+  add("norm.weight", S::Split::replicate, S::Store::raw, cfg.layers - 1);
+  if (!ds) add("candidate_selector.hidden_projection.weight", S::Split::replicate, mat, cfg.layers - 1);
+  for (int l = 0; l < cfg.layers; ++l) {
+    const std::string L = "layers." + std::to_string(l) + ".";
+    add(L + "input_layernorm.weight", S::Split::replicate, S::Store::raw, l);
+    add(L + "post_attention_layernorm.weight", S::Split::replicate, S::Store::raw, l);
+    add(L + "self_attn.q_proj.weight", S::Split::rows, big, l);
+    add(L + "self_attn.k_proj.weight", S::Split::rows, mat, l, {L + "self_attn.v_proj.weight"});
+    add(L + "self_attn.o_proj.weight", S::Split::cols, big, l);
+    add(L + "self_attn.q_norm.weight", S::Split::replicate, S::Store::raw, l);
+    add(L + "self_attn.k_norm.weight", S::Split::replicate, S::Store::raw, l);
+    add(L + "mlp.gate_proj.weight", S::Split::rows, big, l, {L + "mlp.up_proj.weight"});
+    add(L + "mlp.down_proj.weight", S::Split::cols, big, l);
+    if (ds) continue;  // DSpine: no convolution (its bridge loads in DFlash::load_dspine)
+    add(L + "attention_conv.kernel_projection.weight", S::Split::replicate, mat, l);
+    add(L + "attention_conv.base_kernel", S::Split::replicate, S::Store::raw, l);
+    add(L + "mlp_conv.kernel_projection.weight", S::Split::replicate, mat, l);
+    add(L + "mlp_conv.base_kernel", S::Split::replicate, S::Store::raw, l);
+  }
+  return out;
 }
 
 DFlash::DFlash(Fabric &fab, const std::string &dir, const std::string &target_dir, const DFlashTarget &tcfg, int64_t capacity, const DFlashOptions &opt)
@@ -219,6 +248,7 @@ DFlash::DFlash(Fabric &fab, const std::string &dir, const std::string &target_di
   if (opt.rows < 0 || opt.rows > kRows) throw std::invalid_argument("dflash: rows 0..kRows");
   rows_ = opt.rows > 0 ? opt.rows : kRows;
   const size_t R = static_cast<size_t>(rows_), NS = static_cast<size_t>(opt.slots);
+  const bool copy_wire = C == k::kWireCardsMax && opt.copy_wire;
   const bool ds = cfg_.kind == DFlashConfig::Kind::dspine;
   const int kvn = 2 * hkv_ * D, proj_n = ds ? 0 : 2 * cfg_.conv_taps * (H / cfg_.conv_group);
   for (int c = 0; c < C; ++c) {
@@ -312,12 +342,15 @@ DFlash::DFlash(Fabric &fab, const std::string &dir, const std::string &target_di
     q.memset(cd.h, 0, R * ipc_ * 2);
     q.memset(cd.rec, 0, k::kMaxSegs * k::kSegRec * 4);
     cd.wire.error = static_cast<uint32_t *>(dev(64));
+    cd.nanw = static_cast<unsigned *>(dev(64));
+    q.memset(cd.nanw, 0, 64);
     q.memset(cd.wire.error, 0, 64);
     if (C > 1) {  // TP1: no wire (the sums are the card's own partials, the top-k its own list)
       const size_t tw_words = C == 4 ? k::kDfTopkWireWords4 : k::kDfTopkWireWords;  // two hops at four cards
-      cd.wire.inbox = static_cast<uint32_t *>(fab.alloc_mailbox(static_cast<size_t>(c), k::pair_wire_words(H, C) * 4));
+      cd.wire.inbox = static_cast<uint32_t *>(fab.alloc_kernel_mailbox(k::pair_wire_words(H, C) * sizeof(uint32_t)));
       cd.mem.push_back(cd.wire.inbox);
-      cd.tw.inbox = static_cast<uint32_t *>(fab.alloc_mailbox(static_cast<size_t>(c), tw_words * 4));
+      const size_t topk_bytes = tw_words * sizeof(uint32_t);
+      cd.tw.inbox = static_cast<uint32_t *>(fab.alloc_kernel_mailbox(topk_bytes));
       cd.mem.push_back(cd.tw.inbox);
       k::df_topk_wire_init(q, cd.tw.inbox, tw_words);
     }
@@ -336,7 +369,7 @@ DFlash::DFlash(Fabric &fab, const std::string &dir, const std::string &target_di
       if (C > 1) {
         cd.fl_wire.rows_max = opt.ctx_defer;
         cd.fl_wire.n_max = H;
-        cd.fl_wire.inbox = static_cast<uint32_t *>(fab.alloc_mailbox(static_cast<size_t>(c), k::pair_rows_wire_words(opt.ctx_defer, H, C) * 4));
+        cd.fl_wire.inbox = static_cast<uint32_t *>(fab.alloc_kernel_mailbox(k::pair_rows_wire_words(opt.ctx_defer, H, C) * sizeof(uint32_t)));
         cd.mem.push_back(cd.fl_wire.inbox);
         cd.fl_wire.error = cd.wire.error;
       }
@@ -377,6 +410,14 @@ DFlash::DFlash(Fabric &fab, const std::string &dir, const std::string &target_di
   }
   if (C == 4) {  // the four-card sums (recursive doubling, every inbox by the host), the top-k in two hops
     k::WireQuad dq, rq;
+    if (copy_wire) {
+      fab.alloc_step_copy(step_copy_, rows_, H, false, cards_[0].mem);
+      dq.copy = &step_copy_;
+      if (opt.ctx_defer > 0) {
+        fab.alloc_step_copy(flush_copy_, opt.ctx_defer, H, false, cards_[0].mem);
+        rq.copy = &flush_copy_;
+      }
+    }
     for (int c = 0; c < C; ++c) dq.inbox[c] = cards_[static_cast<size_t>(c)].wire.inbox, rq.inbox[c] = cards_[static_cast<size_t>(c)].fl_wire.inbox;
     for (int c = 0; c < C; ++c) {
       Card &cd = cards_[static_cast<size_t>(c)];
@@ -390,42 +431,6 @@ DFlash::DFlash(Fabric &fab, const std::string &dir, const std::string &target_di
         cd.fl_wire.quad.card = c;
         k::pair_rows_wire_init(fab.compute(static_cast<size_t>(c)), opt.ctx_defer, H, cd.fl_wire.inbox, C).wait();
       }
-    }
-    // The pass's sums of kOwnerSumRows rows and more (submit): an owner sum and a share by copies. One use each for the
-    // whole pass: its sums alternate their parity, so a card's sum after next cannot land in a receive region its peer
-    // still reads, and every card sends once per exchange, so the counts agree.
-    auto zeroed = [&](int c, size_t bytes, bool mailbox) {
-      bytes = std::max<size_t>(bytes, 4096);
-      void *p = mailbox ? fab.alloc_mailbox(static_cast<size_t>(c), bytes) : fab.alloc(static_cast<size_t>(c), bytes);
-      cards_[static_cast<size_t>(c)].mem.push_back(p);
-      fab.compute(static_cast<size_t>(c)).memset(p, 0, bytes).wait();
-      return p;
-    };
-    k::OwnerMail sum_mail, share_mail;
-    std::array<uint32_t *, k::kWireCardsMax> sum_lines{}, share_lines{};
-    std::array<float *, k::kWireCardsMax> recv{};
-    for (int c = 0; c < C; ++c) {
-      const size_t sc = static_cast<size_t>(c);
-      sum_mail.inbox[sc] = static_cast<uint32_t *>(zeroed(c, k::owner_sum_words(H) * 4, true));
-      share_mail.inbox[sc] = static_cast<uint32_t *>(zeroed(c, k::owner_share_words(H) * 4, true));
-      k::owner_mail_init(fab.compute(sc), sum_mail.inbox[sc], k::owner_sum_words(H)).wait();
-      k::owner_mail_init(fab.compute(sc), share_mail.inbox[sc], k::owner_share_words(H)).wait();
-      sum_lines[sc] = static_cast<uint32_t *>(zeroed(c, k::kOwnerCopyLineBytes, true));
-      share_lines[sc] = static_cast<uint32_t *>(zeroed(c, k::kOwnerCopyLineBytes, true));
-      recv[sc] = static_cast<float *>(zeroed(c, k::owner_sum_copy_elems(H) * sizeof(float), false));
-    }
-    for (int c = 0; c < C; ++c) {
-      Card &cd = cards_[static_cast<size_t>(c)];
-      cd.own_wire = cd.wire;
-      cd.own_wire.owner = sum_mail;
-      cd.own_wire.owner.card = c;
-      cd.own_wire.copy.recv = recv;
-      cd.own_wire.copy.flags.lines = sum_lines;
-      cd.own_wire.copy.flags.count = static_cast<uint32_t *>(zeroed(c, k::kOwnerCopyCountBytes, false));
-      cd.own_share = k::OwnerShare{share_mail, cd.wire.error, cd.wire.wait_cycles};
-      cd.own_share.mail.card = c;
-      cd.own_share.copy.flags.lines = share_lines;
-      cd.own_share.copy.flags.count = static_cast<uint32_t *>(zeroed(c, k::kOwnerCopyCountBytes, false));
     }
   }
   host_ = static_cast<int32_t *>(fab.alloc_host(kHostWords * 4));
@@ -573,9 +578,9 @@ void DFlash::load_dspine(const std::string &dir, const std::string &target_dir) 
   void *m_wl = nullptr, *m_p2 = nullptr;
   const k::DenseWeights w_tg = pack0(wl_t, Rk, H, m_wl), w_tsv = pack0(p2, 2 * Rk, Cd, m_p2);
   const model::Checkpoint tck = model::Checkpoint::open(target_dir);
-  // TG rows: bf16 lm_head.weight, or the GPTQ int4 head dequantised to bf16 a chunk at a time (no dense copy kept).
-  if (!tck.find("lm_head.weight") && !tck.find("lm_head.qweight"))
-    throw std::runtime_error("dflash (DSpine): the target needs lm_head.weight bf16 [vocab][hidden] or GPTQ lm_head.qweight (int4, dequantised at load)");
+  const char *head_nm = tck.find("lm_head.weight") ? "lm_head.weight" : nullptr;
+  if (!head_nm || tck.at(head_nm).dtype != model::DType::bf16 || tck.at(head_nm).shape != std::vector<int64_t>{cfg_.vocab, H})
+    throw std::runtime_error("dflash (DSpine): the target's lm_head.weight must be bf16 [vocab][hidden] (the tables' rows)");
   constexpr int kChunk = 4096;
   auto *stage = static_cast<uint16_t *>(fab_.alloc_host(static_cast<size_t>(kChunk) * H * 2));
   void *a = fab_.alloc(0, static_cast<size_t>(kChunk) * H * 2), *a2 = fab_.alloc(0, static_cast<size_t>(kChunk) * H * 2);
@@ -586,7 +591,7 @@ void DFlash::load_dspine(const std::string &dir, const std::string &target_dir) 
       const int64_t t0 = tok_of(r0 + i);
       int run = 1;
       while (i + run < m && tok_of(r0 + i + run) == t0 + run) ++run;
-      dflash::read_lm_head_rows_bf16(tck, cfg_.vocab, H, t0, run, stage + static_cast<size_t>(i) * H);
+      read_bf16(tck, head_nm, static_cast<size_t>(t0) * H, static_cast<size_t>(run) * H, stage + static_cast<size_t>(i) * H);
       i += run;
     }
     q.memcpy(a, stage, static_cast<size_t>(m) * H * 2).wait();  // the stage is rewritten below
@@ -647,26 +652,32 @@ const char *const *DFlash::stage_names() {
 
 // Every GPU operation of a pass (pass() fills the pinned words first). Recorded into graphs, or run directly with
 // DFlashOptions::profile (each stage waited and timed).
+namespace {
+// The confidence cut a context pass (or a pass with nothing to trim) uses: the shipped default.
+constexpr float kConfCutDefault = 0.02f;
+}  // namespace
+
 void DFlash::submit(int ns, int ctx_rows, int block_rows, int ctx_row0, int tree) {
+  static const bool stage_trace = std::getenv("XEN_DF_STAGE") != nullptr;
   const int H = cfg_.hidden, rc = ns * ctx_rows, rb = ns * block_rows;
+  if (const char *e = std::getenv("XEN_DRAFT_TRACE"); e && *e == '1')
+    std::fprintf(stderr, "dflash submit: ns %d ctx_rows %d block_rows %d ctx_row0 %d tree %d -> cut %.4g%s\n", ns, ctx_rows, block_rows, ctx_row0, tree,
+                 static_cast<double>(ctx_rows > 0 ? kConfCutDefault : opt_.conf_cut), ctx_rows > 0 ? " (context: default)" : " (verify: configured)");
+  // The block pass's layout limits (DFlash 2: block 8, a verify segment's rows <= 16). `pass` refuses the first two, so
+  // a fault under a deep check shows up as a CCS timeout with no numbers; print them once instead.
+  if (block_rows > cfg_.block || rb > ns * k::kStepRows16 || ctx_rows > k::kStepRows16) {
+    static bool said = false;
+    if (!said) {
+      said = true;
+      std::fprintf(stderr,
+                   "dflash: block pass over its layout: ns %d, block_rows %d, ctx_rows %d, ctx_row0 %d, cfg_.block %d, "
+                   "kStepRows16 %d, rb %d\n",
+                   ns, block_rows, ctx_rows, ctx_row0, cfg_.block, k::kStepRows16, rb);
+    }
+  }
   const size_t C = cards_.size();
   const float eps = static_cast<float>(cfg_.eps);
   auto wire_of = [&](Card &cd) -> const k::PairWire * { return C > 1 ? &cd.wire : nullptr; };  // TP1: no two-card sum
-  // A sum of the pass: every card ends with every row. Four cards, from kOwnerSumRows rows: each row is summed by its
-  // owner (the partials go there by copies) and the owners share their rows by copies, instead of two hops of every
-  // row's fp32 partial through the mailboxes; the same bits ((p0 + p1) + (p2 + p3) either way). A card writes its rows
-  // into its peers' `out`: safe by the pass's order, because the next sum into the same buffer completes on a card only
-  // after every peer sent the partial of that sum, and a peer's GEMM that makes it is queued behind its readers of `out`.
-  auto reduce = [&](Card &cd, sycl::queue &q, int rows, int parity, bf16 *Card::*out) {
-    if (C != 4 || rows < kOwnerSumRows) {
-      k::pair_reduce(q, rows, H, cd.part, wire_of(cd), parity, cd.*out);
-      return;
-    }
-    k::pair_reduce(q, rows, H, cd.part, &cd.own_wire, parity, cd.*out);
-    k::OwnerShare share = cd.own_share;
-    for (size_t i = 0; i < C; ++i) share.copy.buf[i] = cards_[i].*out;
-    k::owner_share(q, rows, H, cd.*out, share, parity);
-  };
   int32_t *ids = host_ + kIdsOff, *rec = host_ + kRecOff, *anc = host_ + kAnchorOff;
   // every pair_reduce on the wire alternates its parity: draw one only for a sum that runs
   const int pc = rc > 0 ? wire_parity() : 0;  // the fc sum (context rows)
@@ -682,21 +693,46 @@ void DFlash::submit(int ns, int ctx_rows, int block_rows, int ctx_row0, int tree
     for (size_t c = 0; c < C; ++c) fab_.compute(c).wait();
     t_mark = std::chrono::steady_clock::now();
   }
+  // Keep invalid token IDs out of the embedding gather. The verifier logs the source rows separately.
+  {
+    static unsigned long bad_ids = 0;
+    unsigned bad_here = 0;
+    for (int r = 0; r < ns * block_rows; ++r) {
+      if (ids[r] < 0 || static_cast<int64_t>(ids[r]) >= tgt_.vocab) {
+        if (stage_trace) ++bad_here;
+        ids[r] = static_cast<int32_t>(cfg_.mask_id);
+      }
+    }
+    if (bad_here) {
+      bad_ids += bad_here;
+      std::fprintf(stderr, "qwen38 adapter: %u block ids outside [0, %lld) mapped to mask_id %lld (total %lu)\n",
+                   bad_here, static_cast<long long>(tgt_.vocab), static_cast<long long>(cfg_.mask_id), bad_ids);
+    }
+  }
+  const bool watch_input = rb > 0 && stage_trace;
   for (size_t c = 0; c < C; ++c) {
     Card &cd = cards_[c];
     auto &q = fab_.compute(c);
+    if (watch_input) q.memset(cd.nanw, 0, sizeof(unsigned));
     q.memcpy(cd.rec, rec, static_cast<size_t>(ns) * k::kSegRec * 4);
     // DSpine: every card's bridge reads the anchors (before the fc sum: a host copy behind a queued mailbox wait can hold
     // the submitting thread until the peer's 1 s wait gives up, eager / profile passes)
     if (rb > 0 && cfg_.kind == DFlashConfig::Kind::dspine) q.memcpy(cd.anchors, anc, static_cast<size_t>(ns) * 4);
     if (rc > 0) {
-      k::dense_gemm(q, rc, cd.feat_step + static_cast<size_t>(ctx_row0) * fcols_, cd.fc, cd.part);
-      reduce(cd, q, rc, pc, &Card::t);
+      const bf16 *features = cd.feat_step + static_cast<size_t>(ctx_row0) * fcols_;
+      if (watch_input) k::df_nanwatch(q, rc * fcols_, features, cd.nanw, 1u << 13);
+      k::dense_gemm(q, rc, features, cd.fc, cd.part);
+      k::pair_reduce(q, rc, H, cd.part, wire_of(cd), pc, cd.t);
+      if (watch_input) k::df_nanwatch(q, rc * H, cd.t, cd.nanw, 1u << 14);
       k::rms_norm_plain(q, rc, H, cd.t, nullptr, cd.hnorm, eps, cd.tn);
     }
     if (rb > 0) {
       if (tgt_.gather) tgt_.gather(q, static_cast<int>(c), ids, rb, cd.res);  // the target's own gather (arch flint)
       else k::embed_gather(q, tgt_.embed[c], ids, rb, H, 1, cd.res);
+      if (watch_input) {
+        k::df_nanwatch(q, H, cd.res, cd.nanw, 1u << 0);
+        if (block_rows > 1) k::df_nanwatch(q, (block_rows - 1) * H, cd.res + H, cd.nanw, 1u << 9);
+      }
     }
   }
   mark(0);
@@ -738,7 +774,7 @@ void DFlash::submit(int ns, int ctx_rows, int block_rows, int ctx_row0, int tree
       });
       each(5, [&](Card &cd, const Layer &ly, sycl::queue &q) {
         lm_gemm(q, rb, cd.attn, ly.o, cd.part);
-        reduce(cd, q, rb, pa, &Card::mix);
+        k::pair_reduce(q, rb, H, cd.part, wire_of(cd), pa, cd.mix);
       });
       each(6, [&](Card &cd, const Layer &ly, sycl::queue &q) { k::rms_norm_plain(q, rb, H, cd.res, cd.mix, ly.post_ln, eps, cd.xn); });
       each(7, [&](Card &cd, const Layer &ly, sycl::queue &q) {
@@ -746,7 +782,7 @@ void DFlash::submit(int ns, int ctx_rows, int block_rows, int ctx_row0, int tree
       });
       each(8, [&](Card &cd, const Layer &ly, sycl::queue &q) {
         lm_gemm(q, rb, cd.h, ly.down, cd.part);
-        reduce(cd, q, rb, pm, &Card::mlp);
+        k::pair_reduce(q, rb, H, cd.part, wire_of(cd), pm, cd.mlp);
         // the bridge: raw = res + mlp -> codes -> the predecessor message -> res = raw + rms delta (rows past the anchor)
         k::ds_bridge_in(q, rb, H, cd.res, cd.mlp, beps, cd.brms, cd.xc);
         k::dense_gemm(q, rb, cd.xc, ly.bread, cd.bproj);
@@ -764,42 +800,71 @@ void DFlash::submit(int ns, int ctx_rows, int block_rows, int ctx_row0, int tree
       k::dense_gemm(q, rb, cd.xn, ly.aproj, cd.dyn);
       k::df_conv(q, rb, block_rows, H, cfg_.conv_group, cd.xn, cd.dyn, pn, 0, ly.abase, cd.xc);
     });
+    if (stage_trace && rb > 0 && l == 0) {
+      for (size_t wc = 0; wc < C; ++wc) k::df_nanwatch(fab_.compute(wc), rb * H, cards_[wc].xn, cards_[wc].nanw, 1u << 1);
+      for (size_t wc = 0; wc < C; ++wc) k::df_nanwatch(fab_.compute(wc), rb * H, cards_[wc].xc, cards_[wc].nanw, 1u << 3);
+    }
     each(3, [&](Card &cd, const Layer &ly, sycl::queue &q) {
       lm_gemm(q, rb, cd.xc, ly.q, cd.yq);
       k::dense_gemm(q, rb, cd.xc, ly.kv, cd.ykv_b);
     });
     each(4, [&](Card &cd, const Layer &ly, sycl::queue &q) {
       k::df_prep(q, rb, block_rows, cd.rec, hq_, hkv_, cd.yq, cd.ykv_b, ly.qn, ly.kn, eps, k::DfRope{cd.cos, cd.sin, rope.positions}, cd.qb, cd.kb, cd.vb, ly.ring);
+      if (stage_trace && l == 0) {
+        k::df_nanwatch(q, rb * hq_ * k::kDfDim, cd.qb, cd.nanw, 1u << 10);
+        k::df_nanwatch(q, rb * hkv_ * k::kDfDim, cd.kb, cd.nanw, 1u << 11);
+        k::df_nanwatch(q, rb * hkv_ * k::kDfDim, cd.vb, cd.nanw, 1u << 12);
+      }
       k::df_attn(q, rb, block_rows, cd.rec, hq_, hkv_, cd.qb, cd.kb, cd.vb, ly.ring, cfg_.window, cd.apart, cd.attn);
     });
+    if (stage_trace && rb > 0 && l == 0) {
+      for (size_t wc = 0; wc < C; ++wc) k::df_nanwatch(fab_.compute(wc), rb * hq_ * k::kDfDim, cards_[wc].attn, cards_[wc].nanw, 1u << 4);
+    }
     each(5, [&](Card &cd, const Layer &ly, sycl::queue &q) {
       lm_gemm(q, rb, cd.attn, ly.o, cd.part);
-      reduce(cd, q, rb, pa, &Card::mix);
+      k::pair_reduce(q, rb, H, cd.part, wire_of(cd), pa, cd.mix);
       k::df_conv(q, rb, block_rows, H, cfg_.conv_group, cd.mix, cd.dyn, pn, 1, ly.abase + 2 * H, cd.xc);
     });
+    if (stage_trace && rb > 0 && l == 0) {
+      for (size_t wc = 0; wc < C; ++wc) k::df_nanwatch(fab_.compute(wc), rb * H, cards_[wc].mix, cards_[wc].nanw, 1u << 5);
+    }
     // MLP sublayer
     each(6, [&](Card &cd, const Layer &ly, sycl::queue &q) {
       k::rms_norm_plain(q, rb, H, cd.res, cd.xc, ly.post_ln, eps, cd.xn);
       k::dense_gemm(q, rb, cd.xn, ly.mproj, cd.dyn);
       k::df_conv(q, rb, block_rows, H, cfg_.conv_group, cd.xn, cd.dyn, pn, 0, ly.mbase, cd.xc);
     });
+    if (stage_trace && rb > 0 && l == 0) {
+      for (size_t wc = 0; wc < C; ++wc) k::df_nanwatch(fab_.compute(wc), rb * H, cards_[wc].xn, cards_[wc].nanw, 1u << 6);
+    }
     each(7, [&](Card &cd, const Layer &ly, sycl::queue &q) {
       gate_up(q, rb, cd.xc, ly, cd);
     });
+    if (stage_trace && rb > 0 && l == 0) {
+      for (size_t wc = 0; wc < C; ++wc) k::df_nanwatch(fab_.compute(wc), rb * H, cards_[wc].h, cards_[wc].nanw, 1u << 7);
+    }
     each(8, [&](Card &cd, const Layer &ly, sycl::queue &q) {
       lm_gemm(q, rb, cd.h, ly.down, cd.part);
-      reduce(cd, q, rb, pm, &Card::mix);
+      k::pair_reduce(q, rb, H, cd.part, wire_of(cd), pm, cd.mix);
       k::df_conv(q, rb, block_rows, H, cfg_.conv_group, cd.mix, cd.dyn, pn, 1, ly.mbase + 2 * H, cd.mlp);
     });
+    if (stage_trace && rb > 0 && l == 0) {
+      for (size_t wc = 0; wc < C; ++wc) k::df_nanwatch(fab_.compute(wc), rb * H, cards_[wc].mlp, cards_[wc].nanw, 1u << 8);
+    }
   }
   if (rb > 0) {
+    // A multi-segment chain never reads its anchor rows in the output head.
+    const bool compact = opt_.copy_wire && ns > 1 && tree == 0 && cfg_.kind == DFlashConfig::Kind::dflash2 &&
+                         !std::getenv("XEN_CHAIN_TRACE");
+    const int head_rows = compact ? rb - ns : rb;
     for (size_t c = 0; c < C; ++c) {
       Card &cd = cards_[c];
       auto &q = fab_.compute(c);
       k::rms_norm_plain(q, rb, H, cd.res, cfg_.kind == DFlashConfig::Kind::dspine ? nullptr : cd.mlp, cd.fnorm, eps, cd.hout);
       const LmMat &hw = head_w_.empty() ? tgt_.lm[c] : head_w_[c];
-      lm_gemm(q, rb, cd.hout, hw, cd.logits);
-      k::df_topk(q, cd.logits, hw.n, rb, hw.n, static_cast<int>(c) * hw.n, cd.topk_scratch, C > 1 ? &cd.tw : nullptr, cd.keys);
+      if (compact) k::df_pack_draft_rows(q, ns, block_rows, H, cd.hout, cd.xn);
+      lm_gemm(q, head_rows, compact ? cd.xn : cd.hout, hw, cd.logits);
+      k::df_topk(q, cd.logits, hw.n, head_rows, hw.n, static_cast<int>(c) * hw.n, cd.topk_scratch, C > 1 ? &cd.tw : nullptr, cd.keys);
     }
     // card 0 selects only after both cards' merges are queued: a device-to-host copy can block the submitting thread
     // until its queue drains, and card 0's merge waits on card 1's list (a 1 s mailbox timeout per pass)
@@ -814,22 +879,63 @@ void DFlash::submit(int ns, int ctx_rows, int block_rows, int ctx_row0, int tree
       else
         k::ds_select(q, ns, block_rows, cd.keys, cd.bpacked, cd.tsv, cd.tg, cd.bbias, tail, sub_k_, sub_s0_, cd.drafts, cd.noise);
     } else {
-      k::dense_gemm(q, rb, cd.hout, cd.sel, cd.hp);
+      k::dense_gemm(q, head_rows, compact ? cd.xn : cd.hout, cd.sel, cd.hp);
       q.memcpy(cd.anchors, anc, static_cast<size_t>(ns) * 4);
       if (tree > 0)  // the best-first tree (its words in the drafts' buffers)
         k::df_tree(q, ns, block_rows, cd.keys, cd.hp, cfg_.sel_rank, cd.pred_cb, cd.succ_cb, cd.anchors, sub_k_, sub_s0_, tree, static_cast<float>(opt_.tree_cut), cd.drafts,
                    static_cast<float>(1.0 / (opt_.tree_temp > 0 ? opt_.tree_temp : 1.0)));  // DFlash 2's auto 1
-      else
-        k::df_select(q, ns, block_rows, cd.keys, cd.hp, cfg_.sel_rank, cd.pred_cb, cd.succ_cb, cd.anchors, sub_k_, sub_s0_, cd.drafts, cd.noise);
+      else {
+        if (const char *d = std::getenv("XEN_CHAIN_TRACE"); d && *d == '1')
+          std::fprintf(stderr, "DFSEL card 0 ns %d block_rows %d rb %d keys %p drafts %p\n", ns, block_rows, rb,
+                       static_cast<void *>(cd.keys), static_cast<void *>(cd.drafts));
+        k::df_select(q, ns, block_rows, cd.keys, cd.hp, cfg_.sel_rank, cd.pred_cb, cd.succ_cb, cd.anchors, sub_k_, sub_s0_, cd.drafts, cd.noise, compact);
+      }
     }
     q.memcpy(host_ + kDraftOff, cd.drafts, static_cast<size_t>(tree > 0 ? ns * k::kDfTreeInts : ns * (block_rows - 1)) * 4);
-    q.memcpy(host_ + kKeysOff, cd.keys, static_cast<size_t>(rb) * k::kDfTopK * 8);  // the drafts' confidences
+    if (!compact) q.memcpy(host_ + kKeysOff, cd.keys, static_cast<size_t>(rb) * k::kDfTopK * 8);  // the drafts' confidences
+    if (const char *d = std::getenv("XEN_CHAIN_TRACE"); d && *d == '1') {
+      const uint64_t *kk = reinterpret_cast<const uint64_t *>(host_ + kKeysOff);
+      std::fprintf(stderr, "DFPOST drafts %d %d %d %d | keys %016llx %016llx %016llx %016llx | kind %d tree %d block_rows %d rb %d sub_k %d sub_s0 %d\n",
+                   host_[kDraftOff], host_[kDraftOff + 1], host_[kDraftOff + 2], host_[kDraftOff + 3], static_cast<unsigned long long>(kk[0]),
+                   static_cast<unsigned long long>(kk[1]), static_cast<unsigned long long>(kk[2]), static_cast<unsigned long long>(kk[3]),
+                   static_cast<int>(cfg_.kind), tree, block_rows, rb, sub_k_, sub_s0_);
+    }
   }
   mark(9);
 }
 
 std::vector<std::vector<int32_t>> DFlash::pass(const std::vector<Seg> &segs, int ctx_rows, int block_rows, int ctx_row0, int step_seqs) {
+  static const bool stage_trace = std::getenv("XEN_DF_STAGE") != nullptr;
+  if (const char *e = std::getenv("XEN_DRAFT_TRACE"); e && *e == '1')
+    std::fprintf(stderr, "dflash pass: segs %zu ctx_rows %d block_rows %d ctx_row0 %d step_seqs %d\n", segs.size(), ctx_rows, block_rows, ctx_row0,
+                 step_seqs);
   const int ns = static_cast<int>(segs.size());
+  if (const char *d = std::getenv("XEN_PASSDUMP"); d && *d == '1') {
+    static bool allocs_done = false;
+    if (!allocs_done) {
+      allocs_done = true;
+      std::fprintf(stderr, "PASSALLOC host_=%p rows_=%d cap_=%d fcols_=%d ctx_defer=%d cards=%zu\\n", static_cast<void *>(host_), rows_, static_cast<int>(cap_), fcols_,
+                   opt_.ctx_defer, cards_.size());
+      for (size_t c = 0; c < cards_.size(); ++c) {
+        const Card &cd = cards_[c];
+        std::fprintf(stderr,
+                     "PASSALLOC card %zu feat_step=%p backlog=%p keys=%p drafts=%p rec=%p hp=%p hout=%p fl_part=%p fl_t=%p fl_tn=%p fl_rec=%p hnorm=%p\\n", c,
+                     static_cast<const void *>(cd.feat_step), static_cast<const void *>(cd.backlog), static_cast<const void *>(cd.keys),
+                     static_cast<const void *>(cd.drafts), static_cast<const void *>(cd.rec), static_cast<const void *>(cd.hp),
+                     static_cast<const void *>(cd.hout), static_cast<const void *>(cd.fl_part), static_cast<const void *>(cd.fl_t),
+                     static_cast<const void *>(cd.fl_tn), static_cast<const void *>(cd.fl_rec), static_cast<const void *>(cd.hnorm));
+      }
+    }
+    for (int i = 0; i < ns; ++i) {
+      const Seg &g = segs[static_cast<size_t>(i)];
+      const int64_t pend_p0 = (!pend_.empty() && g.slot >= 0 && g.slot < opt_.slots) ? pend_[static_cast<size_t>(g.slot)].p0 : -1;
+      const int pend_n = (!pend_.empty() && g.slot >= 0 && g.slot < opt_.slots) ? pend_[static_cast<size_t>(g.slot)].n : -1;
+      std::fprintf(stderr,
+                   "PASSGEOM slot %d start %lld ctx_p0 %lld anchor %d | ctx_rows %d ctx_row0 %d block_rows %d | pend p0 %lld n %d | ring par %d fl_par %d rows_ %d cap_ %d\\n",
+                   g.slot, static_cast<long long>(g.start), static_cast<long long>(g.ctx_p0), g.anchor, ctx_rows, ctx_row0, block_rows,
+                   static_cast<long long>(pend_p0), pend_n, par_, fl_par_, rows_, static_cast<int>(cap_));
+    }
+  }
   if (ns < 1 || ns > k::kMaxSegs || ctx_rows < 0 || block_rows < 0 || block_rows == 1 || ctx_row0 < 0 || ctx_row0 + ns * ctx_rows > rows_ || ns * block_rows > rows_ ||
       block_rows > cfg_.block || (ctx_rows == 0 && block_rows == 0))
     throw std::invalid_argument("dflash: pass segments / rows");
@@ -880,24 +986,6 @@ std::vector<std::vector<int32_t>> DFlash::pass(const std::vector<Seg> &segs, int
     const GraphKey key{ns, ctx_rows, block_rows, ctx_row0, par_, tree};
     auto it = graphs_.find(key);
     if (it == graphs_.end()) {
-      // Bounded: each pass graph holds ~10 MiB of device memory per card, and mixed concurrency with adaptive draft depths
-      // keeps producing new keys (unbounded, multi-agent traffic filled 24 GB cards in 15-25 min). Every pass ends with
-      // both cards drained (below), so an evicted graph is never in flight.
-      static const size_t cap = [] {
-        const char *e = std::getenv("XEN_DRAFT_GRAPHS");
-        if (e && *e) return static_cast<size_t>(std::max(4, std::atoi(e)));
-        // qwen35 decode step graphs (XEN_STEP_GRAPHS=1) share the same ~1 GiB per card: 72 pass graphs + 32 step graphs
-        const char *sg = std::getenv("XEN_STEP_GRAPHS");
-        return sg && sg[0] == '1' ? size_t{72} : size_t{96};
-      }();
-      while (graphs_.size() >= cap) {
-        auto lru = graphs_.begin();
-        for (auto g = graphs_.begin(); g != graphs_.end(); ++g)
-          if (g->second.used < lru->second.used) lru = g;
-        graphs_.erase(lru);
-        if (graphs_evicted_++ == 0)
-          std::fprintf(stderr, "dflash: pass graphs at the cap of %zu (XEN_DRAFT_GRAPHS): the least recently used is evicted from now on\n", cap);
-      }
       namespace sx = sycl::ext::oneapi::experimental;
       const auto tr = std::chrono::steady_clock::now();
       std::vector<sx::command_graph<sx::graph_state::modifiable>> g;
@@ -917,16 +1005,99 @@ std::vector<std::vector<int32_t>> DFlash::pass(const std::vector<Seg> &segs, int
       par_ = p0;
       for (size_t c = 0; c < C; ++c) e.exec.push_back(g[c].finalize());
       it = graphs_.emplace(key, std::move(e)).first;
-      ++graphs_n_;
       graphs_ms_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tr).count();
     }
-    it->second.used = ++graph_tick_;
     // both cards' graphs in flight together: the mailbox waits inside pair up across the cards
     for (size_t c = 0; c < C; ++c) fab_.compute(c).ext_oneapi_graph(it->second.exec[c]);
     par_ = it->second.end_par;
   }
   for (size_t c = 0; c < C; ++c) fab_.compute(c).wait_and_throw();
+  if (const char *d = std::getenv("XEN_CHAIN_TRACE"); d && *d == '1' && rb > 0 && block_rows >= 2) {
+    // the same device buffer into a second landing zone: distinguishes an empty device buffer from a copy that
+    // never reached host_
+    static std::vector<int32_t> probe;
+    const size_t cnt = static_cast<size_t>(ns) * static_cast<size_t>(block_rows - 1);
+    probe.assign(cnt, -12345);
+    // the tail inputs: hp (selector hidden) and logits, is this pass writing them at all?
+    {
+      static std::vector<float> hpp, lgp;
+      static int in_prints = 0;
+      const char *limit = std::getenv("XEN_DF_TRACE_PASSES");
+      if (in_prints < (limit ? std::max(0, std::atoi(limit)) : 6)) {
+        ++in_prints;
+        const size_t hpn = static_cast<size_t>(ns) * static_cast<size_t>(block_rows) * static_cast<size_t>(cfg_.sel_rank);
+        hpp.assign(hpn, -99.f);
+        lgp.assign(32, -99.f);
+        fab_.compute(0).memcpy(hpp.data(), cards_[0].hp, hpn * sizeof(float)).wait();
+        fab_.compute(0).memcpy(lgp.data(), cards_[0].logits, lgp.size() * sizeof(float)).wait();
+        size_t hz = 0, hnan = 0;
+        for (float v : hpp) { if (v == 0.f) ++hz; if (!(v == v)) ++hnan; }
+        {
+          if (stage_trace && !tgt_.gather) {
+            for (const int32_t token : {ids[0], ids[1]}) {
+              const auto *row = tgt_.embed[0] + static_cast<size_t>(token) * cfg_.hidden;
+              int nonfinite = 0;
+              for (int col = 0; col < cfg_.hidden; ++col)
+                nonfinite += !std::isfinite(static_cast<float>(row[col]));
+              uint16_t bits[4];
+              std::memcpy(bits, row, sizeof(bits));
+              std::fprintf(stderr, "DFTABLE token %d nonfinite %d bits %04x %04x %04x %04x\n",
+                           token, nonfinite, bits[0], bits[1], bits[2], bits[3]);
+            }
+          }
+          if (stage_trace) {
+            const Seg &seg = segs.front();
+            const size_t width = static_cast<size_t>(hkv_) * k::kDfDim;
+            for (size_t c = 0; c < C; ++c) {
+              const auto &ring = cards_[c].layers.front().ring;
+              std::vector<uint16_t> vals(static_cast<size_t>(ring_) * width);
+              for (const auto *ptr : {ring.k, ring.v}) {
+                fab_.compute(c).memcpy(vals.data(), ptr + static_cast<size_t>(seg.slot) * vals.size(),
+                                      vals.size() * sizeof(uint16_t)).wait();
+                int first = -1, last = -1, bad = 0;
+                for (int64_t pos = std::max<int64_t>(0, seg.start - cfg_.window); pos < seg.start; ++pos) {
+                  const auto at = vals.begin() + static_cast<size_t>(pos % ring_) * width;
+                  if (std::any_of(at, at + width, [](uint16_t v) { return (v & 0x7f80u) == 0x7f80u; })) {
+                    if (first < 0) first = static_cast<int>(pos);
+                    last = static_cast<int>(pos);
+                    ++bad;
+                  }
+                }
+                std::fprintf(stderr, "DFRING card %zu %s start %lld bad_rows %d first %d last %d\n", c,
+                             ptr == ring.k ? "key" : "value", static_cast<long long>(seg.start), bad, first, last);
+              }
+            }
+          }
+          unsigned nw[8] = {0,0,0,0,0,0,0,0};
+          for (size_t c = 0; c < C; ++c) fab_.compute(c).memcpy(&nw[c], cards_[c].nanw, sizeof(unsigned)).wait();
+          std::fprintf(stderr, "DFNANW card bits %08x %08x %08x %08x\n", nw[0], nw[1], nw[2], nw[3]);
+          if (rb > 0 && ns > 0) std::fprintf(stderr, "DFIDS block anchor %d mask %lld rows %d (vocab %lld)\n", ids[0], static_cast<long long>(cfg_.mask_id), block_rows, static_cast<long long>(tgt_.vocab));
+        }
+        {
+          static std::vector<uint16_t> fb, rb_, hb;
+          fb.assign(8, 0), rb_.assign(8, 0), hb.assign(8, 0);
+          fab_.compute(0).memcpy(fb.data(), cards_[0].feat_step, 8 * sizeof(uint16_t)).wait();
+          fab_.compute(0).memcpy(rb_.data(), cards_[0].res, 8 * sizeof(uint16_t)).wait();
+          fab_.compute(0).memcpy(hb.data(), cards_[0].hout, 8 * sizeof(uint16_t)).wait();
+          std::fprintf(stderr, "DFSRC feat_step %04x %04x %04x %04x | res %04x %04x %04x %04x | hout %04x %04x %04x %04x\n",
+                       fb[0], fb[1], fb[2], fb[3], rb_[0], rb_[1], rb_[2], rb_[3], hb[0], hb[1], hb[2], hb[3]);
+        }
+        std::fprintf(stderr, "DFIN hp %.4g %.4g %.4g %.4g rank %d n %zu zeros %zu nan %zu | logits %.4g %.4g %.4g %.4g\n",
+                     static_cast<double>(hpp[0]), static_cast<double>(hpp[1]), static_cast<double>(hpp[2]), static_cast<double>(hpp[3]),
+                     cfg_.sel_rank, hpn, hz, hnan, static_cast<double>(lgp[0]), static_cast<double>(lgp[1]),
+                     static_cast<double>(lgp[2]), static_cast<double>(lgp[3]));
+      }
+    }
+    fab_.compute(0).memcpy(probe.data(), cards_[0].drafts, cnt * sizeof(int32_t)).wait();
+    std::fprintf(stderr, "DFPROBE device %d %d %d | host_ %d %d %d | ns %d block_rows %d\n", probe[0], cnt > 1 ? probe[1] : -1,
+                 cnt > 2 ? probe[2] : -1, host_[kDraftOff], host_[kDraftOff + 1], host_[kDraftOff + 2], ns, block_rows);
+  }
+  if (const char *d = std::getenv("XEN_CHAIN_TRACE"); d && *d == '1' && rb > 0)
+    std::fprintf(stderr, "DFIDS host_drafts %d %d %d %d\n", host_[kDraftOff], host_[kDraftOff + 1], host_[kDraftOff + 2], host_[kDraftOff + 3]);
   std::vector<std::vector<int32_t>> out(static_cast<size_t>(ns));
+  if (const char *e = std::getenv("XEN_DRAFT_TRACE"); e && *e == '1' && rb > 0)
+    std::fprintf(stderr, "dflash verify shape: ns %d block_rows %d tree %d rb %d | kTreeRows %d kDfTopK %d kStepRows16 %d\n", ns, block_rows, tree, rb,
+                 k::kTreeRows, k::kDfTopK, k::kStepRows16);
   if (rb > 0 && tree > 0) {  // the tree's nodes (join order) as verify rows (preorder), per segment
     for (int s = 0; s < ns; ++s) {
       const int32_t *w = host_ + kDraftOff + s * k::kDfTreeInts;
@@ -942,40 +1113,78 @@ std::vector<std::vector<int32_t>> DFlash::pass(const std::vector<Seg> &segs, int
       auto &o = out[static_cast<size_t>(i)];
       o.assign(host_ + kDraftOff + i * (block_rows - 1), host_ + kDraftOff + (i + 1) * (block_rows - 1));
       // one sequence only: a step of several shares its rows (the shortest segment sets them for all)
-      if (opt_.conf_cut > 0 && ns == 1) o.resize(static_cast<size_t>(confident(o, i * block_rows)));
+      const double cut = ctx_rows > 0 ? kConfCutDefault : opt_.conf_cut;  // a context pass keeps the default cut
+      const auto invalid = std::find_if(o.begin(), o.end(), [&](int32_t token) { return token < 0 || token >= tgt_.vocab; });
+      if (invalid != o.end()) {
+        std::fprintf(stderr, "dflash: out-of-vocabulary draft %d at index %td; discarding the suffix\n", *invalid, invalid - o.begin());
+        o.erase(invalid, o.end());
+      }
+      const size_t pre = o.size();
+      if (cut > 0 && ns == 1) o.resize(static_cast<size_t>(confident(o, i * block_rows, static_cast<float>(cut))));
+      if (const char *d = std::getenv("XEN_CHAIN_TRACE"); d && *d == '1')
+        std::fprintf(stderr, "CHAIN slot %d requested_drafts %zu block_rows %d returned %zu cut %.3f first_id %d ctx_rows %d ids %d %d %d\n",
+                     segs[static_cast<size_t>(i)].slot, pre, block_rows, o.size(), cut, pre > 0 ? o[0] : -999, ctx_rows,
+                     pre > 0 ? o[0] : -999, pre > 1 ? o[1] : -999, pre > 2 ? o[2] : -999);
     }
   ms_ = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
   return out;
 }
 
-void DFlash::prefill_ctx(int m, int64_t pos0, int slot, const std::vector<Lend> &lend, int parity, int row0) {
+void DFlash::prefill_ctx(int m, int64_t pos0, int slot, const std::vector<Lend> &lend, int parity, int row0, uint32_t *split_seq) {
   if (m < 1 || row0 < 0 || row0 + m > opt_.prefill_rows || pos0 < 0 || pos0 + m > cap_ || slot < 0 || slot >= opt_.slots)
     throw std::invalid_argument("dflash: prefill rows");
   settle(slot, pos0);  // the slot's deferred rows below the chunk first
   const int H = cfg_.hidden;
   const float eps = static_cast<float>(cfg_.eps);
-  // Stage-major over the cards: every card's fc and sum are queued before any card's later work. A sum waits on the
-  // device for the peer card's partial, so a host wait after card 0's sum but before card 1's fc (pf_dense's oneDNN
-  // route checks a new shape with a read-back and frees a scratch: both wait for the queue) would stall card 0 until the
-  // sum's bounded wait gives up and leave a wrong context sum.
-  for (size_t c = 0; c < cards_.size(); ++c) {
-    Card &cd = cards_[c];
-    auto &q = fab_.compute(c);
-    // the record from kernel arguments: no pinned words a later chunk could rewrite before the copy runs (the 27B waits
-    // after every chunk; qwen38's next chunk may be submitted before this one ran)
-    k::df_rec_set(q, cd.pf_rec, pos0, slot);
-    k::pf_dense(q, m, cd.fc, cd.feat_pf + static_cast<size_t>(row0) * fcols_, fcols_, k::PfOut{lend[c].part, nullptr, H});
+  // Split copies avoid the per-element mailbox on the qwen38 TP4 prefill path.
+  // Keep each write within one ring revolution so no two rows overwrite the same slot in a kernel.
+  const char *seg_env = std::getenv("XEN_DF_PF_CHUNK");
+  const int seg = std::min({m, ring_, seg_env ? std::max(16, std::atoi(seg_env)) : split_seq ? ring_ : rows_});
+  sycl::queue *queues[k::kWireCardsMax], *side[k::kWireCardsMax];
+  const float *part[k::kWireCardsMax];
+  bf16 *out[k::kWireCardsMax];
+  k::PairSplit split[k::kWireCardsMax];
+  if (split_seq) {
+    for (size_t c = 0; c < cards_.size(); ++c) {
+      queues[c] = &fab_.compute(c);
+      side[c] = lend[c].split_side;
+      part[c] = lend[c].part;
+      out[c] = lend[c].t;
+      split[c] = *lend[c].split;
+    }
   }
-  for (size_t c = 0; c < cards_.size(); ++c) k::pair_reduce_rows(fab_.compute(c), m, H, lend[c].part, lend[c].wire, parity, lend[c].t);
-  for (size_t c = 0; c < cards_.size(); ++c) {
-    Card &cd = cards_[c];
-    const Lend &b = lend[c];
-    auto &q = fab_.compute(c);
-    k::rms_norm_plain(q, m, H, b.t, nullptr, cd.hnorm, eps, b.tn);
-    const k::DfRope rp{cd.cos, cd.sin, static_cast<int>(cap_)};
-    for (const Layer &ly : cd.layers) {
-      k::pf_dense(q, m, ly.kv, b.tn, H, k::PfOut{b.ykv, nullptr, ly.kv.n});
-      k::df_prep(q, m, 0, cd.pf_rec, hq_, hkv_, nullptr, b.ykv, ly.qn, ly.kn, eps, rp, nullptr, nullptr, nullptr, ly.ring);
+  for (int r = 0; r < m; r += seg) {
+    const int mm = std::min(seg, m - r);
+    const int64_t p0 = pos0 + r;
+    const int prow = row0 + r;
+    // Stage-major over the cards: every card's fc and sum are queued before any card's later work. A sum waits on the
+    // device for the peer card's partial, so a host wait after card 0's sum but before card 1's fc (pf_dense's oneDNN
+    // route checks a new shape with a read-back and frees a scratch: both wait for the queue) would stall card 0 until the
+    // sum's bounded wait gives up and leave a wrong context sum.
+    for (size_t c = 0; c < cards_.size(); ++c) {
+      Card &cd = cards_[c];
+      auto &q = fab_.compute(c);
+      // the record from kernel arguments: no pinned words a later chunk could rewrite before the copy runs
+      k::df_rec_set(q, cd.pf_rec, p0, slot);
+      k::pf_dense(q, mm, cd.fc, cd.feat_pf + static_cast<size_t>(prow) * fcols_, fcols_, k::PfOut{lend[c].part, nullptr, H});
+    }
+    if (split_seq) {
+      *split_seq = k::pair_split_next_seq(*split_seq);
+      k::pair_split_rows(queues, mm, H, part, out, split, *split_seq, nullptr, side);
+    } else {
+      for (size_t c = 0; c < cards_.size(); ++c)
+        k::pair_reduce_rows(fab_.compute(c), mm, H, lend[c].part, lend[c].wire, parity, lend[c].t);
+    }
+    for (size_t c = 0; c < cards_.size(); ++c) {
+      Card &cd = cards_[c];
+      const Lend &b = lend[c];
+      auto &q = fab_.compute(c);
+      k::rms_norm_plain(q, mm, H, b.t, nullptr, cd.hnorm, eps, b.tn);
+      const k::DfRope rp{cd.cos, cd.sin, static_cast<int>(cap_)};
+      for (const Layer &ly : cd.layers) {
+        k::pf_dense(q, mm, ly.kv, b.tn, H, k::PfOut{b.ykv, nullptr, ly.kv.n});
+        k::df_prep(q, mm, 0, cd.pf_rec, hq_, hkv_, nullptr, b.ykv, ly.qn, ly.kn, eps, rp, nullptr, nullptr, nullptr, ly.ring);
+      }
     }
   }
 }
@@ -999,8 +1208,9 @@ void DFlash::set_noise(int slot, uint64_t key, uint64_t pos, float inv_t) {
 
 // How many of a segment's drafts to keep: the chain of their confidences (each draft's softmax probability among its
 // block row's top-16 logits; draft j comes from block row j + 1) stays >= conf_cut.
-int DFlash::confident(const std::vector<int32_t> &drafts, int row0) const {
+int DFlash::confident(const std::vector<int32_t> &drafts, int row0, float cut) const {
   const auto *keys = reinterpret_cast<const uint64_t *>(host_ + kKeysOff);
+  const bool trace = std::getenv("XEN_CONF_TRACE") != nullptr;  // diagnostic: which draft fails to match a key row
   double p = 1;
   for (size_t j = 0; j < drafts.size(); ++j) {
     const uint64_t *kr = keys + (static_cast<size_t>(row0) + j + 1) * k::kDfTopK;
@@ -1013,8 +1223,35 @@ int DFlash::confident(const std::vector<int32_t> &drafts, int row0) const {
       if (sub_k_ > 0 && t >= sub_k_) t = t - sub_k_ + sub_s0_;
       if (t == drafts[j]) sel = v;
     }
-    p *= sel > -1e29 ? std::exp(sel - mx) / se : 0.0;
-    if (p < opt_.conf_cut) return static_cast<int>(j);
+    const double pr = sel > -1e29 ? std::exp(sel - mx) / se : 0.0;
+    if (j == 0) {
+      if (const char *d = std::getenv("XEN_CHAIN_TRACE"); d && *d == '1') {
+        int64_t braw = -1, brem = -1, r0 = -1, r1 = -1, r2 = -1;
+        double bv = -1e30;
+        for (int b = 0; b < k::kDfTopK; ++b) {
+          const double v = k::df_key_value(kr[b]);
+          int64_t t = k::df_key_index(kr[b]);
+          const int64_t tr = (sub_k_ > 0 && t >= sub_k_) ? t - sub_k_ + sub_s0_ : t;
+          if (b == 0) r0 = t;
+          if (b == 1) r1 = t;
+          if (b == 2) r2 = t;
+          if (v > bv) bv = v, braw = t, brem = tr;
+        }
+        std::fprintf(stderr,
+                     "CHAINID row0 %d draft %d argmax_raw %lld argmax_remap %lld key0..2 %lld %lld %lld sub_k %d sub_s0 %d matched %d\n",
+                     row0, drafts[j], static_cast<long long>(braw), static_cast<long long>(brem), static_cast<long long>(r0),
+                     static_cast<long long>(r1), static_cast<long long>(r2), sub_k_, sub_s0_, sel > -1e29 ? 1 : 0);
+      }
+    }
+    p *= pr;
+    if (trace)
+      std::fprintf(stderr, "conf j=%zu draft=%d matched=%d prob=%.3e p=%.3e cut=%.3g\n", j, drafts[j],
+                   sel > -1e29 ? 1 : 0, pr, p, static_cast<double>(cut));
+    // A draft that does not appear in its block row's top-16 has an unknown, not zero, probability: stopping the
+    // chain there is right, but returning 0 throws away the guesses already accepted and degenerates the step to
+    // plain decode (1 tok/step). Keep at least the first guess, which is what a cut of 0.02 buys on the reference
+    // rig (2.25 tok/step on prose).
+    if (p < cut) return std::max(1, static_cast<int>(j));
   }
   return static_cast<int>(drafts.size());
 }

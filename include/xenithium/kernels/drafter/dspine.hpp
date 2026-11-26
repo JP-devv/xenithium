@@ -1,4 +1,4 @@
-// Xenithium · the DSpine block drafter's own kernels (`DFlashDraftModel` / `DSpineDraftModel` + the DSpine code bridge).
+// Xenithium · the DSpine block drafter's own kernels (`DFlashDraftModel` + the DSpine code bridge).
 //
 // DSpine (Tencent) drafts a block like DFlash: row 0 = the anchor (the last verified token), rows 1.. the mask token;
 // five Qwen3 decoder layers whose attention is causal inside the block and reads the fc-projected target context in a

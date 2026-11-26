@@ -50,7 +50,6 @@ if [[ "$model_env" == auto ]]; then
   for f in models/*.env models/presets/*.env; do
     [[ "$f" =~ \.tp[0-9]+\.env$ ]] && continue  # a setup file (it names no checkpoint)
     [[ "$f" == models/presets/* && -f "models/${f##*/}" ]] && continue  # your file of that name replaces the preset
-    grep -q "^XEN_PRESET_EXPLICIT=1" "$f" && continue  # a variant that needs extra files: only by name (XEN_MODEL_ENV=<id>)
     [[ -f "$f" ]] && same_dir "$want_model" "$(model_env_model "$f")" && { model_env_file=$f; break; }
   done
 fi
@@ -88,7 +87,6 @@ XEN_SLOTS=${XEN_SLOTS:-4}
 XEN_CONTEXT=${XEN_CONTEXT:-262144}
 XEN_KV_POOL_TOKENS=${XEN_KV_POOL_TOKENS:-auto}
 XEN_KV=${XEN_KV:-int8}
-XEN_KV_SPLIT=${XEN_KV_SPLIT:-heads}
 XEN_HOT=${XEN_HOT:-}
 XEN_HOT_RANK=${XEN_HOT_RANK-auto}
 XEN_MOE_CPU=${XEN_MOE_CPU:-off}
@@ -109,14 +107,11 @@ XEN_PREFILL_DENSE=${XEN_PREFILL_DENSE:-w8a8-row}
 XEN_DECODE_MOE=${XEN_DECODE_MOE:-w4a16}
 XEN_GDN_W4=${XEN_GDN_W4:-int8}
 XEN_PREFILL_COLD_STAGE=${XEN_PREFILL_COLD_STAGE:-16}
-XEN_PREFILL_FETCH=${XEN_PREFILL_FETCH:-0}
-XEN_PREFILL_GRAPHS=${XEN_PREFILL_GRAPHS:-0}
 XEN_KV_LEND=${XEN_KV_LEND:-on}
 XEN_KV_LEND_KEEP=${XEN_KV_LEND_KEEP:-32768}
 XEN_KV_LEND_PARK_S=${XEN_KV_LEND_PARK_S:-300}
 XEN_KV_LEND_PRESSURE=${XEN_KV_LEND_PRESSURE:-kv}
 XEN_KV_LEND_GRACE_S=${XEN_KV_LEND_GRACE_S:-60}
-XEN_EXPERT_EXCHANGE=${XEN_EXPERT_EXCHANGE:-on}
 XEN_SAMPLE_THREADS=${XEN_SAMPLE_THREADS:-4}
 # the sampling of requests that send no value of their own (empty = the checkpoint's generation_config.json)
 XEN_TEMPERATURE=${XEN_TEMPERATURE:-}
@@ -133,7 +128,7 @@ XEN_DRAFTER_DEFER=${XEN_DRAFTER_DEFER:-64}
 XEN_DRAFTER_CUT=${XEN_DRAFTER_CUT:-0.02}
 XEN_DRAFTER_TREE=${XEN_DRAFTER_TREE:-7}
 XEN_DRAFTER_TREE_SEQS=${XEN_DRAFTER_TREE_SEQS:-2}
-# 0 = the model's default (qwen35 32; qwen38 16, 64 on four cards)
+# 0 = the model's default (qwen35 32, qwen38 16)
 XEN_STEP_ROWS=${XEN_STEP_ROWS:-0}
 XEN_SEG_ROWS=${XEN_SEG_ROWS:-16}
 XEN_DRAFT_DEPTHS=${XEN_DRAFT_DEPTHS:-}
@@ -199,12 +194,12 @@ XEN_VIDEO_MAX_PIXELS=${XEN_VIDEO_MAX_PIXELS:-25165824}
 XEN_VIDEO_FPS=${XEN_VIDEO_FPS:-2}
 
 cmd=(./build/xenithium-server --model "$XEN_MODEL" --host "$XEN_HOST" --port "$XEN_PORT" --served-model-name "$XEN_SERVED_NAME"
-     --slots "$XEN_SLOTS" --context "$XEN_CONTEXT" --kv-pool-tokens "$XEN_KV_POOL_TOKENS" --kv "$XEN_KV" --kv-split "$XEN_KV_SPLIT" --reserve "$XEN_RESERVE" --graphs "$XEN_GRAPHS"
-     --prefill-chunk "$XEN_PREFILL_CHUNK" --prefill-stall-ms "$XEN_PREFILL_STALL_MS" --prefill-part-ms "$XEN_PREFILL_PART_MS" --prefill-merge "$XEN_PREFILL_MERGE" --prefill-moe "$XEN_PREFILL_MOE" --prefill-dense "$XEN_PREFILL_DENSE" --decode-moe "$XEN_DECODE_MOE" --gdn-w4 "$XEN_GDN_W4" --prefill-cold-stage "$XEN_PREFILL_COLD_STAGE" --prefill-fetch "$XEN_PREFILL_FETCH" --prefill-graphs "$XEN_PREFILL_GRAPHS" --sample-threads "$XEN_SAMPLE_THREADS" --warmup "$XEN_WARMUP" --max-queue "$XEN_MAX_QUEUE" --queue-policy "$XEN_QUEUE_POLICY"
+     --slots "$XEN_SLOTS" --context "$XEN_CONTEXT" --kv-pool-tokens "$XEN_KV_POOL_TOKENS" --kv "$XEN_KV" --reserve "$XEN_RESERVE" --graphs "$XEN_GRAPHS"
+     --prefill-chunk "$XEN_PREFILL_CHUNK" --prefill-stall-ms "$XEN_PREFILL_STALL_MS" --prefill-part-ms "$XEN_PREFILL_PART_MS" --prefill-merge "$XEN_PREFILL_MERGE" --prefill-moe "$XEN_PREFILL_MOE" --prefill-dense "$XEN_PREFILL_DENSE" --decode-moe "$XEN_DECODE_MOE" --gdn-w4 "$XEN_GDN_W4" --prefill-cold-stage "$XEN_PREFILL_COLD_STAGE" --sample-threads "$XEN_SAMPLE_THREADS" --warmup "$XEN_WARMUP" --max-queue "$XEN_MAX_QUEUE" --queue-policy "$XEN_QUEUE_POLICY"
      --queue-aging "$XEN_QUEUE_AGING" --queue-timeout "$XEN_QUEUE_TIMEOUT" --idle-timeout "$XEN_IDLE_TIMEOUT"
      --log-interval "$XEN_LOG_INTERVAL" --drafter "$XEN_DRAFTER" --draft-vocab "$XEN_DRAFT_VOCAB" --drafter-defer "$XEN_DRAFTER_DEFER" --drafter-cut "$XEN_DRAFTER_CUT" --drafter-tree "$XEN_DRAFTER_TREE" --drafter-tree-seqs "$XEN_DRAFTER_TREE_SEQS" --step-rows "$XEN_STEP_ROWS" --seg-rows "$XEN_SEG_ROWS" --drafter-wide "$XEN_DRAFTER_WIDE" --drafter-tree-wide "$XEN_DRAFTER_TREE_WIDE" --drafter-mtp-from "$XEN_DRAFTER_MTP_FROM" --drafter-int4 "$XEN_DRAFTER_INT4" --wire "$XEN_WIRE" --prefill-wire "$XEN_PREFILL_WIRE" --yarn-tiers "$XEN_YARN_TIERS" --tp "$tp" --card "$card" --emu-card "$XEN_EMU_CARD" --w4-items "$XEN_W4_ITEMS" --attn-select "$XEN_ATTN_SELECT" --prefill-select "$XEN_PREFILL_SELECT" --decode-attn "$XEN_DECODE_ATTN" --decode-w4 "$XEN_DECODE_W4"
      --prefill-attn "$XEN_PREFILL_ATTN" --prefill-w4 "$XEN_PREFILL_W4" --prefill-gemm "$XEN_PREFILL_GEMM" --attn-tail "$XEN_ATTN_TAIL" --prefill-short "$XEN_PREFILL_SHORT" --prefill-a8-body "$XEN_PREFILL_A8_BODY" --lm-head "$XEN_LM_HEAD" --lm-head-tiles "$XEN_LM_HEAD_TILES" --draft-head "$XEN_DRAFT_HEAD"
-     --prefill-gemm-rows "$XEN_PREFILL_GEMM_ROWS" --kv-lend "$XEN_KV_LEND" --kv-lend-keep "$XEN_KV_LEND_KEEP" --kv-lend-park-s "$XEN_KV_LEND_PARK_S" --kv-lend-pressure "$XEN_KV_LEND_PRESSURE" --kv-lend-grace-s "$XEN_KV_LEND_GRACE_S" --expert-exchange "$XEN_EXPERT_EXCHANGE" --prefix-cache "$XEN_PREFIX_CACHE" --prefix-cache-gib "$XEN_PREFIX_CACHE_GIB" --prefix-mark-min "$XEN_PREFIX_MARK_MIN" --prefix-live "$XEN_PREFIX_LIVE"
+     --prefill-gemm-rows "$XEN_PREFILL_GEMM_ROWS" --kv-lend "$XEN_KV_LEND" --kv-lend-keep "$XEN_KV_LEND_KEEP" --kv-lend-park-s "$XEN_KV_LEND_PARK_S" --kv-lend-pressure "$XEN_KV_LEND_PRESSURE" --kv-lend-grace-s "$XEN_KV_LEND_GRACE_S" --prefix-cache "$XEN_PREFIX_CACHE" --prefix-cache-gib "$XEN_PREFIX_CACHE_GIB" --prefix-mark-min "$XEN_PREFIX_MARK_MIN" --prefix-live "$XEN_PREFIX_LIVE"
      --adaptive-depth "$XEN_ADAPTIVE_DEPTH" --unequal-segments "$XEN_UNEQUAL_SEGMENTS" --lookup "$XEN_LOOKUP" --mtp-depth "$XEN_MTP_DEPTH" --chat-template "${XEN_CHAT_TEMPLATE/#\~/$HOME}"
      --vision "$XEN_VISION" --vision-max-pixels "$XEN_VISION_MAX_PIXELS" --vision-images "$XEN_VISION_IMAGES"
      --media-urls "$XEN_MEDIA_URLS" --media-timeout "$XEN_MEDIA_TIMEOUT"

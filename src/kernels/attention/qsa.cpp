@@ -16,7 +16,6 @@
 
 #include "xenithium/kernels/rows.hpp"
 #include "attention/topk_wg.hpp"
-#include "comm/mailbox_esimd.hpp"
 
 namespace xenithium::kernels {
 namespace {
@@ -67,11 +66,8 @@ inline TreeRow tree_row(const int32_t *rec, int stride, const SegRow &sr) {
 inline int anc_row(uint64_t anc, int t) { return static_cast<int>((anc >> (4 * t)) & 15u); }
 
 // ---- prep: norms, rope, cache writes, block compression (SIMT, one work-group per (row, unit)) ----
-// Units: q heads [0, attn_hq), kv heads [attn_hq, attn_hq + hkv), the indexer (last). 256 items, item d = dim d.
+// Units: q heads [0, hq), kv heads [hq, hq + hkv), the indexer (last). 256 items, item d = dim d.
 // TREE: the step may hold tree segments (qsa.hpp); TREE false is the chain instance.
-// The split by tokens (kv_ways() 2): q head u of the kv head is one of the card's own (u / hq == kv_side(): its q | gate
-// rows) or the partner's (its q rows after the own heads'); a row's K / V go to this card's cache only when it owns the
-// position, and a tree row's to the step area on every card (qsa.hpp).
 template <QsaKv KV, bool TREE>
 class QsaPrepK;
 
@@ -91,9 +87,7 @@ inline int i4_enc(float v, float inv) {
 template <QsaKv KV, bool TREE>
 sycl::event prep(sycl::queue &q, const QsaShape &s, int rows, const QsaWeights &w, const QsaCache &c, const bf16 *rope, const SegW &sw,
                  const QsaScratch &sc, int ring_from = 0) {
-  const int hq = s.hq(), aq = s.attn_hq(), hkv = s.hkv(), units = aq + hkv + 1, ldy = w.qkv.n, ldi = w.idx.n, qn = s.q_n();
-  const int kvq = qn + s.peer_q_n();  // k's first column
-  const int ways = s.kv_ways(), side = s.kv_side(), ptok = s.page_tokens(), tree_row0 = c.tree_row0;
+  const int hq = s.hq(), hkv = s.hkv(), units = hq + hkv + 1, ldy = w.qkv.n, ldi = w.idx.n, qn = s.q_n();
   const float eps = s.eps;
   const float *y = sc.y, *yi = sc.yi;
   bf16 *qo = sc.q, *iqo = sc.iq, *ring0 = c.ring, *kc = c.kc, *tkc = c.tkc;
@@ -120,8 +114,6 @@ sycl::event prep(sycl::queue &q, const QsaShape &s, int rows, const QsaWeights &
       const int vpos = tr.vp;
       const int32_t *pages = pages0 + static_cast<size_t>(sr.slot) * slot_pages;
       bf16 *ring = ring0 + static_cast<size_t>(sr.slot) * kQsaRing * kID;
-      // the segment's rope delta (records: word kSegRope, a YaRN tier's first table row; a bare position word: 0)
-      const int rdelta = rstride >= kSegRec ? rec[sr.seg * rstride + kSegRope] : 0;
       const auto grp = it.get_group();
       auto norm_rope = [&](float v, int L, const bf16 *nw, int rp) {
         const float ss = sycl::reduce_over_group(grp, d < L ? v * v : 0.f, sycl::plus<float>());
@@ -133,34 +125,21 @@ sycl::event prep(sycl::queue &q, const QsaShape &s, int rows, const QsaWeights &
         float o = n;
         if (d < kQsaRot) {
           const int i = d & 31;
-          const size_t row = static_cast<size_t>(rp + rdelta) * kQsaRopeRow;
-          const float cs = static_cast<float>(rope[row + i]);
-          const float sn = static_cast<float>(rope[row + 32 + i]);
+          const float cs = static_cast<float>(rope[static_cast<size_t>(rp) * kQsaRopeRow + i]);
+          const float sn = static_cast<float>(rope[static_cast<size_t>(rp) * kQsaRopeRow + 32 + i]);
           o = d < 32 ? bfr(n * cs - buf[d + 32] * sn) : bfr(n * cs + buf[d - 32] * sn);
         }
         return o;
       };
       const float *yr = y + static_cast<size_t>(r) * ldy;
-      if (u < aq) {
-        // (one kv head per card with the split: its own heads are [side hq, side hq + hq) of the kv head's)
-        const bool own = ways == 1 || u / hq == side;
-        const int col = own ? (u % hq) * 2 * kD : qn + (u % hq) * kD;
-        const float o = norm_rope(bfr(yr[col + d]), kD, qnw, vpos);
-        qo[(static_cast<size_t>(r) * aq + u) * kD + d] = bf16(o);
-      } else if (u < aq + hkv) {
-        const int kh = u - aq;
-        size_t slot;
-        if (ways == 1) {
-          slot = (static_cast<size_t>(pages[p >> 6]) * hkv + kh) * kQsaPage + (p & 63);
-        } else if (TREE && tr.tree) {
-          slot = static_cast<size_t>(tree_row0) + static_cast<size_t>(r) * hkv + kh;  // the step area, every card
-        } else if (p % ways == side) {
-          slot = (static_cast<size_t>(pages[p >> 6]) * hkv + kh) * ptok + (p & 63) / ways;
-        } else {
-          return;  // the partner's position (the whole work-group: no barrier is left behind)
-        }
-        const float kn = norm_rope(bfr(yr[kvq + kh * kD + d]), kD, knw, vpos);
-        const float vv = bfr(yr[kvq + (hkv + kh) * kD + d]);
+      if (u < hq) {
+        const float o = norm_rope(bfr(yr[u * 2 * kD + d]), kD, qnw, vpos);
+        qo[(static_cast<size_t>(r) * hq + u) * kD + d] = bf16(o);
+      } else if (u < hq + hkv) {
+        const int kh = u - hq;
+        const float kn = norm_rope(bfr(yr[qn + kh * kD + d]), kD, knw, vpos);
+        const float vv = bfr(yr[qn + (hkv + kh) * kD + d]);
+        const size_t slot = (static_cast<size_t>(pages[p >> 6]) * hkv + kh) * kQsaPage + (p & 63);
         if constexpr (KV != QsaKv::bf16) {
           // The four IEEE divisions (a software sequence, fdiv_rn) once per work-group, each in its own
           // sub-group, broadcast through SLM (not once per lane).
@@ -370,147 +349,6 @@ class QsaSelMergeK;
 class QsaSelNK;
 }  // namespace
 
-// The same native BF16 DPAS instruction as QsaScoreK, but transpose the
-// operands: A is 8 prompt queries for one head, B is 16 adjacent pooled
-// keys. Keep B for all four heads, then apply the trained scorer's ReLU
-// and head sum (no scale). One K pack per prompt chunk, Q pack per tile.
-template<class T> static sycl::event trained_xmx_pack_k(sycl::queue &q,const T *pool,int nkeys,bf16 *packed) {
-  constexpr int K=16,D=128,panel=K*D;
-  return q.parallel_for(sycl::range<1>(size_t((nkeys+K-1)/K)*panel),[=](sycl::id<1> id) {
-    const size_t i=id[0]; const int elem=i%panel, col=(elem/2)%K, dim=(elem/(2*K))*2+elem%2;
-    const int b=(i/panel)*K+col;
-    packed[i]=b<nkeys?bf16(static_cast<float>(pool[size_t(b)*D+dim])):bf16(0.f);
-  });
-}
-sycl::event qsa_trained_xmx_pack_k(sycl::queue &q,const float *pool,int nkeys,bf16 *packed) {
-  return trained_xmx_pack_k(q,pool,nkeys,packed);
-}
-sycl::event qsa_trained_xmx_pack_k(sycl::queue &q,const sycl::half *pool,int nkeys,bf16 *packed) {
-  return trained_xmx_pack_k(q,pool,nkeys,packed);
-}
-sycl::event qsa_trained_xmx_pack_q(sycl::queue &q,const float *query,int rows,bf16 *packed) {
-  constexpr int R=8,H=4,D=128,S=16,panel=R*H*D;
-  return q.parallel_for(sycl::range<1>(size_t((rows+R-1)/R)*panel),[=](sycl::id<1> id) {
-    const size_t i=id[0]; const int e=i%panel, r=(i/panel)*R+(e/S)%R, h=(e/(R*S))%H, d=(e/(R*H*S))*S+e%S;
-    packed[i]=r<rows?bf16(query[(size_t(r)*H+h)*D+d]):bf16(0.f);
-  });
-}
-class QsaTrainedPrefillXmxK;
-sycl::event qsa_trained_xmx_score(sycl::queue &q,const bf16 *query,const bf16 *keys,int rows,int pos,int nkeys,
-                                 uint32_t *score,int pitch,int32_t *eligible) {
-  constexpr int R=8,K=16,H=4,D=128,S=16,W=16;
-  return q.parallel_for<QsaTrainedPrefillXmxK>(sycl::nd_range<2>({size_t((rows+R-1)/R),size_t((nkeys+K*W-1)/(K*W))*W},{1,W}),
-      [=](sycl::nd_item<2> it) SYCL_ESIMD_KERNEL {
-        const int t=it.get_group(0),r0=t*R,n=(rows-r0<R?rows-r0:R);
-        const int kb=it.get_global_id(1),b0=kb*K;
-        if (b0==0)
-#pragma unroll
-          for(int r=0;r<R;++r) if(r<n) eligible[r0+r]=(pos+r0+r+1)/4;
-        if(b0>=(pos+r0+n)/4) return;
-        const bf16 *A=query+size_t(t)*R*D*H, *B=keys+size_t(kb)*K*D;
-        esimd::simd<float,R*K> c0(0.f), c1(0.f), c2(0.f), c3(0.f);
-#pragma unroll
-        for(int d=0;d<D/S;++d) {
-          const auto b=esimd::block_load<bf16,K*S>(B+d*K*S);
-          const bf16 *a=A+d*H*R*S;
-          c0=xmx::dpas<8,8,float,float,bf16,bf16>(c0,b,esimd::block_load<bf16,R*S>(a+0*R*S));
-          c1=xmx::dpas<8,8,float,float,bf16,bf16>(c1,b,esimd::block_load<bf16,R*S>(a+1*R*S));
-          c2=xmx::dpas<8,8,float,float,bf16,bf16>(c2,b,esimd::block_load<bf16,R*S>(a+2*R*S));
-          c3=xmx::dpas<8,8,float,float,bf16,bf16>(c3,b,esimd::block_load<bf16,R*S>(a+3*R*S));
-        }
-        esimd::simd<float,R*K> sums=((esimd::max(c0,0.f)+esimd::max(c1,0.f))+esimd::max(c2,0.f))+esimd::max(c3,0.f);
-        const esimd::simd<uint32_t,K> index(0,1);
-#pragma unroll
-        for(int r=0;r<R;++r) if(r<n) {
-          const int count=(pos+r0+r+1)/4-b0;
-          auto *dst=score+size_t(r0+r)*pitch+b0;
-          esimd::simd<float,K> fs=sums.template select<K,1>(r*K);
-          const esimd::simd<uint32_t,K> bits=fs.template bit_cast_view<uint32_t>();
-          if(count>=K) esimd::block_store<uint32_t,K>(dst,bits);
-          else if(count>0) esimd::scatter<uint32_t,K>(dst,index*4u,bits,index<uint32_t(count));
-        }
-      });
-}
-
-
-// The trained QSA decode tree scores on fp16 DPAS (trained_qsa_device.cpp index_scores_tile<Half, Tree>'s values up
-// to fp32 summation order). query fp32 [rows][4][128]; pool16 fp16 [slots][pitch][128]; scores [rows][pitch] fp32 bits.
-class QsaTrainedDecXmxK;
-sycl::event qsa_trained_dec_xmx_score(sycl::queue &q, const float *query, const sycl::half *pool16, const int32_t *rec, int stride,
-                                      int layout, int rows, int pitch, int bound, uint32_t *scores, int32_t *eligible) {
-  constexpr int H = 4, D = 128, T = 8, NB = 16, KS = 16, MT = 8, TPT = 4;  // + tiles per thread  // heads, dims, threads, blocks per thread, K step, M tiles (16 rows x 4 / 8)
-  constexpr int kTileH = 8 * KS;                                   // halfs per A operand (8 pairs x 16 dims)
-  constexpr uint32_t kSlm = uint32_t(D / KS) * MT * 2 * kTileH * 2; // [kk][t][hi|lo][8][16] halfs = 32 KiB
-  const int segments = seg_count(rows, layout);
-  const int wgs = (bound + T * NB * TPT - 1) / (T * NB * TPT);
-  return q.parallel_for<QsaTrainedDecXmxK>(sycl::nd_range<2>({size_t(segments), size_t(wgs) * T}, {1, T}), [=](sycl::nd_item<2> it) SYCL_ESIMD_KERNEL {
-    esimd::slm_init<kSlm>();
-    const int sgi = int(it.get_group(0)), tid = int(it.get_local_id(1));
-    int rseg, nseg;
-    seg_span(layout, rows, sgi, rseg, nseg);
-    const int start = rec[sgi * stride + kSegPos], slot = rec[sgi * stride + kSegSlot];
-    const int nmax = start / 4;
-    const int n = nseg < 16 ? nseg : 16;
-    const int mt = (n * H + 7) / 8;
-    if (eligible && it.get_group(1) == 0 && tid == 0)  // tree steps (null: the chains nblk is index_blocks)
-      for (int r = 0; r < n; ++r) eligible[rseg + r] = nmax;
-    // stage: thread tid = M tile tid (rows 2 tid, 2 tid + 1; pair i = (row - 2 tid) * 4 + head)
-    if (tid < mt) {
-#pragma unroll
-      for (int i = 0; i < 8; ++i) {
-        const int row = 2 * tid + i / 4, head = i % 4;
-        esimd::simd<float, D> qv = 0.f;
-        if (row < n) qv = esimd::block_load<float, D>(query + (size_t(rseg + row) * H + head) * D);
-        esimd::simd<sycl::half, D> hi = qv;
-        esimd::simd<sycl::half, D> lo = esimd::simd<float, D>(qv - esimd::simd<float, D>(hi));
-#pragma unroll
-        for (int kk = 0; kk < D / KS; ++kk) {
-          const uint32_t base = uint32_t(((kk * MT + tid) * 2) * kTileH + i * KS) * 2;
-          esimd::slm_block_store<sycl::half, KS>(base, hi.select<KS, 1>(kk * KS));
-          esimd::slm_block_store<sycl::half, KS>(base + kTileH * 2, lo.select<KS, 1>(kk * KS));
-        }
-      }
-    }
-    esimd::barrier();
-    for (int tt = 0; tt < TPT; ++tt) {
-    const int b0 = ((int(it.get_group(1)) * TPT + tt) * T + tid) * NB;
-    if (b0 >= nmax) return;
-    // B: 16 keys x 128 dims, per K step one transposed [16 keys][8 dwords] load -> [8 dim pairs][16 keys]
-    const uint32_t *base = reinterpret_cast<const uint32_t *>(pool16 + size_t(slot) * pitch * D);
-    esimd::simd<uint32_t, (D / 2) * NB> bk;
-#pragma unroll
-    for (int kk = 0; kk < D / KS; ++kk)
-      bk.select<8 * NB, 1>(kk * 8 * NB) = esimd::load_2d<uint32_t, 8, NB, 1, true, false>(base, D * 2 - 1, pitch - 1, D * 2 - 1, kk * 8, b0);
-    const int cnt = nmax - b0 < NB ? nmax - b0 : NB;
-    const esimd::simd<uint32_t, NB> idx(0, 1);
-    for (int t = 0; t < mt; ++t) {
-      esimd::simd<float, 8 * NB> acc = 0.f;
-#pragma unroll
-      for (int kk = 0; kk < D / KS; ++kk) {
-        const uint32_t ab = uint32_t(((kk * MT + t) * 2) * kTileH) * 2;
-        const esimd::simd<sycl::half, kTileH> ahi = esimd::slm_block_load<sycl::half, kTileH>(ab);
-        const esimd::simd<sycl::half, kTileH> alo = esimd::slm_block_load<sycl::half, kTileH>(ab + kTileH * 2);
-        const esimd::simd<sycl::half, 2 * 8 * NB> bh = bk.select<8 * NB, 1>(kk * 8 * NB).bit_cast_view<sycl::half>();
-        acc = xmx::dpas<8, 8, float, float, sycl::half, sycl::half>(acc, bh, ahi);
-        acc = xmx::dpas<8, 8, float, float, sycl::half, sycl::half>(acc, bh, alo);
-      }
-#pragma unroll
-      for (int ri = 0; ri < 2; ++ri) {
-        const int row = 2 * t + ri;
-        if (row >= n) break;
-        esimd::simd<float, NB> sc = esimd::max(esimd::simd<float, NB>(acc.select<NB, 1>((ri * 4 + 0) * NB)), esimd::simd<float, NB>(0.f)) + esimd::max(esimd::simd<float, NB>(acc.select<NB, 1>((ri * 4 + 1) * NB)), esimd::simd<float, NB>(0.f));
-        sc = sc + esimd::max(esimd::simd<float, NB>(acc.select<NB, 1>((ri * 4 + 2) * NB)), esimd::simd<float, NB>(0.f));
-        sc = sc + esimd::max(esimd::simd<float, NB>(acc.select<NB, 1>((ri * 4 + 3) * NB)), esimd::simd<float, NB>(0.f));
-        uint32_t *dst = scores + size_t(rseg + row) * pitch + b0;
-        const esimd::simd<uint32_t, NB> bits = sc.bit_cast_view<uint32_t>();
-        if (cnt == NB) esimd::block_store<uint32_t, NB>(dst, bits);
-        else esimd::scatter<uint32_t, NB>(dst, idx * 4u, bits, idx < uint32_t(cnt));
-      }
-    }
-    }
-  });
-}
-
 int qsa_select_chunk(int bound) {
   // Up to 16 chunk work-groups per row (one per 4,096 blocks at least), as wide as the cap
   // of 16 candidate lists allows.
@@ -520,15 +358,11 @@ int qsa_select_chunk(int bound) {
 
 sycl::event qsa_select(sycl::queue &q, int rows, const uint32_t *score, int stride, const int32_t *nblk, int bound, const QsaScratch &sc,
                        sycl::event *merge, int chunk) {
-  if (rows<1 || bound<1 || bound>kQsaMaxBlocks || stride<bound || !score || !nblk || !sc.sel || !sc.sel_n)
-    throw std::invalid_argument("qsa_select: invalid rows, score bounds or output buffers");
   if (chunk <= 0) chunk = qsa_select_chunk(bound);
   if (chunk < kQsaMinChunk || chunk > kQsaPfChunk) throw std::invalid_argument("qsa_select: chunk out of range");
   const int nch = std::max(1, (bound + chunk - 1) / chunk);
   if (nch > kQsaMaxBlocks / kQsaChunk) throw std::invalid_argument("qsa_select: more blocks than the kernel supports");
   const bool direct = nch == 1;
-  if (!direct && (!sc.cand_id || !sc.cand_key || !sc.cand_n))
-    throw std::invalid_argument("qsa_select: missing multi-chunk candidate buffers");
   int32_t *sel = sc.sel, *sel_n = sc.sel_n, *cid = sc.cand_id, *cn = sc.cand_n;
   uint32_t *ckey = sc.cand_key;
   constexpr int K = kQsaTopBlocks, kCh = kQsaMaxBlocks / kQsaChunk;
@@ -637,57 +471,29 @@ namespace {
 // the tile's tokens and computes that quarter's four 16-dim partials; the partials are then summed over the 16 dim
 // groups in the same order as without kLines, so every score has the same bits, and the tile needs two barriers for
 // its scores instead of eight.
-// SPLIT (the split by tokens, qsa.hpp): the work-group's tokens are this card's half of the row's selection (the
-// positions t with t % 2 == kv_side(), in selection order), read from the half pages (row (t % 64) / 2) or, for a tree
-// row's path, from the step area; the scores' K by cache lines at G = 12 too.
-// kChain (SPLIT with kLines): an item chains its quarter's four dim groups on one DPAS accumulator and stores one
-// partial per (16 tokens, dims quarter) instead of four; the softmax item of a head then sums the four quarters of its
-// 64 scores itself. A quarter of the SLM traffic and no score region: the work-group holds 16 KB of SLM instead of 55
-// (two work-groups of that size filled a core's SLM, so half the threads idled), one barrier less per tile. The sums
-// associate differently from the unchained form: the split's own bits (it shares none with the heads split), the same
-// in every instance of it (decode, trees, prefill).
-// kWhole (SPLIT, TPW = kQsaSplitPfTiles: the prefill's instance): the work-group walks every tile of the row's half, so
-// its running state is the row's final one and goes straight to the pair, in merge_send's message layout: an own
-// head's (o, max, sum) to sc.pend, a partner's head's to its inbox slot (sc.pair, sc.pair_parity). No partials are
-// stored and no fold is launched; pair_combine follows.
-template <QsaKv KV, int G, int TPW, bool TREE, bool SPLIT>
+template <QsaKv KV, int G, int TPW, bool TREE>
 class QsaAttnK;
-
-// The pair's mailbox slot of (parity, row, q head h of the receiver's hq own heads), in words (qsa.hpp, QsaPairMail).
-inline size_t pair_slot(int parity, int rows_max, int row, int hq, int h) {
-  return ((static_cast<size_t>(parity) * rows_max + row) * hq + h) * kQsaPairWords;
-}
 
 // TPW tiles per work-group, walked in order with an online softmax (one partial per TPW tiles:
 // the merge reads ceil(tiles / TPW) partials). TPW 1 is the decode's shape and its bits (alpha = 0, beta = 1 exactly).
 // TREE: a tree row's counts from its virtual position, its path's tokens >= p0 at its ancestors'
 // row slots (decode only: TPW 1).
-template <QsaKv KV, int G, int TPW = 1, bool TREE = false, bool SPLIT = false>
+template <QsaKv KV, int G, int TPW = 1, bool TREE = false>
 sycl::event attn(sycl::queue &q, const QsaShape &s, int rows, const QsaCache &c, const SegW &sw, const QsaScratch &sc) {
   constexpr bool I8 = KV != QsaKv::bf16;  // int8 K codes (V int8 or int4) + per-token scales
   constexpr bool V4 = KV == QsaKv::i8v4;  // V as int4 codes, two per byte
   constexpr int kI = 16, kE = I8 ? 1 : 2;
   constexpr int kTokOff = 0, kKsOff = kTokOff + kTile, kVsOff = kKsOff + kTile;            // floats / ints
-  constexpr bool kLines = I8 && (G == 6 || SPLIT);  // the scores' K by cache lines (above): decode steps and the prefill's tile groups
+  constexpr bool kLines = I8 && G == 6;  // the scores' K by cache lines (above): decode steps and the prefill's tile groups
   constexpr int kLq = 4;                               // kLines: an item = 1 / kLq of the dims x 1 / kLq of the tile's tokens
   constexpr int kSubs = kTile / 16;
   static_assert(kI == kLq * kLq && kD == kLq * 64 && kSubs == kLq, "kLines: 16 items = 4 dim quarters (a 64-byte line each) x 4 x 16 tokens");
-  constexpr bool kChain = kLines && SPLIT;             // a quarter's dim groups chained on one accumulator (above)
-  // partial dots: [dim group][head][token]; kLines: [sub][dim group][head][token]; kChain: [sub][dims quarter][head][token]
-  constexpr int kSpOff = kVsOff + kTile, kSpN = (kChain ? kSubs * kLq : kLines ? kSubs * kI : kI) * G * 16 + 16;
-  // the scores [head][token] (kChain: none, the softmax items sum the partials), then P
-  constexpr int kScOff = kSpOff + kSpN, kPvOff = kScOff + (kChain ? 0 : G * kTile), kMlOff = kPvOff + G * kTile;
+  constexpr int kSpOff = kVsOff + kTile, kSpN = (kLines ? kSubs : 1) * kI * G * 16 + 16;    // partial dots: [sub (kLines)][dim group][head][token]
+  constexpr int kScOff = kSpOff + kSpN, kPvOff = kScOff + G * kTile, kMlOff = kPvOff + G * kTile;
   constexpr int kAlOff = kMlOff + 2 * G + 16;  // the online softmax's per-head rescale of o
   constexpr int kSlm = (kAlOff + 16) * 4;
-  constexpr bool kWhole = SPLIT && TPW == kQsaSplitPfTiles;  // the row's whole half in one work-group (above)
-  constexpr int kOwn = G / 2;                                // kWhole: the card's own q heads of the kv head's G
-  constexpr int kTG = kWhole ? 1 : (kT + TPW - 1) / TPW;     // tile groups per (row, kv head)
-  const int aq = s.attn_hq(), hkv = s.hkv();
-  const int side = s.kv_side(), tree_row0 = c.tree_row0;  // SPLIT
-  if (kWhole && (s.hq() != kOwn || hkv != 1)) throw std::invalid_argument("qsa attention: the split's prefill instance takes one kv head and half its q heads per card");
-  [[maybe_unused]] float *pend = sc.pend;  // kWhole: the pair's states
-  [[maybe_unused]] uint32_t *peer_inbox = sc.pair.peer_inbox;
-  [[maybe_unused]] const int pair_rows = sc.pair.rows_max, pair_parity = sc.pair_parity;
+  constexpr int kTG = (kT + TPW - 1) / TPW;  // tile groups per (row, kv head)
+  const int hq = s.hq(), hkv = s.hkv();
   const uint8_t *kp = c.k, *vp = c.v;
   const float *ksp = c.ks, *vsp = c.vs;
   const int32_t *pages0 = c.pages, *sel = sc.sel, *sel_n = sc.sel_n, *rec = sw.rec;
@@ -695,8 +501,7 @@ sycl::event attn(sycl::queue &q, const QsaShape &s, int rows, const QsaCache &c,
   const bf16 *qb = sc.q;
   float *part = sc.part;
   static_assert(!TREE || TPW == 1, "tree rows run in decode steps (one tile per work-group)");
-  static_assert(!kWhole || kQsaSplitSel <= TPW * kTile, "kWhole: one work-group holds the half's tiles");
-  return q.parallel_for<QsaAttnK<KV, G, TPW, TREE, SPLIT>>(
+  return q.parallel_for<QsaAttnK<KV, G, TPW, TREE>>(
       sycl::nd_range<3>({static_cast<size_t>(rows), static_cast<size_t>(hkv), static_cast<size_t>(kTG) * kI}, {1, 1, kI}),
       [=](sycl::nd_item<3> it) SYCL_ESIMD_KERNEL {
         esimd::slm_init<kSlm>();
@@ -712,12 +517,8 @@ sycl::event attn(sycl::queue &q, const QsaShape &s, int rows, const QsaCache &c,
         const int p = tr.vp, nblk = (p + 1) / kQsaCompress, p0 = srw.pos - srw.j;
         const bool every = nblk <= kQsaTopBlocks;
         const int nsel = every ? nblk : sel_n[r];
-        const int tail = p + 1 - nblk * kQsaCompress;  // the open block's tokens 4 nblk .. p
-        // SPLIT: two of each selected block's four tokens (4 b + side, 4 b + side + 2), then the tail's of this side
-        const int ntok = SPLIT ? 2 * nsel + (tail - side + 1) / 2 : nsel * kQsaCompress + tail;
-        // (kWhole: a row without a token on this side - position 0 on side 1 - still sends its empty states, max -inf,
-        // sum 0, o 0: the partner's combine waits for them)
-        if (!kWhole && tg * TPW * kTile >= ntok) return;
+        const int ntok = nsel * kQsaCompress + (p + 1 - nblk * kQsaCompress);
+        if (tg * TPW * kTile >= ntok) return;
         auto so = [](int f) SYCL_ESIMD_FUNCTION { return static_cast<uint32_t>(f * 4); };
         // the DPAS split: 12 heads = 8 + 4 rows; 6 heads (TP4) = one 8-row call, rows 6-7 zero (a DPAS
         // row's sums do not depend on the other rows: each head's bits are the 12-head kernel's)
@@ -729,7 +530,7 @@ sycl::event attn(sycl::queue &q, const QsaShape &s, int rows, const QsaCache &c,
 #pragma unroll
         for (int h = 0; h < G; ++h)
           qi.template select<kQd, 1>(h * kQd) =
-              esimd::block_load<bf16, kQd>(qb + (static_cast<size_t>(r) * aq + kvh * G + h) * kD + (kLines ? (i % kLq) * kQd : i * 16));
+              esimd::block_load<bf16, kQd>(qb + (static_cast<size_t>(r) * hq + kvh * G + h) * kD + (kLines ? (i % kLq) * kQd : i * 16));
         // the scores' A operand: [head][16 dims] of q's dim group d4 of qi (rows past G stay zero)
         auto q_group = [&](int d4) SYCL_ESIMD_FUNCTION {
           esimd::simd<bf16, kQA * 16> a(0.f);
@@ -757,22 +558,11 @@ sycl::event attn(sycl::queue &q, const QsaShape &s, int rows, const QsaCache &c,
             int t = i * kPer + j;
             t = t < nt ? t : nt - 1;
             const int lt = t0 + t;
-            int slot;
-            if constexpr (SPLIT) {
-              const int blk = lt / 2;  // the selection's block (lt < 2 nsel), else the tail
-              const int tok = lt < 2 * nsel ? (every ? blk : sel[r * kQsaTopBlocks + blk]) * kQsaCompress + side + 2 * (lt & 1)
-                                            : nblk * kQsaCompress + side + 2 * (lt - 2 * nsel);
-              if (TREE && tr.tree && tok >= p0)  // a tree row's path: its ancestor's row in the step area
-                slot = tree_row0 + ((r - srw.j) + anc_row(tr.anc, tok - p0)) * hkv + kvh;
-              else
-                slot = (pages[tok / kQsaPage] * hkv + kvh) * (kQsaPage / 2) + (tok % kQsaPage) / 2;
-            } else {
-              int tok = every                       ? lt
-                        : lt < nsel * kQsaCompress ? sel[r * kQsaTopBlocks + lt / kQsaCompress] * kQsaCompress + (lt % kQsaCompress)
-                                                   : nblk * kQsaCompress + (lt - nsel * kQsaCompress);
-              if constexpr (TREE) tok = tok >= p0 ? p0 + anc_row(tr.anc, tok - p0) : tok;  // the path's row slot
-              slot = (pages[tok / kQsaPage] * hkv + kvh) * kQsaPage + (tok % kQsaPage);
-            }
+            int tok = every                       ? lt
+                      : lt < nsel * kQsaCompress ? sel[r * kQsaTopBlocks + lt / kQsaCompress] * kQsaCompress + (lt % kQsaCompress)
+                                                 : nblk * kQsaCompress + (lt - nsel * kQsaCompress);
+            if constexpr (TREE) tok = tok >= p0 ? p0 + anc_row(tr.anc, tok - p0) : tok;  // the path's row slot
+            const int slot = (pages[tok / kQsaPage] * hkv + kvh) * kQsaPage + (tok % kQsaPage);
             sl[j] = slot;
             if constexpr (I8) {
               kss[j] = ksp[slot];
@@ -842,9 +632,7 @@ sycl::event attn(sycl::queue &q, const QsaShape &s, int rows, const QsaCache &c,
         // Partial q.k of 16 dims x 16 tokens on DPAS: B = K^T (16 dims x 16 tokens, VNNI: dword (dim pair p, token t)
         // at p * 16 + t = a transpose of the K rows' dwords), A = q of 8 + 4 heads (6: one 8-row call). Products are
         // exact (bf16 x bf16-exact K), sums fp32.
-        // (c8, c4) += the partial of kb (16 tokens x 16 dims) and a: heads 0-7 in c8, 8-11 in c4 (G = 12)
-        auto add_partial = [&](esimd::simd<float, 128> &c8, esimd::simd<float, 64> &c4, esimd::simd<bf16, 256> kb,
-                               esimd::simd<bf16, kQA * 16> a) SYCL_ESIMD_FUNCTION {
+        auto partial = [&](esimd::simd<bf16, 256> kb, esimd::simd<bf16, kQA * 16> a) SYCL_ESIMD_FUNCTION {
           esimd::simd<uint32_t, 128> bd;
           {
             esimd::simd<uint32_t, 128> kd = kb.template bit_cast_view<uint32_t>();
@@ -852,29 +640,20 @@ sycl::event attn(sycl::queue &q, const QsaShape &s, int rows, const QsaCache &c,
             for (int pp = 0; pp < 8; ++pp) bd.template select<16, 1>(pp * 16) = kd.template select<16, 8>(pp);
           }
           const esimd::simd<bf16, 256> bk = bd.template bit_cast_view<bf16>();
+          esimd::simd<float, G * 16> sp;
           const esimd::simd<bf16, 128> a8 = a.template select<128, 1>(0);
+          esimd::simd<float, 128> c8(0.f);
           c8 = xmx::dpas<8, 8, float, float, bf16, bf16>(c8, bk, a8);
           if constexpr (G > 8) {
             const esimd::simd<bf16, 64> a4 = a.template select<64, 1>(128);
+            esimd::simd<float, 64> c4(0.f);
             c4 = xmx::dpas<8, 4, float, float, bf16, bf16>(c4, bk, a4);
-          }
-        };
-        // the heads' rows [head][token] of an accumulator pair
-        auto head_rows = [&](esimd::simd<float, 128> &c8, esimd::simd<float, 64> &c4) SYCL_ESIMD_FUNCTION {
-          esimd::simd<float, G * 16> sp;
-          if constexpr (G > 8) {
             sp.template select<128, 1>(0) = c8;
             sp.template select<64, 1>(128) = c4;
           } else {
             sp = c8.template select<G * 16, 1>(0);
           }
           return sp;
-        };
-        auto partial = [&](esimd::simd<bf16, 256> kb, esimd::simd<bf16, kQA * 16> a) SYCL_ESIMD_FUNCTION {
-          esimd::simd<float, 128> c8(0.f);
-          esimd::simd<float, 64> c4(0.f);
-          add_partial(c8, c4, kb, a);
-          return head_rows(c8, c4);
         };
         // item i sums outputs [i G, i G + G) of sub's (h, tl) over the 16 dim groups' partials at sp0, in group order
         auto sum_scores = [&](int sub, int sp0) SYCL_ESIMD_FUNCTION {
@@ -890,19 +669,6 @@ sycl::event attn(sycl::queue &q, const QsaShape &s, int rows, const QsaCache &c,
             esimd::slm_scalar_store<float>(so(kScOff + h * kTile + sub * 16 + tl), sv);
           }
         };
-        // kChain: q head h's scores of the tile: per 16 tokens the four quarters' partials in dims order, then the
-        // tokens' scales
-        auto head_scores = [&](int h) SYCL_ESIMD_FUNCTION {
-          esimd::simd<float, kTile> sv;
-#pragma unroll
-          for (int sub = 0; sub < kSubs; ++sub) {
-            esimd::simd<float, 16> acc(0.f);
-#pragma unroll
-            for (int dq = 0; dq < kLq; ++dq) acc += esimd::slm_block_load<float, 16>(so(kSpOff + (sub * kLq + dq) * G * 16 + h * 16));
-            sv.template select<16, 1>(sub * 16) = acc * kmul * esimd::slm_block_load<float, 16>(so(kKsOff + sub * 16));
-          }
-          return sv;
-        };
         if constexpr (kLines) {
           // item = (the 16 tokens of sub ts, dims quarter dq): one 64-byte line of each token's K row, then its four dim groups
           const int ts = i / kLq, dq = i % kLq;
@@ -912,8 +678,6 @@ sycl::event attn(sycl::queue &q, const QsaShape &s, int rows, const QsaCache &c,
 #pragma unroll
             for (int tl = 0; tl < 16; ++tl)
               lines.template select<64, 1>(tl * 64) = esimd::block_load<uint8_t, 64>(kp + static_cast<size_t>(sl[tl]) * kD + dq * 64);
-            [[maybe_unused]] esimd::simd<float, 128> c8(0.f);  // kChain: the quarter's sums over its four dim groups
-            [[maybe_unused]] esimd::simd<float, 64> c4(0.f);
 #pragma unroll
             for (int d4 = 0; d4 < kLq; ++d4) {
               const int dg = dq * kLq + d4;
@@ -922,20 +686,14 @@ sycl::event attn(sycl::queue &q, const QsaShape &s, int rows, const QsaCache &c,
               for (int tl = 0; tl < 16; ++tl) raw.template select<16, 1>(tl * 16) = lines.template select<16, 1>(tl * 64 + d4 * 16);
               const esimd::simd<int8_t, 256> codes = raw.template bit_cast_view<int8_t>();
               const esimd::simd<float, 256> f = codes;
-              if constexpr (kChain)
-                add_partial(c8, c4, esimd::simd<bf16, 256>(f), q_group(d4));
-              else
-                esimd::slm_block_store<float, G * 16>(so(kSpOff + (ts * kI + dg) * G * 16), partial(esimd::simd<bf16, 256>(f), q_group(d4)));
+              esimd::slm_block_store<float, G * 16>(so(kSpOff + (ts * kI + dg) * G * 16), partial(esimd::simd<bf16, 256>(f), q_group(d4)));
             }
-            if constexpr (kChain) esimd::slm_block_store<float, G * 16>(so(kSpOff + (ts * kLq + dq) * G * 16), head_rows(c8, c4));
           }
           esimd::barrier();
-          if constexpr (!kChain) {  // (kChain: the softmax items take the sums)
 #pragma unroll
-            for (int sub = 0; sub < kSubs; ++sub)
-              if (sub * 16 < nt) sum_scores(sub, kSpOff + sub * kI * G * 16);
-            esimd::barrier();
-          }
+          for (int sub = 0; sub < kSubs; ++sub)
+            if (sub * 16 < nt) sum_scores(sub, kSpOff + sub * kI * G * 16);
+          esimd::barrier();
         } else {
           // 16 tokens at a time: every item its 16 dims of them
 #pragma unroll 1
@@ -950,11 +708,7 @@ sycl::event attn(sycl::queue &q, const QsaShape &s, int rows, const QsaCache &c,
         }
         // ---- softmax per head over the tile ----
         if (i < G) {
-          esimd::simd<float, kTile> sv;
-          if constexpr (kChain)
-            sv = head_scores(i);
-          else
-            sv = esimd::slm_block_load<float, kTile>(so(kScOff + i * kTile));
+          esimd::simd<float, kTile> sv = esimd::slm_block_load<float, kTile>(so(kScOff + i * kTile));
           esimd::simd<int32_t, kTile> ti(0, 1);
           sv.merge(esimd::simd<float, kTile>(-INFINITY), ti >= nt);
           const float mx = esimd::hmax<float>(sv);
@@ -1029,39 +783,18 @@ sycl::event attn(sycl::queue &q, const QsaShape &s, int rows, const QsaCache &c,
           }
         }
         }  // the group's tiles
-        // head h's o of this item's 16 dims
-        auto o_of = [&](int h) SYCL_ESIMD_FUNCTION {
-          return h < 8 ? esimd::simd<float, 16>(o8.template select<16, 1>((h % 8) * 16)) : esimd::simd<float, 16>(o4.template select<16, 1>((h % 4) * 16));
-        };
-        if constexpr (kWhole) {
-          // the row's final states to the pair: this item's 16 dims of every head's o, and (item h) head h's max | sum
-          esimd::simd<float, 16> ml(0.f);
+        if (i < G) {
+          float *pm = part + ((static_cast<size_t>(r * hkv + kvh) * kT + tg) * G + i) * kPartStride + kD;
+          esimd::simd<float, 2> ml;
           ml[0] = Mrun;
           ml[1] = Lrun;
+          esimd::block_store<float, 2>(pm, ml);
+        }
 #pragma unroll
-          for (int h = 0; h < G; ++h) {
-            esimd::simd<float, 16> oh = o_of(h);
-            if (h / kOwn == side) {
-              float *own = pend + (static_cast<size_t>(r) * kOwn + h % kOwn) * kQsaPairWords;
-              esimd::block_store<float, 16>(own + i * 16, oh);
-              if (i == h) esimd::block_store<float, 16>(own + kD, ml);
-            } else {
-              uint32_t *slot = peer_inbox + pair_slot(pair_parity, pair_rows, r, kOwn, h % kOwn);
-              mail::mail_send<16>(slot + i * 16, oh.template bit_cast_view<uint32_t>().read(), kPairMailEmpty, mail::kNanWord);
-              if (i == h) mail::mail_send<16>(slot + kD, ml.template bit_cast_view<uint32_t>().read(), kPairMailEmpty, mail::kNanWord);
-            }
-          }
-        } else {
-          if (i < G) {
-            float *pm = part + ((static_cast<size_t>(r * hkv + kvh) * kT + tg) * G + i) * kPartStride + kD;
-            esimd::simd<float, 2> ml;
-            ml[0] = Mrun;
-            ml[1] = Lrun;
-            esimd::block_store<float, 2>(pm, ml);
-          }
-#pragma unroll
-          for (int h = 0; h < G; ++h)
-            esimd::block_store<float, 16>(part + ((static_cast<size_t>(r * hkv + kvh) * kT + tg) * G + h) * kPartStride + i * 16, o_of(h));
+        for (int h = 0; h < G; ++h) {
+          const esimd::simd<float, 16> oh = h < 8 ? esimd::simd<float, 16>(o8.template select<16, 1>((h % 8) * 16))
+                                                  : esimd::simd<float, 16>(o4.template select<16, 1>((h % 4) * 16));
+          esimd::block_store<float, 16>(part + ((static_cast<size_t>(r * hkv + kvh) * kT + tg) * G + h) * kPartStride + i * 16, oh);
         }
       });
 }
@@ -1118,131 +851,30 @@ sycl::event merge(sycl::queue &q, const QsaShape &s, int rows, int ldy, const Se
   });
 }
 
-// ---- the split by tokens: the pair's merge (qsa.hpp). One work-item per (row, q head of the kv head): ----
-// merge_send folds this card's tiles of the head into one unnormalised state (M = the tiles' max, L = sum l_t e^(m_t - M),
-// o = sum o_t e^(m_t - M), tiles in order; no tile: M = -inf, L = 0, o = 0) and sends a partner's head's state to the
-// partner's inbox slot or keeps an own head's in pend; pair_combine takes the partner's states of the own heads and
-// writes bf16(bf16(o / L) bf16(sigmoid(gate))) from the two halves, side 0's state first. Rows [row0, row0 + rows) of
-// the mailbox / pend (a batch's place in its call). The partials are the one-tile work-groups' (decode steps; the
-// prefill's own instance sends its states itself, attn's kWhole).
-template <bool TREE>
-class QsaMergeSendK;
-class QsaPairCombineK;
-template <bool TREE = false>
-sycl::event merge_send(sycl::queue &q, const QsaShape &s, int rows, const SegW &sw, const float *part, const int32_t *sel_n, float *pend,
-                       const QsaPairMail &pm, int parity, int row0) {
-  // 16 items per (row, q head), 16 dims each: the tiles' (max, sum) by two 32-lane gathers, then the o rows 8 tiles a
-  // round (the round's loads first): the loads overlap, the sum order is fixed (tile order)
-  constexpr int kMI = 16, kMD = kD / kMI, kL = 32;
-  static_assert(kT <= 2 * kL, "two 32-lane gathers cover the tiles");
-  const int G = s.attn_grp(), hq = s.hq(), side = s.kv_side(), rmax = pm.rows_max;
-  const int32_t *rec = sw.rec;
-  const int rstride = sw.stride, seg_rows = sw.seg_rows;
-  uint32_t *peer = pm.peer_inbox;
-  return q.parallel_for<QsaMergeSendK<TREE>>(sycl::nd_range<1>(static_cast<size_t>(rows) * G * kMI, kMI), [=](sycl::nd_item<1> it) SYCL_ESIMD_KERNEL {
-    const int g = static_cast<int>(it.get_group(0)), i = static_cast<int>(it.get_local_id(0));
-    const int r = g / G, h = g % G;
-    const SegRow srw = seg_row(rec, rstride, seg_rows, r);
-    int p = srw.pos;
-    if constexpr (TREE) p = tree_row(rec, rstride, srw).vp;
-    const int nblk = (p + 1) / kQsaCompress;
-    const int nsel = nblk <= kQsaTopBlocks ? nblk : sel_n[r];
-    const int ntok = 2 * nsel + (p + 1 - nblk * kQsaCompress - side + 1) / 2;  // this card's half (the attention's count)
-    const int nt = (ntok + kTile - 1) / kTile;
-    const float *pb = part + static_cast<size_t>(r) * kT * G * kPartStride + static_cast<size_t>(h) * kPartStride;
-    const uint32_t ts = static_cast<uint32_t>(G * kPartStride);  // floats between tiles
-    esimd::simd<float, 2 * kL> mv, lv;
-#pragma unroll
-    for (int b = 0; b < 2; ++b) {
-      const esimd::simd<uint32_t, kL> t = esimd::simd<uint32_t, kL>(b * kL, 1);
-      const esimd::simd<uint32_t, kL> off = esimd::merge(t, esimd::simd<uint32_t, kL>(0), t < static_cast<uint32_t>(nt)) * (ts * 4) + kD * 4;
-      mv.template select<kL, 1>(b * kL) = esimd::gather<float, kL>(pb, off);
-      lv.template select<kL, 1>(b * kL) = esimd::gather<float, kL>(pb, off + 4);
-    }
-    const esimd::simd<int32_t, 2 * kL> ti(0, 1);
-    mv.merge(esimd::simd<float, 2 * kL>(-INFINITY), ti >= nt);
-    const float M = esimd::hmax<float>(mv);
-    esimd::simd<float, 2 * kL> e = esimd::exp(mv - M);
-    e.merge(esimd::simd<float, 2 * kL>(0.f), ti >= nt);  // (no tile: M = -inf, L = 0, o = 0)
-    float L = 0.f;
-    esimd::simd<float, kMD> o(0.f);
-    for (int t0 = 0; t0 < nt; t0 += 8) {
-      esimd::simd<float, 8 * kMD> ov;
-#pragma unroll
-      for (int j = 0; j < 8; ++j) {  // dead slots re-read tile nt - 1 with weight 0
-        const int t = t0 + j < nt ? t0 + j : nt - 1;
-        ov.template select<kMD, 1>(j * kMD) = esimd::block_load<float, kMD>(pb + static_cast<size_t>(t) * ts + i * kMD);
-      }
-#pragma unroll
-      for (int j = 0; j < 8; ++j) {
-        const int t = t0 + j < 2 * kL ? t0 + j : 0;
-        const float ej = t0 + j < nt ? static_cast<float>(e[t]) : 0.f, lj = t0 + j < nt ? static_cast<float>(lv[t]) : 0.f;
-        L += lj * ej;
-        o += ov.template select<kMD, 1>(j * kMD) * ej;
-      }
-    }
-    esimd::simd<float, 16> ml(0.f);
-    ml[0] = M;
-    ml[1] = L;
-    const int own = h / hq == side, hh = h % hq;
-    if (own) {
-      float *pd = pend + (static_cast<size_t>(row0 + r) * hq + hh) * kQsaPairWords;
-      esimd::block_store<float, kMD>(pd + i * kMD, o);
-      if (i == 0) esimd::block_store<float, 16>(pd + kD, ml);
-    } else {
-      uint32_t *slot = peer + pair_slot(parity, rmax, row0 + r, hq, hh);
-      mail::mail_send<kMD>(slot + i * kMD, o.template bit_cast_view<uint32_t>().read(), kPairMailEmpty, mail::kNanWord);
-      if (i == 0) mail::mail_send<16>(slot + kD, ml.template bit_cast_view<uint32_t>().read(), kPairMailEmpty, mail::kNanWord);
-    }
-  });
-}
-sycl::event pair_combine(sycl::queue &q, const QsaShape &s, int rows, int ldy, const float *y, const float *pend, const QsaPairMail &pm, int parity,
-                         bf16 *out) {
-  const int hq = s.hq(), side = s.kv_side(), rmax = pm.rows_max;
-  uint32_t *inbox = pm.inbox, *error = pm.error;
-  const uint64_t wait = pm.wait_cycles;
-  return q.parallel_for<QsaPairCombineK>(sycl::nd_range<2>({static_cast<size_t>(rows), static_cast<size_t>(hq)}, {1, static_cast<size_t>(hq)}),
-                                         [=](sycl::nd_item<2> it) SYCL_ESIMD_KERNEL {
-    const int r = static_cast<int>(it.get_group(0)), h = static_cast<int>(it.get_local_id(1));
-    uint32_t *slot = inbox + pair_slot(parity, rmax, r, hq, h);
-    esimd::simd<uint32_t, kD> po = mail::mail_take_words<kD>(slot, kPairMailEmpty, wait, error, mail::kNanWord);
-    esimd::simd<uint32_t, 16> pml = mail::mail_take<16>(slot + kD, kPairMailEmpty, wait, error, mail::kNanWord);
-    const float *pd = pend + (static_cast<size_t>(r) * hq + h) * kQsaPairWords;
-    const esimd::simd<float, kD> mo = esimd::block_load<float, kD>(pd);
-    const esimd::simd<float, 16> mml = esimd::block_load<float, 16>(pd + kD);
-    const esimd::simd<float, kD> oo = po.template bit_cast_view<float>().read();
-    const esimd::simd<float, 16> oml = pml.template bit_cast_view<float>().read();
-    // side 0's state first: (a, b) = (side 0, side 1)
-    const esimd::simd<float, kD> oa = side == 0 ? mo : oo, ob = side == 0 ? oo : mo;
-    const float Ma = side == 0 ? mml[0] : oml[0], La = side == 0 ? mml[1] : oml[1];
-    const float Mb = side == 0 ? oml[0] : mml[0], Lb = side == 0 ? oml[1] : mml[1];
-    const float M = Ma > Mb ? Ma : Mb;
-    const float ea = esimd::exp(Ma - M), eb = esimd::exp(Mb - M);
-    const float L = La * ea + Lb * eb;
-    const esimd::simd<float, kD> a = (oa * ea + ob * eb) / L;
-    const esimd::simd<float, kD> ab = esimd::simd<bf16, kD>(a);
-    const esimd::simd<float, kD> gt = esimd::simd<bf16, kD>(esimd::block_load<float, kD>(y + static_cast<size_t>(r) * ldy + h * 2 * kD + kD));
-    const esimd::simd<float, kD> sg = esimd::simd<bf16, kD>(1.f / (1.f + esimd::exp(-gt)));
-    esimd::block_store<bf16, kD>(out + (static_cast<size_t>(r) * hq + h) * kD, esimd::simd<bf16, kD>(ab * sg));
-  });
-}
-
 // ---- the raw-key ring after a many-row prep: the chunk's last min(m, 16) rows ----
 class QsaRingK;
 sycl::event ring_tail(sycl::queue &q, int m, int ldi, const SegW &sw, const float *yi, bf16 *ring0) {
   const int r0 = m > kQsaRing ? m - kQsaRing : 0;
   const int32_t *rec = sw.rec;
   const int rstride = sw.stride;
-  return q.parallel_for<QsaRingK>(sycl::nd_range<1>(static_cast<size_t>(m - r0) * kID, kID), [=](sycl::nd_item<1> it) {
+  sycl::event e = q.parallel_for<QsaRingK>(sycl::nd_range<1>(static_cast<size_t>(m - r0) * kID, kID), [=](sycl::nd_item<1> it) {
     const int r = r0 + static_cast<int>(it.get_group(0)), d = static_cast<int>(it.get_local_id(0));
     const SegRow srw = seg_row(rec, rstride, 0, r);  // one segment: the chunk
     bf16 *ring = ring0 + static_cast<size_t>(srw.slot) * kQsaRing * kID;
     ring[(srw.pos % kQsaRing) * kID + d] = bf16(bfr(yi[static_cast<size_t>(r) * ldi + kQsaIdxHeads * kID + d]));
   });
+  return e;
 }
 
 // Tiles per prefill attention work-group; XEN_QSA_PF_TILES=1 selects the decode's tiling (the bits of
 // qsa_rows == the decode path, test-qsa's contract).
+// XEN_PF_SKIP=ring|indexer|attn: drop one stage of the many-row prefill path to find which one the four-card
+// CCS/DEVICE_LOST fault comes from (the stage's output is then stale: survival is the only signal).
+bool pf_skip(const char *which) {
+  const char *e = std::getenv("XEN_PF_SKIP");
+  return e && std::strstr(e, which) != nullptr;
+}
+
 int pf_tiles() {
   const char *e = std::getenv("XEN_QSA_PF_TILES");  // read per call (host, once per layer): a test switches it
   return e && std::atoi(e) == 1 ? 1 : kQsaPfTiles;
@@ -1258,30 +890,26 @@ sycl::event prep_kv(sycl::queue &q, const QsaShape &s, int rows, const QsaWeight
     default: return prep<QsaKv::bf16, TREE>(q, s, rows, w, c, rope, sw, sc, ring_from);
   }
 }
-template <int G, bool TREE, bool SPLIT = false>
+template <int G, bool TREE>
 sycl::event attn_kv_g(sycl::queue &q, const QsaShape &s, int rows, const QsaCache &c, const SegW &sw, const QsaScratch &sc, int tpw) {
   if constexpr (!TREE) {
-    // the prefill's tiling: kQsaPfTiles per work-group, or (the split by tokens) a row's whole half
-    constexpr int kPf = SPLIT ? kQsaSplitPfTiles : kQsaPfTiles;
-    if (tpw == kPf) {
+    if (tpw == kQsaPfTiles) {
       switch (s.kv) {
-        case QsaKv::i8: return attn<QsaKv::i8, G, kPf, false, SPLIT>(q, s, rows, c, sw, sc);
-        case QsaKv::i8v4: return attn<QsaKv::i8v4, G, kPf, false, SPLIT>(q, s, rows, c, sw, sc);
-        default: return attn<QsaKv::bf16, G, kPf, false, SPLIT>(q, s, rows, c, sw, sc);
+        case QsaKv::i8: return attn<QsaKv::i8, G, kQsaPfTiles>(q, s, rows, c, sw, sc);
+        case QsaKv::i8v4: return attn<QsaKv::i8v4, G, kQsaPfTiles>(q, s, rows, c, sw, sc);
+        default: return attn<QsaKv::bf16, G, kQsaPfTiles>(q, s, rows, c, sw, sc);
       }
     }
   }
-  if (tpw != 1) throw std::invalid_argument("qsa attention: no instance walks " + std::to_string(tpw) + " tiles per work-group here");
   switch (s.kv) {
-    case QsaKv::i8: return attn<QsaKv::i8, G, 1, TREE, SPLIT>(q, s, rows, c, sw, sc);
-    case QsaKv::i8v4: return attn<QsaKv::i8v4, G, 1, TREE, SPLIT>(q, s, rows, c, sw, sc);
-    default: return attn<QsaKv::bf16, G, 1, TREE, SPLIT>(q, s, rows, c, sw, sc);
+    case QsaKv::i8: return attn<QsaKv::i8, G, 1, TREE>(q, s, rows, c, sw, sc);
+    case QsaKv::i8v4: return attn<QsaKv::i8v4, G, 1, TREE>(q, s, rows, c, sw, sc);
+    default: return attn<QsaKv::bf16, G, 1, TREE>(q, s, rows, c, sw, sc);
   }
 }
-// the attention's q heads per kv head: 12 (one / two cards, or four with the split by tokens), 6 (four cards)
+// a card's q heads per kv head: 12 (one / two cards), 6 (four cards)
 template <bool TREE = false>
 sycl::event attn_kv(sycl::queue &q, const QsaShape &s, int rows, const QsaCache &c, const SegW &sw, const QsaScratch &sc, int tpw = 1) {
-  if (s.kv_ways() > 1) return attn_kv_g<12, TREE, true>(q, s, rows, c, sw, sc, tpw);
   return s.lgrp() == 6 ? attn_kv_g<6, TREE>(q, s, rows, c, sw, sc, tpw) : attn_kv_g<12, TREE>(q, s, rows, c, sw, sc, tpw);
 }
 // XEN_DEC_PROFILE: the stage's stamp word (QsaScratch::stamps), when the caller asked for stamps (stamp_stage)
@@ -1326,12 +954,7 @@ void decode_middle(sycl::queue &q, const QsaShape &s, int rows, const QsaWeights
     stamp_stage(q, sc, QsaStage::select);
   }
   e.attn = attn_kv<TREE>(q, s, rows, c, sw, sc);
-  if (s.kv_ways() > 1) {
-    merge_send<TREE>(q, s, rows, sw, sc.part, sc.sel_n, sc.pend, sc.pair, sc.pair_parity, 0);
-    e.merge = pair_combine(q, s, rows, w.qkv.n, sc.y, sc.pend, sc.pair, sc.pair_parity, sc.attn);
-  } else {
-    e.merge = merge<TREE>(q, s, rows, w.qkv.n, sw, sc);
-  }
+  e.merge = merge<TREE>(q, s, rows, w.qkv.n, sw, sc);
   stamp_stage(q, sc, QsaStage::attention);
 }
 // The heads' split and the attention kernel's groups (12 or 6 q heads per card and kv head).
@@ -1339,13 +962,6 @@ void check_heads(const QsaShape &s, const char *who) {
   if (!s.split_ok() || s.grp() != 12 || (s.lgrp() != 12 && s.lgrp() != 6))
     throw std::invalid_argument(std::string(who) + ": heads must split over the cards (whole kv heads per card, or a kv head's q heads over its cards); "
                                 "the attention kernel is built for 12 q heads per kv head, 12 or 6 per card");
-}
-// The split by tokens' scratch and mailbox (rows: the call's rows).
-void check_pair(const QsaShape &s, const float *pend, const QsaPairMail &pm, int rows, const char *who) {
-  if (s.kv_ways() == 1) return;
-  if (s.hkv() != 1 || !pend || !pm.inbox || !pm.peer_inbox || !pm.error || pm.rows_max < rows)
-    throw std::invalid_argument(std::string(who) + ": the KV split by tokens needs one kv head per card, the pending states and the pair's mailbox for " +
-                                std::to_string(rows) + " rows (rows_max " + std::to_string(pm.rows_max) + ")");
 }
 
 }  // namespace
@@ -1357,21 +973,16 @@ const char *qsa_stage_name(QsaStage s) {
   return i >= 0 && i < static_cast<int>(QsaStage::kCount) ? n[i] : "?";
 }
 
-size_t qsa_page_kv_bytes(const QsaShape &s) { return static_cast<size_t>(s.hkv()) * s.page_tokens() * kD * s.kv_elem(); }
-size_t qsa_page_v_bytes(const QsaShape &s) { return static_cast<size_t>(s.hkv()) * s.page_tokens() * s.v_row_bytes(); }
-size_t qsa_page_scale_floats(const QsaShape &s) { return static_cast<size_t>(s.hkv()) * s.page_tokens(); }
-size_t qsa_page_vscale_floats(const QsaShape &s) { return static_cast<size_t>(s.hkv()) * s.page_tokens() * s.v_scale_bytes() / 4; }
-size_t qsa_pair_words(int rows_max, int hq) { return 2ull * rows_max * hq * kQsaPairWords; }
-size_t qsa_pair_floats(int rows_max, int hq) { return static_cast<size_t>(rows_max) * hq * kQsaPairWords; }
-sycl::event qsa_pair_init(sycl::queue &q, uint32_t *inbox, int rows_max, int hq) {
-  return q.fill(inbox, kPairMailEmpty, qsa_pair_words(rows_max, hq));
-}
+size_t qsa_page_kv_bytes(const QsaShape &s) { return static_cast<size_t>(s.hkv()) * kQsaPage * kD * s.kv_elem(); }
+size_t qsa_page_v_bytes(const QsaShape &s) { return static_cast<size_t>(s.hkv()) * kQsaPage * s.v_row_bytes(); }
+size_t qsa_page_scale_floats(const QsaShape &s) { return static_cast<size_t>(s.hkv()) * kQsaPage; }
+size_t qsa_page_vscale_floats(const QsaShape &s) { return static_cast<size_t>(s.hkv()) * kQsaPage * s.v_scale_bytes() / 4; }
 size_t qsa_page_kc_elems() { return static_cast<size_t>(kQsaPageBlocks) * kID; }
 size_t qsa_score_words(int max_tokens, int rows) {
   const size_t blocks = (static_cast<size_t>(max_tokens) / kQsaCompress + 63) / 64 * 64;
   return static_cast<size_t>(rows) * blocks;
 }
-size_t qsa_part_floats(const QsaShape &s, int rows) { return static_cast<size_t>(rows) * s.hkv() * kT * s.attn_grp() * kPartStride; }
+size_t qsa_part_floats(const QsaShape &s, int rows) { return static_cast<size_t>(rows) * s.hkv() * kT * s.lgrp() * kPartStride; }
 
 QsaEvents qsa_decode(sycl::queue &q, const QsaShape &s, int rows, const bf16 *x, const QsaWeights &w, const QsaCache &c, const bf16 *rope,
                      const QsaStep &step, const QsaScratch &sc, const PairWire *wire, int wire_parity, bf16 *out, int qkv_ks, int o_ks) {
@@ -1393,9 +1004,6 @@ QsaEvents qsa_decode(sycl::queue &q, const QsaShape &s, int rows, const bf16 *x,
                                 "): the 16-entry raw-key ring holds the row slots and the 3 committed keys a straddling block reads");
   if (step.every && step.pos_bound > kQsaTopBlocks * kQsaCompress)
     throw std::invalid_argument("qsa_decode: a step without a select holds rows of at most kQsaTopBlocks complete blocks (pos_bound <= 2,048)");
-  check_pair(s, sc.pend, sc.pair, rows, "qsa_decode");
-  if (s.kv_ways() > 1 && step.tree && c.tree_row0 < 0)
-    throw std::invalid_argument("qsa_decode: a tree step with the KV split by tokens needs the step area (cache.tree_row0)");
   const int stride = static_cast<int>(qsa_score_words(c.max_tokens) / kM), blk_bound = step.pos_bound / kQsaCompress;
   const SegW sw{step.pos, step.stride, step.seg_rows};
   QsaEvents e;
@@ -1439,7 +1047,6 @@ struct QsaMoveBufs {
   bf16 *kc[kQsaMoveCaches], *ring[kQsaMoveCaches];
   const bf16 *tkc[kQsaMoveCaches];
   const int32_t *pages[kQsaMoveCaches];
-  int area[kQsaMoveCaches];  // the split by tokens: QsaCache::tree_row0
 };
 constexpr int kMoveChunk = 16;                                   // bytes per item and row
 constexpr int kMoveItems = kD * 2 / kMoveChunk;                  // items per (cache, kv head): a bf16 K / V row
@@ -1462,13 +1069,9 @@ sycl::event qsa_kv_move(sycl::queue &q, const QsaShape &s, const QsaCache *cache
     const QsaCache &c = caches[l];
     if (!c.k || !c.v || !c.kc || !c.ring || !c.pages || !c.tkc || (qsa_kv_scaled(s.kv) && (!c.ks || !c.vs)) || p0 + mv.from[mv.n - 1] >= c.max_tokens)
       throw std::invalid_argument("qsa_kv_move: cache " + std::to_string(l) + " lacks a pool / ring / page table / tkc, or the path passes its capacity");
-    if (s.kv_ways() > 1 && c.tree_row0 < 0) throw std::invalid_argument("qsa_kv_move: the KV split by tokens needs cache " + std::to_string(l) + "'s step area");
   }
-  // the path is the main chain: every row already sits at its position (the split: the tree rows' K / V are in the step
-  // area, so every accepted position moves)
-  if (!moves && s.kv_ways() == 1) return {};
+  if (!moves) return {};  // the path is the main chain: every row already sits at its position
   const int hkv = s.hkv(), krow = kD * s.kv_elem(), vrow = s.v_row_bytes();
-  const int ways = s.kv_ways(), side = s.kv_side(), ptok = s.page_tokens();
   const bool scaled = qsa_kv_scaled(s.kv), v4 = qsa_kv_v4(s.kv);
   sycl::event e;
   for (int l0 = 0; l0 < n_caches; l0 += kQsaMoveCaches) {
@@ -1479,31 +1082,25 @@ sycl::event qsa_kv_move(sycl::queue &q, const QsaShape &s, const QsaCache *cache
       b.k[l] = c.k, b.v[l] = c.v, b.ks[l] = c.ks, b.vs[l] = c.vs, b.kc[l] = c.kc, b.tkc[l] = c.tkc;
       b.ring[l] = c.ring + static_cast<size_t>(slot) * kQsaRing * kID;
       b.pages[l] = c.pages + static_cast<size_t>(slot) * c.slot_pages;
-      b.area[l] = c.tree_row0;
     }
     // item (cache, kv head, chunk): chunk c's 16 bytes of each moved row's K and V, its scales (c 0), and on kv head 0
     // the ring entry's / compressed key's chunk c. One item walks the rows in order (x ascending, see qsa.hpp).
     e = q.parallel_for<QsaKvMoveK>(sycl::range<3>(static_cast<size_t>(nl), static_cast<size_t>(hkv), kMoveItems), [=](sycl::item<3> it) {
       const int l = static_cast<int>(it[0]), h = static_cast<int>(it[1]), c = static_cast<int>(it[2]);
       const int32_t *pages = b.pages[l];
-      auto slot_of = [&](int p) { return (static_cast<size_t>(pages[p / kQsaPage]) * hkv + h) * ptok + p % kQsaPage / ways; };
+      auto slot_of = [&](int p) { return (static_cast<size_t>(pages[p / kQsaPage]) * hkv + h) * kQsaPage + p % kQsaPage; };
       using chunk = sycl::uint4;
-      for (int x = ways > 1 ? 0 : 1; x < mv.n; ++x) {
+      for (int x = 1; x < mv.n; ++x) {
         const int fx = mv.from[x];
-        if (fx == x && ways == 1) continue;
-        // K / V: from the step area into the owner's slot (the split), else from the tree row's slot to its position's
-        if (ways == 1 || (p0 + x) % ways == side) {
-          const size_t src = ways > 1 ? static_cast<size_t>(b.area[l]) + static_cast<size_t>(r0 + fx) * hkv + h : slot_of(p0 + fx);
-          const size_t dst = slot_of(p0 + x);
-          if (c * kMoveChunk < krow) reinterpret_cast<chunk *>(b.k[l] + dst * krow)[c] = reinterpret_cast<const chunk *>(b.k[l] + src * krow)[c];
-          if (c * kMoveChunk < vrow) reinterpret_cast<chunk *>(b.v[l] + dst * vrow)[c] = reinterpret_cast<const chunk *>(b.v[l] + src * vrow)[c];
-          if (scaled && c == 0) {
-            b.ks[l][dst] = b.ks[l][src];
-            if (v4) reinterpret_cast<chunk *>(b.vs[l])[dst] = reinterpret_cast<const chunk *>(b.vs[l])[src];  // 8 bf16 scales
-            else b.vs[l][dst] = b.vs[l][src];
-          }
+        if (fx == x) continue;
+        const size_t src = slot_of(p0 + fx), dst = slot_of(p0 + x);
+        if (c * kMoveChunk < krow) reinterpret_cast<chunk *>(b.k[l] + dst * krow)[c] = reinterpret_cast<const chunk *>(b.k[l] + src * krow)[c];
+        if (c * kMoveChunk < vrow) reinterpret_cast<chunk *>(b.v[l] + dst * vrow)[c] = reinterpret_cast<const chunk *>(b.v[l] + src * vrow)[c];
+        if (scaled && c == 0) {
+          b.ks[l][dst] = b.ks[l][src];
+          if (v4) reinterpret_cast<chunk *>(b.vs[l])[dst] = reinterpret_cast<const chunk *>(b.vs[l])[src];  // 8 bf16 scales
+          else b.vs[l][dst] = b.vs[l][src];
         }
-        if (fx == x) continue;  // the index keys of a main-chain position are in place
         if (h == 0 && c * kMoveChunk < kID * 2) {
           auto *ring = reinterpret_cast<chunk *>(b.ring[l]);
           constexpr int kRow = kID * 2 / kMoveChunk;  // chunks per index key
@@ -1522,9 +1119,8 @@ sycl::event qsa_kv_move(sycl::queue &q, const QsaShape &s, const QsaCache *cache
 
 QsaEvents qsa_rows(sycl::queue &q, const QsaShape &s, int m, const bf16 *x, const QsaWeights &w, const QsaCache &c, const bf16 *rope,
                    const int32_t *words, int word_stride, int64_t pos0, const QsaScratch &sc, const QsaRowsScratch &rs, const PairRowsWire *wire,
-                   int wire_parity, bf16 *out, std::optional<int64_t> bound) {
+                   int wire_parity, bf16 *out) {
   if (m < 1 || pos0 + m > c.max_tokens) throw std::invalid_argument("qsa_rows: rows / capacity");
-  if (bound && (*bound < pos0 + m || *bound > c.max_tokens)) throw std::invalid_argument("qsa_rows: the bound must hold the call's rows and fit the cache");
   check_heads(s, "qsa_rows");
   if ((s.cards > 1) != (wire != nullptr)) throw std::invalid_argument("qsa_rows: a wire is needed exactly with more than one card");
   if (wire && wire->split && s.cards != 2 && s.cards != kWireCardsMax) throw std::invalid_argument("qsa_rows: the split sum is two- or four-card");
@@ -1534,9 +1130,8 @@ QsaEvents qsa_rows(sycl::queue &q, const QsaShape &s, int m, const bf16 *x, cons
     throw std::invalid_argument("qsa_rows: the stage-B scratch is not allocated");
   static_assert(kQsaRowsBatch % kM == 0, "batches start on a 4-row slice");
   if (qsa_kv_scaled(s.kv) && (!c.ks || !c.vs)) throw std::invalid_argument("qsa_rows: 8-bit KV needs scale pools");
-  check_pair(s, rs.pend, rs.pair, m, "qsa_rows");
-  // score rows spaced by this call's blocks (or the bound's), not the capacity's (the same bits)
-  const int stride = static_cast<int>(qsa_score_words(static_cast<int>(bound ? *bound : pos0 + m)) / kM);
+  // score rows spaced by this call's blocks, not the capacity's (the same bits)
+  const int stride = static_cast<int>(qsa_score_words(static_cast<int>(pos0 + m)) / kM);
   QsaEvents e;
   // one launch when both bodies pair (m <= 16: direct qkv + one-tile idx; the same bits)
   e.idx = pf_dense_pair(q, m, w.qkv, x, s.hidden, PfOut{rs.y, nullptr, w.qkv.n}, w.idx, x, s.hidden, PfOut{rs.yi, nullptr, w.idx.n}, true, nullptr,
@@ -1558,13 +1153,13 @@ QsaEvents qsa_rows(sycl::queue &q, const QsaShape &s, int m, const bf16 *x, cons
   // the chunk is one segment: slice 0's word (a record with word_stride >= kSegRec) names the slot
   const int rec_stride = word_stride >= kSegRec ? word_stride : 0;
   const SegW all{words, rec_stride, 0};
-  e.prep = traced(QsaStage::prep, prep_kv(q, s, m, w, c, rope, all, v, m));
-  traced(QsaStage::prep, ring_tail(q, m, w.idx.n, all, rs.yi, c.ring));
+  if (!pf_skip("qsa_prep")) e.prep = traced(QsaStage::prep, prep_kv(q, s, m, w, c, rope, all, v, m));
+  if (!pf_skip("ring")) traced(QsaStage::prep, ring_tail(q, m, w.idx.n, all, rs.yi, c.ring));
   // the batch's scratch: its rows of the per-row buffers, the shared per-batch ones
   auto batch_of = [&](int b) {
     QsaScratch u = v;
     u.y = rs.y + static_cast<size_t>(b) * w.qkv.n;
-    u.q = rs.q + static_cast<size_t>(b) * s.attn_hq() * kD;
+    u.q = rs.q + static_cast<size_t>(b) * s.hq() * kD;
     u.iq = rs.iq + static_cast<size_t>(b) * kQsaIdxHeads * kID;
     u.nblk = rs.nblk + b;
     u.sel = rs.sel + static_cast<size_t>(b) * kQsaTopBlocks;
@@ -1582,13 +1177,13 @@ QsaEvents qsa_rows(sycl::queue &q, const QsaShape &s, int m, const bf16 *x, cons
   auto select_rows = [&](int b, int rows) {
     const SegW pos{words + static_cast<size_t>(b / kM) * word_stride, rec_stride, 0};  // == pos0 + b
     const QsaScratch u = batch_of(b);
-    const int blk_bound = static_cast<int>((bound ? *bound : pos0 + b + rows) / kQsaCompress);  // >= the batch's largest nblk
+    const int blk_bound = static_cast<int>((pos0 + b + rows) / kQsaCompress);  // the batch's largest nblk
     if (blk_bound <= kQsaTopBlocks) return false;
     e.score = traced(QsaStage::score, score<false>(q, rows, c, pos, blk_bound, u, stride));
     // prefill batches: one select launch up to kQsaPfChunk blocks (no merge launch); past it kQsaChunk-block chunks.
     // An exact top-k: the same bits either way.
     const int pf_chunk = blk_bound <= kQsaPfChunk ? kQsaPfChunk : kQsaChunk;
-    e.select = traced(QsaStage::select, qsa_select(q, rows, u.score, stride, u.nblk, blk_bound, u, &e.merge_sel, pf_chunk));
+    if (!pf_skip("indexer")) e.select = traced(QsaStage::select, qsa_select(q, rows, u.score, stride, u.nblk, blk_bound, u, &e.merge_sel, pf_chunk));
     if (e.merge_sel != e.select) traced(QsaStage::select, e.merge_sel);  // the chunked select's merge (direct: the same launch)
     return true;
   };
@@ -1600,31 +1195,16 @@ QsaEvents qsa_rows(sycl::queue &q, const QsaShape &s, int m, const bf16 *x, cons
     for (int b = rs.sel_lo; b < rs.sel_hi; b += kQsaRowsBatch) any |= select_rows(b, std::min(kQsaRowsBatch, rs.sel_hi - b));
     (*rs.between)(any ? &e.merge_sel : nullptr);
   }
-  // The prefill walks pf_tiles() tiles per work-group (online softmax), a batch of rows per launch, then the batch's
-  // merge. The split by tokens instead walks a row's whole half in one work-group whose states go straight to the pair
-  // (attn's kWhole): one launch over the call's rows after every select, no partials and no fold. With the decode's
-  // tiling (pf_tiles() 1, the tests' bit contract) it runs the decode's launches per batch.
-  const int tpw = pf_tiles();
-  const bool split = s.kv_ways() > 1, whole = split && tpw != 1;
   for (int b = 0; b < m; b += kQsaRowsBatch) {
     const int rows = std::min(kQsaRowsBatch, m - b);
     const SegW pos{words + static_cast<size_t>(b / kM) * word_stride, rec_stride, 0};  // == pos0 + b
     if (!owner) select_rows(b, rows);
-    if (whole) continue;
     const QsaScratch u = batch_of(b);
+    // the prefill walks pf_tiles() tiles per work-group (online softmax)
+    const int tpw = pf_tiles();
     e.attn = traced(QsaStage::attention, attn_kv(q, s, rows, c, pos, u, tpw));
-    if (split)  // the batch's states to the partner / pend
-      e.merge = traced(QsaStage::attention, merge_send(q, s, rows, pos, u.part, u.sel_n, rs.pend, rs.pair, rs.pair_parity, b));
-    else
-      e.merge = traced(QsaStage::attention, merge(q, s, rows, w.qkv.n, pos, u, tpw));
+    if (!pf_skip("attn")) e.merge = traced(QsaStage::attention, merge(q, s, rows, w.qkv.n, pos, u, tpw));
   }
-  if (whole) {
-    QsaScratch u = batch_of(0);  // the call's rows of q / sel / sel_n
-    u.pend = rs.pend, u.pair = rs.pair, u.pair_parity = rs.pair_parity;
-    e.attn = traced(QsaStage::attention, attn_kv(q, s, m, c, all, u, kQsaSplitPfTiles));
-  }
-  // the split: one combine of the pair's states over the call's rows
-  if (split) e.merge = traced(QsaStage::attention, pair_combine(q, s, m, w.qkv.n, rs.y, rs.pend, rs.pair, rs.pair_parity, rs.attn));
   if (wire && wire->split && wire->send) {
     // the peer's rows first, their copy beside the own rows
     const int H = s.hidden, K = s.o_k();

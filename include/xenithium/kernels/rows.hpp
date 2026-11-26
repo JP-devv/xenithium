@@ -53,8 +53,7 @@ struct RowRange {
 // [0] position of the segment's first row
 // [1] accepted rows of the segment's previous step (the GDN replay count)
 // [2] the sequence's GDN parity (which of its two windows / pending logs is current)
-// [3] the rope offset of the segment's rows: the first rope table row of the sequence's YaRN tier (qwen35 / llama
-//     GQA with GqaShape:mrope, qwen38 QSA always), plus the M-RoPE delta after image input (qwen35); 0 = rope by position
+// [3] the GQA rope offset of the segment's rows (arch qwen35 with image input: the M-RoPE delta; GqaShape:mrope)
 // [4] state slot: which copy of the states / caches the sequence owns
 // The slot is read on the device, so one recorded graph serves any slot assignment. A bare
 // position word (stride 0, or any stride below kSegRec) is one segment on slot 0: the

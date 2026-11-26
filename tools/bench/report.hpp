@@ -28,10 +28,8 @@ struct RunInfo {
   uint64_t seed = 0;
   Sampling sampling;
   std::string thinking;  // "default", "on" or "off"
-  std::string mode = "hard";  // the run's mode (mode.hpp): "easy", "medium" or "hard"
-  int mode_version = 1;
   std::string reply_length = "fixed";  // of the sampled scenarios' replies: "fixed" or "natural" (ReplyLength)
-  std::string corpus;  // the embedded set ("hard", "medium") or the directory the prompts were cut from
+  std::string corpus;  // the embedded set ("hard", "easy") or the directory the prompts were cut from
   int corpus_version = 0;
   std::string corpus_hash;
   Capabilities capabilities;
@@ -61,7 +59,6 @@ struct Headline {
   std::string peak_streams;  // ... and its stream count
   double best_tokens_per_joule = 0;  // the most efficient concurrency level (0 = power not sampled)
   double quality_pct = -1;  // share of the quality questions answered correctly (-1 = not asked)
-  std::vector<Miss> quality_misses;  // its wrong answers
 };
 Headline headline(const Run &run);
 
@@ -81,13 +78,6 @@ std::vector<TableView> tables_of(const ScenarioResult &scenario);
 // "power: 418 W mean (card 0 211, card 1 207), 12.4 kJ; GPU clock mean 2,310 MHz, lowest 1,650" for a scenario with
 // a power record.
 std::string power_line(const ScenarioResult &scenario);
-
-// "1 wrong answer of 34 asked": the heading of a scenario's misses (the asked count is its yes / no samples).
-std::string misses_heading(const ScenarioResult &scenario);
-// A miss's answer as a report shows it: the answer given in quotes, or why there was none in parentheses.
-std::string given_text(const Miss &miss);
-// The notes of a scenario's rows in order, each text once (rows of one case often say the same thing).
-std::vector<std::string> unique_notes(const ScenarioResult &scenario);
 
 // One scenario's table with its notes, as printed when it finishes.
 std::string render_scenario(const ScenarioResult &scenario);

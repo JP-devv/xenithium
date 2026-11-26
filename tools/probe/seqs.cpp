@@ -276,7 +276,6 @@ int cmd_seqs_run(const std::string &model, const std::string &ppl, int nseq, int
   };
 
   q38::ModelOptions mo;
-  mo.kv_split = g_kv_tokens ? xenithium::kernels::QsaKvSplit::tokens : xenithium::kernels::QsaKvSplit::heads;
   mo.prefill_moe_a8 = g_pf_moe_a8;
   mo.prefill_dense_a8 = g_pf_dense_a8 != 0;
   mo.prefill_dense_a8_row = g_pf_dense_a8 == 2;
@@ -287,7 +286,6 @@ int cmd_seqs_run(const std::string &model, const std::string &ppl, int nseq, int
   mo.kv_lend = g_kv_lend, mo.kv_lend_keep = g_kv_lend_keep;
   mo.kv_pool_scramble = g_kv_scramble;
   mo.prefill_cold_stage = g_pf_cold_stage;
-  mo.prefill_fetch = g_pf_fetch;
   mo.gdn_scan = g_gdn_scan;
   if (pf_chunk > 0) mo.prefill_chunk = pf_chunk;  // --pf-chunk (the served TP4 setup reads 4,096-row chunks)
   mo.slots = nseq;

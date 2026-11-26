@@ -106,7 +106,6 @@ int cmd_prefix_run(const std::string &model, const std::string &ppl, const std::
     return 2;
   }
   q38::ModelOptions mo;
-  mo.kv_split = g_kv_tokens ? xenithium::kernels::QsaKvSplit::tokens : xenithium::kernels::QsaKvSplit::heads;
   mo.prefill_moe_a8 = g_pf_moe_a8;
   mo.prefill_dense_a8 = g_pf_dense_a8 != 0;
   mo.prefill_dense_a8_row = g_pf_dense_a8 == 2;
@@ -114,7 +113,6 @@ int cmd_prefix_run(const std::string &model, const std::string &ppl, const std::
   mo.moe_dn_ksplit = g_q38_moe_dn_ks;
   mo.decode_moe_a8 = g_dec_moe_a8;
   mo.prefill_cold_stage = g_pf_cold_stage;
-  mo.prefill_fetch = g_pf_fetch;
   mo.gdn_scan = g_gdn_scan;
   mo.threads = threads;
   mo.slots = 3;

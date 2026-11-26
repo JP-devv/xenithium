@@ -8,11 +8,8 @@
 // patches concatenated, fc1 + GELU(erf), fc2); the hidden state crosses cards once through pinned host memory (no
 // peer copy), and the merged tokens land in every card's rows.
 //
-// The tower spans at most kMaxCards cards whatever the fabric's size; the image rows (VisionStore's pool) live on EVERY
-// card of the fabric, because every card's embedding gather reads them (a four-card model gathers on all four).
-//
 // VisionStore: the image embeddings a running request's prompt names. An image registered by the server (any thread)
-// gets `tokens` consecutive rows of a pool on every card and a range of virtual token ids [base, base + tokens): base >=
+// gets `tokens` consecutive rows of a per-card pool and a range of virtual token ids [base, base + tokens): base >=
 // the vocabulary, issued once and never reused (a content hash finds an image already held, so the same picture sent
 // again gets the same ids and the prefix cache can continue a conversation over it; an evicted image registered again
 // gets new ids, so a cached prefix can never meet another image's rows). The engine thread calls prepare() over a
@@ -40,18 +37,14 @@ namespace xenithium::arch {
 
 class VisionTower {
  public:
-  // The cards the tower's weights and scratch spread over (the fabric's first ones); the tower is ~0.9 GiB, so more
-  // cards would add hidden-state crossings without freeing VRAM that matters.
-  static constexpr int kMaxCards = 2;
-
   // max_patches: the largest image's patches (scratch sizing; preprocess() never exceeds it at the server's cap).
   VisionTower(Fabric &fab, const model::Checkpoint &ck, const model::VisionConfig &vc, int max_patches);
   VisionTower(const VisionTower &) = delete;
   VisionTower &operator=(const VisionTower &) = delete;
   ~VisionTower();
 
-  // Bytes the tower would hold on card c of a `cards`-card fabric (weights + scratch; 0 on cards past kMaxCards),
-  // without loading: the serving backend reserves them before the hot experts fill the VRAM.
+  // Bytes the tower would hold on card c of `cards` (weights + scratch), without loading: the serving backend reserves
+  // them before the hot experts fill the VRAM.
   static size_t bytes_on(const model::VisionConfig &vc, int max_patches, int cards, int c);
   size_t bytes(int c) const;
 
@@ -74,7 +67,7 @@ class VisionTower {
 
 class VisionStore {
  public:
-  // rows: the pool's rows per card (the most image tokens held at once); a pool on every card of `fab`.
+  // rows: the pool's rows per card (the most image tokens held at once).
   VisionStore(Fabric &fab, std::unique_ptr<VisionTower> tower, const model::VisionConfig &vc, int64_t vocab, int64_t rows);
   VisionStore(const VisionStore &) = delete;
   VisionStore &operator=(const VisionStore &) = delete;
@@ -102,10 +95,7 @@ class VisionStore {
   // That token for a virtual id: the video token at a video frame's ids, else the image token.
   int32_t pad_token(int64_t id) const;
   int64_t vocab() const { return vocab_; }
-  // Card c's image rows; throws std::out_of_range for a card the store does not cover (a device kernel handed a
-  // pointer read past the list faults on the card and can take the host down with it).
-  const void *pool(int c) const { return pool_.at(static_cast<size_t>(c)); }
-  int cards() const { return static_cast<int>(pool_.size()); }
+  const void *pool(int c) const { return pool_[static_cast<size_t>(c)]; }
   int64_t rows() const { return rows_; }
   const model::VisionConfig &config() const { return vc_; }
   int64_t max_pixels = 0;  // the server's cap (preprocess)

@@ -22,7 +22,6 @@ enum class Add : int { none, bf16, f32 };
 // weight times the fp32 normed value, one rounding)
 template <Add A, int PLAIN, bool Q8>
 class RmsNormK;
-class RmsQ8ScalesColsK;
 
 template <Add A, int PLAIN, bool Q8 = false>
 sycl::event launch(sycl::queue &q, int rows, int H, rn_bf16 *res, const rn_bf16 *add_b, const float *add_f, const rn_bf16 *w, float eps,
@@ -63,11 +62,7 @@ sycl::event launch(sycl::queue &q, int rows, int H, rn_bf16 *res, const rn_bf16 
     } else {
       o = y * wv + y;  // (1 + w)
     }
-    if constexpr (Q8) {
-      if (!q8.codes_only) esimd::block_store<rn_bf16, kC>(xn + off, o);
-    } else {
-      esimd::block_store<rn_bf16, kC>(xn + off, o);
-    }
+    esimd::block_store<rn_bf16, kC>(xn + off, o);
     if constexpr (Q8) {  // w4a16_rows.cpp quant_2d16's rule on the bf16 xn
       const esimd::simd<float, kC> v8 = o;
       const float amax = esimd::hmax<float>(esimd::abs(v8));
@@ -127,14 +122,6 @@ sycl::event rms_norm_q8(sycl::queue &q, int rows, int hidden, rn_bf16 *res, cons
   if (add_bf16) return launch<Add::bf16, 0, true>(q, rows, hidden, res, add_bf16, nullptr, w, eps, xn, q8);
   if (add_f32) return launch<Add::f32, 0, true>(q, rows, hidden, res, nullptr, add_f32, w, eps, xn, q8);
   return launch<Add::none, 0, true>(q, rows, hidden, res, nullptr, nullptr, w, eps, xn, q8);
-}
-
-sycl::event rms_q8_scales_cols(sycl::queue &q, int rows, int groups, const float *s_rows, float *s, int lds) {
-  if (rows < 1 || groups < 1 || !s_rows || !s || lds < rows) throw std::invalid_argument("rms_q8_scales_cols: shape / buffers");
-  return q.parallel_for<RmsQ8ScalesColsK>(sycl::range<2>(static_cast<size_t>(groups), static_cast<size_t>(rows)), [=](sycl::item<2> it) {
-    const size_t g = it.get_id(0), r = it.get_id(1);
-    s[g * static_cast<size_t>(lds) + r] = s_rows[r * static_cast<size_t>(groups) + g];
-  });
 }
 
 sycl::event rms_norm_plain(sycl::queue &q, int rows, int hidden, rn_bf16 *res, const rn_bf16 *add_bf16, const rn_bf16 *w, float eps, rn_bf16 *xn) {

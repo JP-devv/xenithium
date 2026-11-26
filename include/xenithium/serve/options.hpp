@@ -28,16 +28,14 @@ struct Options {
   int64_t context = 32768;  // the max context: one request's most tokens (max_model_len); YaRN past the trained positions
   int64_t kv_pool_tokens = -1;  // -1 = auto, N = a pool of N tokens shared by the slots (the server refuses 0)
   std::string kv = "int8";  // int8 | bf16
-  std::string kv_split = "heads";  // qwen38 TP4: heads | tokens (the two cards of a kv head split its tokens)
   double reserve_gib = 0.25;
   int tp = 2, card = 0;  // cards (TP1 / TP2); TP1's card
   std::string emu_card = "off";  // off | b60 | b65: run as that card (XEN_EMU_CARD, util/cards.hpp, rt/card.hpp)
   std::string wire = "bf16";
-  std::string yarn_tiers = "on";  // qwen35 / qwen38 / llama: YaRN per request past the trained positions, or one factor
+  std::string yarn_tiers = "on";  // qwen35: YaRN per request past the trained positions, or one factor
   std::string prefill_wire = "auto";  // the prefill two-card sums: bf16 partials or fp32; auto = qwen35 bf16, qwen38 fp32
   int threads = 16;
   bool graphs = true;
-  bool prefill_graphs = false;  // qwen38: prompt calls of fewer than 128 rows replay recorded graphs (--prefill-graphs)
 
   // ---- prefill ----
   int prefill_chunk = 0;  // 0 = the arch's
@@ -49,19 +47,17 @@ struct Options {
   int attn_tail = 2;  // qwen35 / llama prefill attention context splits: 1 = the last wave's work-groups, 2 = + calls under one wave, 0 = none
   int prefill_gemm_rows = 1024;  // qwen35: rows per call from which the wide W4A8 GEMMs take oneDNN (128..4096; below 1024 a numerics change that pays with KV lending)
   int prefill_short = 32;  // qwen35: prefill calls of <= N rows run their int4 GEMMs on the decode kernels (0 off, 1..32)
-  std::string prefill_gemm = "onednn";  // onednn | onednn-all | esimd: qwen35 W4A8 prefill GEMMs n >= 6144 (onednn-all: every one) on oneDNN; qwen38 int8 trunk with chunks >= 2048
+  std::string prefill_gemm = "onednn";  // onednn | esimd: qwen35 W4A8 prefill GEMMs n >= 6144 on oneDNN; qwen38 int8 trunk with chunks >= 2048
   std::string prefill_a8_keep;
   std::string prefill_a8_body = "auto";  // auto | slm | direct: qwen35 W4A8 prefill GEMM body
   std::string prefill_moe = "w4a16";  // qwen38
   std::string prefill_dense = "w8a8-row";  // qwen38
   int prefill_cold_stage = 16;  // qwen38
-  int prefill_fetch = 0;        // qwen38 (two cards)
   std::string kv_lend = "on";  // qwen38: the KV pool's free pages hold cold experts (on|off)
   int64_t kv_lend_keep = 32768;  // qwen38: KV tokens kept free below the lent pages
   double kv_lend_park_s = 300;  // qwen38: a parked prefix above the keep is dropped after this long (0 = never)
   std::string kv_lend_pressure = "kv";  // qwen38: kv | lru | idle (core:BatchConfig:lend_pressure)
   double kv_lend_grace_s = 60;  // qwen38: with idle, parked at least this long
-  std::string expert_exchange = "on";  // qwen38: the hot experts follow the decode traffic while serving (on|off)
 
   // ---- weights ----
   std::string lm_head = "auto";  // auto | int8 | int4 | int4-rescore
@@ -107,8 +103,7 @@ struct Options {
   // entries and "" keep the default table 7,7,4,3,1,1,1,1,0..); each <= seg_rows - 1, n x (depth + 1) <= step_rows;
   // drafter_wide: with seg_rows 16, one stream drafts 15 (a 16-row tree of drafter_tree_wide nodes, or a chain without
   // trees) after a verify that accepted this many drafts or more, else the table's pick (0 = the table only).
-  // step_rows 0 = the model's default (qwen35 32; qwen38 16, on four cards 64 with the budget by stream count);
-  // step_rows_or(d) reads it
+  // step_rows 0 = the model's default (qwen35 32; qwen38 16, its 32-row steps are opt-in); step_rows_or(d) reads it
   int step_rows = 0;  // llama / flint run 8 at any setting above 8
   int step_rows_or(int def) const { return step_rows > 0 ? step_rows : def; }
   int seg_rows = 16;  // llama / flint run 8 at any setting

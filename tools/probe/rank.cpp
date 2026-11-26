@@ -94,7 +94,6 @@ int rank_qwen38(const std::string &dir, const std::string &prompts, const std::s
   if (all.empty()) throw std::runtime_error("rank: cannot read " + prompts);
 
   q38::ModelOptions mo;
-  mo.kv_split = g_kv_tokens ? xenithium::kernels::QsaKvSplit::tokens : xenithium::kernels::QsaKvSplit::heads;
   mo.context = context;
   mo.slots = 1;
   mo.kv_pool_tokens = 0;

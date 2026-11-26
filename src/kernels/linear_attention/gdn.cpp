@@ -77,7 +77,9 @@ GdnEvents gdn_decode(sycl::queue &q, const GdnShape &s, int rows, const bf16 *x,
 
 // ---- host reference ------------------------------------------------------------------------------
 namespace {
-float bfv(double v) { return bf16_value(bf16_bits(static_cast<float>(v))); }
+// one rounding (bf16_bits_from_double): rounding through float puts a value that lands on a bf16 midpoint on
+// the other side of it than the card's single rounding from fp32 does
+float bfv(double v) { return bf16_value(bf16_bits_from_double(v)); }
 }  // namespace
 
 void GdnRefState::reset(const GdnShape &s) {

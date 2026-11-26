@@ -246,7 +246,7 @@ double Sample::decode_tps() const {
 }
 
 double Sample::prefill_tps() const {
-  const int processed = prompt_tokens - std::clamp(cached_tokens, 0, prompt_tokens);
+  const int processed = prompt_tokens - std::max(cached_tokens, 0);
   return ttft_ms > 0 ? processed / (ttft_ms / 1e3) : 0;
 }
 

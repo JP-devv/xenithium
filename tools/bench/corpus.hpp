@@ -2,7 +2,7 @@
 //
 // Long prompts need real text: random tokens give untypical attention, routing and draft acceptance. A corpus is a
 // frozen set of files by kind ("code", "prose"). Two sets are embedded in the binary (tools/bench/corpus/<set> through
-// xenithium-bench-embed): "hard", this engine's own sources and documentation, and "medium", conventional template-made
+// xenithium-bench-embed): "hard", this engine's own sources and documentation, and "easy", conventional template-made
 // code and prose that drafters guess well. --corpus DIR reads another directory of the <kind>/<file> layout. The set,
 // its version and its hash go into every run file: two runs compare only on the same corpus.
 #pragma once
@@ -16,11 +16,10 @@
 
 namespace xenithium::bench {
 
-// Bumped by hand whenever a file of the set under tools/bench/corpus/<set> changes, or a standard short prompt
-// (prompts.cpp) does (tests/test_bench.cpp pins each set's hash beside it). The easy prompts are versioned with the
-// easy mode (mode.hpp).
-inline constexpr int kCorpusVersion = 4;        // "hard"
-inline constexpr int kMediumCorpusVersion = 1;  // "medium" (named "easy" before the easy mode got its own prompts)
+// Bumped by hand whenever a file of the set under tools/bench/corpus/<set> changes, or a short prompt (prompts.cpp)
+// does (tests/test_bench.cpp pins each set's hash beside it).
+inline constexpr int kCorpusVersion = 4;      // "hard"
+inline constexpr int kEasyCorpusVersion = 1;  // "easy"
 
 // The embedded sets, the default first.
 struct CorpusSet {
@@ -52,7 +51,7 @@ struct CorpusFile {
 class Corpus {
  public:
   explicit Corpus(std::vector<CorpusFile> files);
-  // One embedded set ("hard", "medium"); an unknown name gives an empty corpus.
+  // One embedded set ("hard", "easy"); an unknown name gives an empty corpus.
   static Corpus from_embedded(std::string_view set = "hard");
   // DIR/<kind>/<file>, files in name order. nullopt + err when the directory holds none.
   static std::optional<Corpus> from_dir(const std::string &dir, std::string &err);
@@ -74,43 +73,25 @@ class Corpus {
   std::vector<CorpusFile> files_;
 };
 
-// A turn said before the prompt's own: the prompt continues a conversation.
-struct EarlierTurn {
-  std::string_view role;  // "user" or "assistant"
-  std::string_view text;
-};
-
-// A short prompt of the decode / concurrency scenarios: one user turn, after `earlier` turns when it continues a chat.
+// A short single-turn prompt of the decode / concurrency scenarios.
 struct ShortPrompt {
   std::string_view id;        // "code-merge-lists"
   std::string_view category;  // "code"
   std::string_view text;
   int max_tokens;             // the reply length the category is measured at
-  std::span<const EarlierTurn> earlier = {};
 };
-
-// The sets of short prompts. `standard`: open tasks the model writes from scratch, three per category (the hard and
-// medium modes). `easy`: tasks whose reply mostly repeats or reshapes what the prompt gives - a diff or a whole file
-// back, JSON from given data, a fix of given code, a chat that goes on - four per category, with the shorter reply
-// lengths such tasks end at (the easy mode).
-enum class PromptSet { standard, easy };
-std::span<const ShortPrompt> short_prompts(PromptSet set = PromptSet::standard);
+std::span<const ShortPrompt> short_prompts();
 
 // The decode headline's weight per category: the share of a deployment's generated tokens that kind of output is.
 struct CategoryWeight {
   std::string_view category;
   double weight;
 };
-// How a mix turns the categories' rates into one figure. `harmonic`: the rate at which that mix of tokens comes out
-// (each category's time per token, weighted). `arithmetic`: the weighted mean of the categories' rates, the figure most
-// public benchmarks quote; it reads higher, since a fast category lifts it more than a slow one pulls it down.
-enum class MixAverage { harmonic, arithmetic };
 // A named set of weights over every category (they sum to 1; a category may weigh 0).
 struct WeightMix {
   std::string_view id;     // "agent": the decode scenario's `weights` parameter
   std::string_view about;  // where the shares come from (`list`, the docs)
   std::span<const CategoryWeight> weights;
-  MixAverage average = MixAverage::harmonic;
 };
 std::span<const WeightMix> weight_mixes();          // the default first
 std::span<const CategoryWeight> category_weights();  // the default mix: every category, in the usual order

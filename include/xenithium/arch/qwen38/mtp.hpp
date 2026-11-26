@@ -23,9 +23,8 @@ namespace xenithium::arch::qwen38 {
 inline constexpr const char *kMtpPrefix = "mtp.";
 inline constexpr const char *kMtpLayer = "mtp.layers.0.";
 
-// Every non-expert tensor of the drafter with its placement (the DenseStore input). kv_by_tokens: the KV split by
-// tokens (TP4, kernels/attention/qsa.hpp): its q_proj slices carry the partner's q heads too.
-std::vector<model::DenseSpec> mtp_dense_plan(const model::Checkpoint &ck, bool kv_by_tokens = false);
+// Every non-expert tensor of the drafter with its placement (the DenseStore input).
+std::vector<model::DenseSpec> mtp_dense_plan(const model::Checkpoint &ck);
 
 // One int4 matrix [n][k]: codes in [-8, 7] and one scale per (row, group of G).
 struct W4Rows {

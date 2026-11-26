@@ -8,7 +8,6 @@
 #include <cstdint>
 #include <functional>
 #include <string>
-#include <string_view>
 #include <vector>
 
 #include "xenithium/util/image.hpp"
@@ -18,14 +17,8 @@ namespace xenithium::util {
 struct VideoTools {
   std::string ffmpeg, ffprobe;  // resolved executable paths
 };
-// The name the server's video decoder setting defaults to.
-inline constexpr std::string_view kDefaultFfmpeg = "ffmpeg";
-// Where ffmpeg is usually installed besides PATH: the system prefixes, then static builds unpacked under ~/bin,
-// ~/.local/bin or ~/.hermes/tools/<name>/bin. Paths only; whether one exists is the caller's check.
-std::vector<std::string> ffmpeg_install_paths();
-// The ffmpeg executable (a path, or a name looked up on PATH; the default name also in ffmpeg_install_paths(), so a
-// static build off PATH is found) and its ffprobe (beside it, else on PATH): true + the resolved paths, or false + why
-// (the server then refuses video parts with that reason).
+// The ffmpeg executable (a path, or a name looked up on PATH) and its ffprobe (beside it, else on PATH): true + the
+// resolved paths, or false + why (the server then refuses video parts with that reason).
 bool find_video_tools(const std::string &ffmpeg, VideoTools &out, std::string &why);
 
 struct VideoInfo {

@@ -6,9 +6,7 @@
 //   [q_h | gate_h] (per q head), k, v = bf16(x . W^T)                         head_dim 256
 //   q, k      = bf16(rope(bf16(gemma_rmsnorm(.))))   gemma: x rsqrt(mean x^2 + eps) (1 + w), fp32
 //   rope      NeoX halves over the first 64 dims, cos | sin from the host table (bf16 values,
-//             fp32 math, one bf16 rounding); text positions: M-RoPE sections collapse to 1-D. A position p
-//             reads table row p + delta: delta = the segment record's word kSegRope (rows.hpp; a YaRN
-//             tier's first row), 0 with a bare position word
+//             fp32 math, one bf16 rounding); text positions: M-RoPE sections collapse to 1-D
 //   index     [iq_0..3 | ik] = bf16(x . Widx^T)                               dim 128
 //             iq = bf16(rope(bf16(gemma_rmsnorm(iq))))  (q_layernorm), position p
 //             every 4th token (p % 4 == 3) closes block b = p / 4:
@@ -35,19 +33,6 @@
 // 2j + 1 in the high one): a V row is 128 bytes + 16 bytes of scales (int8: 256 + 4). The codes widen to bf16 exactly;
 // each attention item's 16 dims share one scale per token, folded into its P (fp32) before P's hi / lo split.
 //
-// The KV split by tokens (QsaShape::split = tokens; four cards over two kv heads): the two cards that hold a kv head
-// (cards 2k and 2k + 1, kv_ways() 2) split its tokens instead of both storing all of them. The card with kv_side() s
-// stores the positions p with p % 2 == s: a page keeps its 64-token id and page table, and holds page_tokens() = 32 of
-// them per card, at row (p % 64) / 2. The compressed index keys stay on every card (the indexer is replicated, so the
-// selection is the same on all four). The attention runs all 12 q heads of the kv head (attn_hq(): the card's own 6
-// with their gates, the partner's 6 q heads from replicated rows) over the card's half of the selection; the merge
-// sends the partner's heads' partial softmax state (max, sum, o) over this half to the partner through the pair's
-// mailbox (QsaScratch::pair) and combines its own heads' two halves, side 0's first, before the gate. Draft-tree rows
-// keep their K / V in a step area on both cards (QsaCache::tree_row0) and qsa_kv_move writes the accepted path into the
-// owner's slots. The two-level merge rounds differently from one card's: the split is a numerics change.
-// The prefill (qsa_rows) walks a row's half in one work-group (kQsaSplitPfTiles tiles, online softmax) that sends the
-// states itself, one launch over the call's rows; a decode step folds its one-tile work-groups' partials (merge_send).
-//
 // Speculative rows need no accept word: everything is addressed by position, so a rejected row's
 // K / V / raw index key / compressed key is rewritten when the real token at that position comes.
 // Rows read only positions <= their own, all written before they are read (prep runs first).
@@ -71,7 +56,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
-#include <optional>
 #include <vector>
 #include <sycl/sycl.hpp>
 
@@ -86,9 +70,6 @@ namespace xenithium::kernels {
 using qsa_bf16 = sycl::ext::oneapi::bfloat16;
 
 enum class QsaKv : uint8_t { bf16, i8, i8v4 };  // i8v4: K int8, V int4
-// How the cards that hold the same kv head store its KV (above): `heads` = each holds all of its tokens, `tokens` = they
-// split the tokens (two cards per kv head only).
-enum class QsaKvSplit : uint8_t { heads, tokens };
 inline bool qsa_kv_scaled(QsaKv kv) { return kv != QsaKv::bf16; }  // 8-bit (4-bit V) codes + scale pools
 inline bool qsa_kv_v4(QsaKv kv) { return kv == QsaKv::i8v4; }
 
@@ -97,32 +78,20 @@ struct QsaShape {
   int cards = 1, card = 0;
   float eps = 1e-6f;
   QsaKv kv = QsaKv::i8;
-  QsaKvSplit split = QsaKvSplit::heads;
-  int hq() const { return q_heads / cards; }   // this card's q heads (the ones whose output it gates and projects)
+  int hq() const { return q_heads / cards; }   // this card's q heads
   // this card's kv heads: kv_heads / cards, or (TP4: 2 kv heads over 4 cards) one kv head that
   // cards / kv_heads cards hold alike (cards 2k and 2k + 1 hold kv head k, each with half its q heads)
   int hkv() const { return kv_heads >= cards ? kv_heads / cards : 1; }
   int kv0() const { return kv_heads >= cards ? card * hkv() : card * kv_heads / cards; }  // this card's first kv head
   int grp() const { return q_heads / kv_heads; }  // the model's q heads per kv head
   int lgrp() const { return hq() / hkv(); }       // this card's q heads per kv head (grp, or grp x kv_heads / cards)
-  // The KV split by tokens: the cards that share a kv head (1 = none: the heads split, or whole kv heads per card),
-  // this card's place among them (it stores the positions p with p % kv_ways() == kv_side()) and the tokens of a 64-token
-  // page it stores.
-  int kv_ways() const { return split == QsaKvSplit::tokens && kv_heads < cards ? cards / kv_heads : 1; }
-  int kv_side() const { return card % kv_ways(); }
-  int page_tokens() const { return kQsaPage / kv_ways(); }
-  // The attention's q heads per kv head and in all: lgrp(), or with the split every q head of the kv head (grp()).
-  int attn_grp() const { return kv_ways() > 1 ? grp() : lgrp(); }
-  int attn_hq() const { return hkv() * attn_grp(); }
   // the heads split over the cards: whole kv heads per card, or whole cards per kv head with its q heads split evenly
-  // (the split by tokens: two cards per kv head)
   bool split_ok() const {
     return cards >= 1 && card >= 0 && card < cards && kv_heads > 0 && q_heads % kv_heads == 0 && q_heads % cards == 0 &&
-           (kv_heads % cards == 0 || (cards % kv_heads == 0 && grp() % (cards / kv_heads) == 0)) && kv_ways() <= 2;
+           (kv_heads % cards == 0 || (cards % kv_heads == 0 && grp() % (cards / kv_heads) == 0));
   }
   int q_n() const { return hq() * 2 * kQsaDim; }               // q | gate per head
-  int peer_q_n() const { return (attn_hq() - hq()) * kQsaDim; }  // the split: the partner's q heads (no gates)
-  int qkv_n() const { return q_n() + peer_q_n() + 2 * hkv() * kQsaDim; }    // ... | the partner's q (split) | k | v
+  int qkv_n() const { return q_n() + 2 * hkv() * kQsaDim; }    // ... | k | v
   int idx_n() const { return (kQsaIdxHeads + 1) * kQsaIdxDim; }
   int o_k() const { return hq() * kQsaDim; }
   int kv_elem() const { return kv == QsaKv::bf16 ? 2 : 1; }                  // K bytes per element
@@ -131,7 +100,7 @@ struct QsaShape {
 };
 
 struct QsaWeights {
-  DenseWeights qkv;  // int8 [q|gate of each head | the partner's q heads (the split) | k | v] of this card's heads x hidden
+  DenseWeights qkv;  // int8 [q|gate of each head | k | v] of this card's heads x hidden
   DenseWeights idx;  // bf16 [iq 4 x 128 | ik 128] x hidden (replicated)
   DenseWeights o;    // int8 [hidden][hq x 256]: this card's k slice of o_proj
   const qsa_bf16 *q_norm = nullptr, *k_norm = nullptr;    // [256]
@@ -142,7 +111,6 @@ struct QsaWeights {
 // The sequences' state for one layer on this card. Pools are indexed by physical page and shared
 // by every slot; each slot (rows.hpp) has its own page table row and raw-key ring.
 struct QsaCache {
-  // 64 = page_tokens() (32 per card with the split by tokens)
   uint8_t *k = nullptr, *v = nullptr;   // [pages][hkv][64][256] x kv_elem bytes; v: [pages][hkv][64][v_row_bytes]
   float *ks = nullptr, *vs = nullptr;   // [pages][hkv][64] fp32 (8-bit KV scales; unused for bf16); int8-v4's vs holds
                                         // bf16 [pages][hkv][64][kQsaV4Scales] (one per 32 dims)
@@ -154,17 +122,11 @@ struct QsaCache {
   // this layer's per-row compressed keys of a tree step, [kMaxRows][128] (kQsaTreeKcElems; a step
   // row's key of the block it closes, read by its descendants' scores and by qsa_kv_move); needed by tree steps only
   qsa_bf16 *tkc = nullptr;
-  // The split by tokens, tree steps: the first token row (in k / v / ks / vs, past the pool's rows) of the step area,
-  // kQsaTreeAreaRows rows per kv head: a tree row r's K / V / scales sit at row tree_row0 + r hkv + kv head on every card
-  // (its path is read from there; qsa_kv_move writes the accepted path into the owner's slots). -1 = none.
-  int tree_row0 = -1;
 };
 inline constexpr size_t kQsaTreeKcElems = static_cast<size_t>(kMaxRows) * kQsaIdxDim;
-inline constexpr int kQsaTreeAreaRows = kMaxRows;  // step rows of QsaCache::tree_row0's area (per kv head)
 // Rows a tree segment holds at most: its row slots p0 .. p0 + 12 keep the ring entries of p0 - 3 .. p0 - 1 (the
 // committed raw keys a block straddling p0 reads) out of the 16-entry ring.
 inline constexpr int kQsaTreeRows = kQsaRing - (kQsaCompress - 1);
-// One page's bytes on this card (all hkv heads, page_tokens() tokens).
 size_t qsa_page_kv_bytes(const QsaShape &s);  // K bytes of one page (all hkv heads)
 size_t qsa_page_v_bytes(const QsaShape &s);   // V bytes of one page (== K's but with int8-v4)
 size_t qsa_page_scale_floats(const QsaShape &s);   // K's scales of one page (and V's but with int8-v4)
@@ -173,24 +135,10 @@ size_t qsa_page_kc_elems();
 
 // Decode scratch for R rows (a step's rows, every segment together; the GEMM
 // buffers y / yi / attn / partial hold the row shape's rows).
-// The pair's mailbox of the split by tokens: one slot of kQsaPairWords words per (parity, row, q head of the receiver)
-// (o[256] | max, sum | padding: 128-byte aligned messages), every word its own flag (comm/wire.hpp's protocol).
-inline constexpr int kQsaPairWords = 288;
-struct QsaPairMail {
-  uint32_t *inbox = nullptr;       // this card's (the partner writes it), qsa_pair_words(rows_max, hq) words
-  uint32_t *peer_inbox = nullptr;  // the partner's (card ^ 1)
-  uint32_t *error = nullptr;       // device word, 1 after a timed-out wait
-  uint64_t wait_cycles = 11200000000ull;  // >= 4 s at 2.8 GHz (a prefill call's partner may still be selecting)
-  int rows_max = 0;                // rows per parity
-};
-size_t qsa_pair_words(int rows_max, int hq);
-size_t qsa_pair_floats(int rows_max, int hq);  // QsaScratch::pend
-sycl::event qsa_pair_init(sycl::queue &q, uint32_t *inbox, int rows_max, int hq);
-
 struct QsaScratch {
   float *y = nullptr;        // [R][qkv_n] projections
   float *yi = nullptr;       // [R][idx_n]
-  qsa_bf16 *q = nullptr;     // [R][attn_hq][256] normed, roped
+  qsa_bf16 *q = nullptr;     // [R][hq][256] normed, roped
   qsa_bf16 *iq = nullptr;    // [R][4][128]
   int32_t *nblk = nullptr;   // [R] complete blocks per row (written by prep)
   uint32_t *score = nullptr; // [R][max_blocks] score bits (non-negative floats: bit order = order)
@@ -199,7 +147,7 @@ struct QsaScratch {
   int32_t *cand_n = nullptr;     // [R][16]
   int32_t *sel = nullptr;    // [R][512] selected blocks, ascending
   int32_t *sel_n = nullptr;  // [R]
-  float *part = nullptr;     // [R][hkv][33][attn_grp][2 + 256]: tile max, sum, o
+  float *part = nullptr;     // [R][hkv][33][lgrp][2 + 256]: tile max, sum, o
   qsa_bf16 *attn = nullptr;  // [R][hq x 256] gated attention = o_proj input
   float *partial = nullptr;  // [R][hidden]
   // Decode profiling (XEN_DEC_PROFILE, qsa_decode only): a cycle stamp (comm/wire.hpp stamp) after each stage before
@@ -213,12 +161,6 @@ struct QsaScratch {
   int sel_lo = 0, sel_hi = 0;
   const OwnerShare *sel_share = nullptr;
   int sel_parity = 0;
-  // The split by tokens (QsaShape::kv_ways() 2): this card's own heads' partial softmax states over its half of the
-  // tokens, [rows][hq][kQsaPairWords] (qsa_pair_floats), and the pair's mailbox (the partner's states of the same heads
-  // arrive in its inbox). pair_parity: alternate per call on the same mailbox.
-  float *pend = nullptr;
-  QsaPairMail pair{};
-  int pair_parity = 0;
 };
 // The stages of a QSA decode layer in launch order (QsaScratch::stamps).
 enum class QsaStage : int { projections, prep, score, select, attention, out, kCount };
@@ -250,15 +192,13 @@ struct QsaEvents {
 
 // x bf16 [shape][hidden] (row_shape(rows) rows readable, rows.hpp); out bf16 [shape][hidden] (rows < `rows`
 // written). Rows 1..8, in segments of any size.
-// rope: device bf16 [>= cache.max_tokens + the largest kSegRope delta][64]. wire: null with one card. Several sequences
+// rope: device bf16 [>= cache.max_tokens][64]. wire: null with one card. Several sequences
 // (step.stride, step.seg_rows): row r reads its segment's position and slot; every row computes
 // what a step of its own sequence alone computes for it, bit for bit.
 QsaEvents qsa_decode(sycl::queue &q, const QsaShape &s, int rows, const qsa_bf16 *x, const QsaWeights &w, const QsaCache &c,
                      const qsa_bf16 *rope, const QsaStep &step, const QsaScratch &sc, const PairWire *wire, int wire_parity,
                      qsa_bf16 *out, int qkv_ks = 0, int o_ks = 0);
-// After a tree step, the accepted path's per-position state to the chain's slots. With the split by tokens the K / V
-// of every accepted position come from the step area (QsaCache::tree_row0, row r0 + from[x]) into this card's slot when
-// it owns the position (p0 + x) % 2 == kv_side(), the path's main chain included. from[x] = the step
+// After a tree step, the accepted path's per-position state to the chain's slots. from[x] = the step
 // row of accepted position p0 + x (from[0] = 0, strictly increasing, < kQsaTreeRows; the segment's first step row is
 // r0). In each listed cache (one card's QSA layers, sequence slot `slot`), for every x with from[x] != x: K / V codes and
 // their scales of every kv head of this card from slot p0 + from[x] to p0 + x, the raw index key ring (p0 + from[x]) % 16
@@ -290,18 +230,13 @@ QsaEvents qsa_store(sycl::queue &q, const QsaShape &s, int rows, const qsa_bf16 
 // word_stride >= kSegRec the words are segment records (rows.hpp) and slice 0's names the slot. Chains only:
 // the records' tree words are not read (its kernels are the chain instances), so a caller never passes a
 // tree step's records here.
-// bound: null = each 64-row batch's grid from its own last position (score / select only where a row passes 512 complete
-// blocks); set = one host bound for every batch (>= pos0 + m, <= the cache capacity), so the launches depend on the
-// bound, not on pos0, and a recorded graph of the call replays at any position under it. The same bits either way:
-// the score's work-groups past a row's own blocks return at once, the select is an exact top-k, and the attention
-// takes a row of <= 512 complete blocks whole without reading a selection.
 inline constexpr int kQsaRowsBatch = 64;  // rows per score / select / attn batch (a multiple of 4)
 struct QsaRowsScratch {
   float *y = nullptr;        // [rows_max + 4][qkv.n]
   float *yi = nullptr;       // [rows_max + 4][idx.n]
   qsa_bf16 *attn = nullptr;  // [rows_max + 4][o_k]
   float *partial = nullptr;  // [rows_max][hidden]
-  qsa_bf16 *q = nullptr;     // [rows_max + 4][attn_hq][256]
+  qsa_bf16 *q = nullptr;     // [rows_max + 4][hq][256]
   qsa_bf16 *iq = nullptr;    // [rows_max + 4][4][128]
   int32_t *nblk = nullptr;   // [rows_max + 4]
   int32_t *sel = nullptr;    // [rows_max + 4][512]
@@ -321,28 +256,10 @@ struct QsaRowsScratch {
   // none ran), then attention for every row.
   int sel_lo = 0, sel_hi = 0;
   const std::function<void(const sycl::event *)> *between = nullptr;
-  // The split by tokens: as QsaScratch's, for the call's m rows (the attention sends every row's states, then one
-  // combine); the mailbox's rows_max >= m.
-  float *pend = nullptr;  // [rows_max][hq][kQsaPairWords]
-  QsaPairMail pair{};
-  int pair_parity = 0;
 };
 QsaEvents qsa_rows(sycl::queue &q, const QsaShape &s, int m, const qsa_bf16 *x, const QsaWeights &w, const QsaCache &c, const qsa_bf16 *rope,
                    const int32_t *words, int word_stride, int64_t pos0, const QsaScratch &sc, const QsaRowsScratch &rs, const PairRowsWire *wire,
-                   int wire_parity, qsa_bf16 *out, std::optional<int64_t> bound = std::nullopt);
-
-// Prefill-only experimental native XMX score: 8 queries x 16 keys,
-// with BF16 operands, FP32 accumulation and no post-scale. The caller
-// provides round-up-to-16 K panels and round-up-to-8 Q panels (128 dims,
-// four heads). Only complete causal IDs enter the existing top-k.
-sycl::event qsa_trained_xmx_pack_k(sycl::queue &q, const float *pool, int nkeys, qsa_bf16 *packed);
-sycl::event qsa_trained_xmx_pack_k(sycl::queue &q, const sycl::half *pool, int nkeys, sycl::ext::oneapi::bfloat16 *packed);
-sycl::event qsa_trained_xmx_pack_q(sycl::queue &q, const float *query, int rows, qsa_bf16 *packed);
-// (qsa.cpp): trained QSA decode tree scores on fp16 DPAS; see there.
-sycl::event qsa_trained_dec_xmx_score(sycl::queue &q, const float *query, const sycl::half *pool16, const int32_t *rec, int stride,
-                                      int layout, int rows, int pitch, int bound, uint32_t *scores, int32_t *eligible);
-sycl::event qsa_trained_xmx_score(sycl::queue &q, const qsa_bf16 *query, const qsa_bf16 *keys, int rows, int pos, int nkeys,
-                                 uint32_t *score, int pitch, int32_t *eligible);
+                   int wire_parity, qsa_bf16 *out);
 
 // The select stage alone (tests): rows' keys in score [rows][stride], nblk[r] keys per row (device
 // words), top-512 -> sel / sel_n (candidate buffers sized for `rows`). bound = the largest nblk (grid size).

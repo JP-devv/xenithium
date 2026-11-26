@@ -10,7 +10,6 @@
 #include <sycl/ext/intel/esimd.hpp>
 
 #include "xenithium/kernels/gemm/pf_dense.hpp"
-#include "xenithium/kernels/rows.hpp"
 
 namespace xenithium::kernels {
 namespace {
@@ -41,30 +40,6 @@ template <int MODE>
 class GrState;
 class GrNorm;
 class GrNormRc;
-
-// GdnRowsState's buffers in a kernel: its pointers, or (rec set) the slot's buffers of bufs at the record's parity,
-// read on the device.
-struct StateAt {
-  float *S, *S0;
-  const bf16 *win_in;
-  bf16 *win_out, *win[2];
-  const float *log_y, *log_ab;
-  float *y[2], *ab[2];
-  size_t sS, sW, sY, sA;
-  const int32_t *rec;
-  explicit StateAt(const GdnRowsState &st)
-      : S(st.S), S0(st.bufs.S), win_in(st.win_in), win_out(st.win_out), win{st.bufs.win[0], st.bufs.win[1]}, log_y(st.log_y), log_ab(st.log_ab),
-        y{st.bufs.y[0], st.bufs.y[1]}, ab{st.bufs.ab[0], st.bufs.ab[1]}, sS(st.bufs.slot_S), sW(st.bufs.slot_win), sY(st.bufs.slot_y),
-        sA(st.bufs.slot_ab), rec(st.rec) {}
-  size_t slot() const { return static_cast<size_t>(rec[kSegSlot]); }
-  int par() const { return rec[kSegParity] & 1; }
-  int pos(int host) const { return rec ? rec[kSegPos] : host; }
-  float *s() const { return rec ? S0 + slot() * sS : S; }
-  const bf16 *wi() const { return rec ? win[par() ^ 1] + slot() * sW : win_in; }
-  bf16 *wo() const { return rec ? win[par()] + slot() * sW : win_out; }
-  const float *ly() const { return rec ? y[par() ^ 1] + slot() * sY : log_y; }
-  const float *lab() const { return rec ? ab[par() ^ 1] + slot() * sA : log_ab; }
-};
 
 template <int N>
 inline esimd::simd<float, N> round_bf16(esimd::simd<float, N> v) SYCL_ESIMD_FUNCTION {
@@ -129,7 +104,7 @@ template <int MODE>
 sycl::event launch_row_core(sycl::queue &q, const GdnShape &s, int m, int pos, const GdnRowsState &st, const GdnRowsScratch &sc) {
   constexpr int kItems = kD / kVR;
   const int vh = s.vh(), rep = s.rep(), KW = s.key_w(), VW = s.val_w(), CC = s.conv_ch();
-  const StateAt sa(st);
+  float *S = st.S;
   const int32_t *accept = st.accept;
   const float *cv = sc.cv, *qn = sc.qn, *kn = sc.kn, *gate = sc.gate;
   bf16 *o = sc.o;
@@ -139,7 +114,7 @@ sycl::event launch_row_core(sycl::queue &q, const GdnShape &s, int m, int pos, c
     int t_lo = 0, t_hi = T;
     if constexpr (MODE != kRcAll) {
       int lead, full;
-      gdn_scan_split(sa.pos(pos) - A, T, lead, full);
+      gdn_scan_split(pos - A, T, lead, full);
       if constexpr (MODE == kRcLead) {
         t_hi = lead;
       } else {
@@ -147,7 +122,7 @@ sycl::event launch_row_core(sycl::queue &q, const GdnShape &s, int m, int pos, c
       }
     }
     if (t_lo >= t_hi) return;
-    float *Sp = sa.s() + (static_cast<size_t>(hv) * kD + i * kVR) * kD;
+    float *Sp = S + (static_cast<size_t>(hv) * kD + i * kVR) * kD;
     esimd::simd<float, kVR * kD> Sb;
 #pragma unroll
     for (int j = 0; j < kVR; ++j) Sb.template select<kD, 1>(j * kD) = esimd::block_load<float, kD>(Sp + j * kD);
@@ -262,9 +237,8 @@ GdnEvents gdn_rows(sycl::queue &q, const GdnShape &s, int m, const bf16 *x, cons
   // Conv input t of the sequence seq[] (window, replayed log rows, then new rows): output t reads
   // seq[t.. t + 3]; c = bf16(silu(taps, oldest first)).
   {
-    const StateAt sa(st);
-    const float *yq = sc.yq, *ab = sc.ab;
-    const bf16 *conv = w.conv, *alog = w.a_log, *dtb = w.dt_bias;
+    const float *yq = sc.yq, *logy = st.log_y, *ab = sc.ab, *lab = st.log_ab;
+    const bf16 *win = st.win_in, *conv = w.conv, *alog = w.a_log, *dtb = w.dt_bias;
     float *cv = sc.cv, *qn = sc.qn, *kn = sc.kn, *gate = sc.gate, *lgate = sc.lgate;
     const int tblocks = (Tmax + kCvRows - 1) / kCvRows;
     // a v item takes kVCh channels and a gate / ln-decay item kGateRun consecutive
@@ -274,8 +248,6 @@ GdnEvents gdn_rows(sycl::queue &q, const GdnShape &s, int m, const bf16 *x, cons
     const int nlg = st.pos >= 0 && gdn_scan_max_chunks(m) > 0 ? ngate : 0;  // ln decay items
     const sycl::event conv_prep = q.parallel_for<GrCp>(sycl::range<1>(static_cast<size_t>(nqk + nv + ngate + nlg)), [=](sycl::id<1> id) SYCL_ESIMD_KERNEL {
       const int a0 = accept[0], A = a0 < 0 ? 0 : (a0 > kLog ? kLog : a0), T = A + m;
-      const bf16 *win = sa.wi();
-      const float *logy = sa.ly(), *lab = sa.lab();
       int idx = static_cast<int>(id[0]);
       if (idx < nqk) {
         const int t0 = (idx / (2 * kh)) * kCvRows, hh = idx % (2 * kh), c0 = hh * kD;
@@ -371,12 +343,10 @@ GdnEvents gdn_rows(sycl::queue &q, const GdnShape &s, int m, const bf16 *x, cons
     // The committed window after the last row: seq[T.. T + 2], all channels. After the launch above,
     // which still reads win_in (win_out may equal it).
     const int groups = CC / kCh;
+    bf16 *wout = st.win_out;
     ev.core = q.parallel_for<GrWin>(sycl::range<1>(static_cast<size_t>(groups)), [=](sycl::id<1> id) SYCL_ESIMD_KERNEL {
       const int c0 = static_cast<int>(id[0]) * kCh;
       const int a0 = accept[0], A = a0 < 0 ? 0 : (a0 > kLog ? kLog : a0), T = A + m;
-      const bf16 *win = sa.wi();
-      bf16 *wout = sa.wo();
-      const float *logy = sa.ly();
       auto seq = [=](int j) SYCL_ESIMD_FUNCTION -> esimd::simd<float, kCh> {
         if (j < 3) return esimd::block_load<bf16, kCh>(win + static_cast<size_t>(j) * CC + c0);
         const int t = j - 3;
@@ -395,8 +365,6 @@ GdnEvents gdn_rows(sycl::queue &q, const GdnShape &s, int m, const bf16 *x, cons
       const sycl::event win_at = q.parallel_for<GrWinAt>(sycl::range<1>(static_cast<size_t>(groups)), [=](sycl::id<1> id) SYCL_ESIMD_KERNEL {
         const int c0 = static_cast<int>(id[0]) * kCh;
         const int a0 = accept[0], A = a0 < 0 ? 0 : (a0 > kLog ? kLog : a0), T = A + dpos;
-        const bf16 *win = sa.wi();
-        const float *logy = sa.ly();
         auto seq = [=](int j) SYCL_ESIMD_FUNCTION -> esimd::simd<float, kCh> {
           if (j < 3) return esimd::block_load<bf16, kCh>(win + static_cast<size_t>(j) * CC + c0);
           const int t = j - 3;
@@ -423,7 +391,6 @@ GdnEvents gdn_rows(sycl::queue &q, const GdnShape &s, int m, const bf16 *x, cons
   const bool fold = st.pos >= 0 && gdn_scan_max_chunks(m) > 0;
   if (st.snap_pos >= 0 && (!fold || st.snap_pos % kGdnChunk || st.snap_pos <= st.pos || st.snap_pos >= st.pos + m || !st.snap_S || !st.snap_win))
     throw std::invalid_argument("gdn_rows: a snapshot at a multiple of 64 inside a call on the chunked scan");
-  if (st.snap_pos >= 0 && st.rec) throw std::invalid_argument("gdn_rows: a snapshot takes the host's position and state (no rec)");
   if (fold) {
     traced(GdnStage::state, launch_row_core<kRcLead>(q, s, m, st.pos, st, sc));
     const GdnScanNorm nm{sc.yq + CC, ldy, w.norm, eps, sc.y, s.swish};
@@ -434,8 +401,7 @@ GdnEvents gdn_rows(sycl::queue &q, const GdnShape &s, int m, const bf16 *x, cons
       traced(GdnStage::state, q.memcpy(st.snap_S, st.S, gdn_S_elems(s) * 4));
       traced(GdnStage::state, gdn_scan(q, s, m, st.pos, accept, sc.qn, sc.kn, sc.cv, sc.gate, sc.lgate, st.S, sc.o, sc.scan, nm, 2, st.snap_pos));
     } else {
-      traced(GdnStage::state, gdn_scan(q, s, m, st.pos, accept, sc.qn, sc.kn, sc.cv, sc.gate, sc.lgate, st.rec ? st.bufs.S : st.S, sc.o, sc.scan, nm, 0, -1, &pre, st.rec,
-                                                      st.bufs.slot_S));
+      traced(GdnStage::state, gdn_scan(q, s, m, st.pos, accept, sc.qn, sc.kn, sc.cv, sc.gate, sc.lgate, st.S, sc.o, sc.scan, nm, 0, -1, &pre));
       traced(GdnStage::scan_pre, pre);
     }
     traced(GdnStage::state, launch_row_core<kRcTrail>(q, s, m, st.pos, st, sc));
@@ -465,13 +431,13 @@ GdnEvents gdn_rows(sycl::queue &q, const GdnShape &s, int m, const bf16 *x, cons
       }));
     } else {
       // rows t of T = accept + m: k < 64 -> lead row t = k; k >= 64 -> trail row lead + 64 full + k - 64
-      const int32_t *acc = accept, *rec = st.rec;
+      const int32_t *acc = accept;
       const int pos = st.pos;
       const sycl::event norm_rc = q.parallel_for<GrNormRc>(sycl::range<1>(static_cast<size_t>(2 * kGdnChunk) * vh), [=](sycl::id<1> id) SYCL_ESIMD_KERNEL {
         const int k = static_cast<int>(id[0] / vh), hv = static_cast<int>(id[0] % vh);
         const int a0 = acc[0], A = a0 < 0 ? 0 : (a0 > kLog ? kLog : a0), T = A + m;
         int lead, full;
-        gdn_scan_split((rec ? rec[kSegPos] : pos) - A, T, lead, full);
+        gdn_scan_split(pos - A, T, lead, full);
         const int t = k < kGdnChunk ? k : lead + full * kGdnChunk + (k - kGdnChunk);
         if ((k < kGdnChunk && t >= lead) || t >= T || t < A) return;
         norm(t - A, hv);

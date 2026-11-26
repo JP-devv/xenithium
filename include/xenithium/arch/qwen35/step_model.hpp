@@ -28,7 +28,6 @@ class StepModelAdapter final : public core::StepModel {
   int max_rows() const override { return m_.step_rows(); }  // llama / flint: 8
   int prefill_chunk() const override { return m_.prefill_chunk(); }
   void begin(int slot) override;
-  void note_prompt(int slot,int64_t total,int64_t restored) override { m_.note_prompt(slot,total,restored); }
   void prefill(int slot, const int32_t *tokens, int n, int32_t next) override;
   // a call in parts of whole layers: other slots decode between the parts
   int prefill_layers() const override { return m_.config().layers; }
@@ -46,10 +45,7 @@ class StepModelAdapter final : public core::StepModel {
   bool prefill_long_parts() const override { return true; }
   bool prompt_logprobs() const override { return true; }
   void prefill_rows(int slot, const int32_t *tokens, int n, int32_t next, const RowsFn &on_rows) override;
-  // MTP: one layer reused recursively, up to kMtpDepthMax drafts (a 7-row verify at depth 6).
-  // The default depth table stays MTP-3 (kMtpTableDepth); set_mtp_depth / --mtp-depth moves it.
-  static constexpr int kDepth = Model::kMtpDepthMax;
-  static constexpr int kMtpTableDepth = 3;
+  static constexpr int kDepth = 3;  // MTP-3: a 4-row verify (Model::kRows)
   // DFlash's default depths (the most drafts per sequence: the adaptive depth picks below them by spec_cost and the
   // acceptance it sees): one or two sequences the whole block (7 drafts, an 8-row verify each), three 4 (3 x 5 rows),
   // four 3 (4 x 4), five to eight 1 (2 rows each, 10-16 rows), nine and more plain rows. With draft trees each segment
@@ -142,15 +138,6 @@ class StepModelAdapter final : public core::StepModel {
   void set_depths(const int (&d)[kDepthSeqs]) {
     for (size_t i = 0; i < static_cast<size_t>(kDepthSeqs); ++i) depth_[i] = d[i];
   }
-  // --mtp-depth d (1..kDepth), the MTP depth of a lone sequence: the stream counts the table gives the full MTP-3 depth
-  // take d, the deeper-loaded ones keep their shallower depth (at most d). draft_depth() still clamps to the step /
-  // segment / pass limit.
-  void set_mtp_depth(int d) { set_mtp_depth_from(d, 1); }
-  // Like set_mtp_depth, but only for steps of `from` or more sequences (XEN_DRAFTER_MTP_FROM).
-  void set_mtp_depth_from(int d, int from) {
-    d = std::clamp(d, 1, kDepth);
-    for (int i = std::max(0, from - 1); i < kDepthSeqs; ++i) depth_[i] = depth_[i] >= kMtpTableDepth ? d : std::min(depth_[i], d);
-  }
   std::vector<int32_t> first_drafts(int slot, int32_t first, int depth, int sequences) override;
   // coupled drafts for sampled requests (MTP and DFlash)
   void draft_sampling(int slot, uint64_t key, uint64_t pos, float inv_t) override { m_.set_draft_noise(slot, key, pos, inv_t); }
@@ -195,12 +182,10 @@ class StepModelAdapter final : public core::StepModel {
   void kv_trim(int slot, int64_t tokens) override { m_.kv_trim(slot, tokens); }
   int64_t kv_held_tokens(int slot) const override { return m_.kv_held_tokens(slot); }
   int kv_page_tokens() const override { return Model::k_page_tokens; }
-  // Prefill calls at multiples of 64 with 64+ rows compute every row as a cold prefill does when no kernel's work split
-  // follows the call's size (XEN_ATTN_TAIL 0, no library GEMM route). With the fa body's context splits or the library
-  // route, a row's bits depend on its call: the alignment is then the prefill chunk (Model::call_align), so a cached
-  // continuation starts at a chunk boundary and runs the cold read's own calls (measured: cached == cold, logprobs bit
-  // for bit, round 101).
-  int snap_align() const override { return m_.call_align(); }
+  // Prefill calls at multiples of 64 with 64+ rows compute every row as a cold prefill does; a cut elsewhere or a call
+  // under 64 rows does not. That holds with the fa body's context splits off (XEN_ATTN_TAIL 0); with them a row's bits
+  // depend on its call's size.
+  int snap_align() const override { return 64; }
   int rope_tiers() const override { return m_.rope_tiers(); }  // ModelOptions::yarn_tiers
   int64_t rope_tier_limit(int t) const override { return m_.rope_tier_limit(t); }
   void set_rope_tier(int slot, int t) override {

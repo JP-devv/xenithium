@@ -1,8 +1,8 @@
 // Xenithium · the DFlash 2 block drafter on the cards: an alternative to a target's MTP layer (ModelOptions::dflash_dir;
 // server XEN_DRAFTER_MODEL), `DFlash2DraftModel` checkpoints (for Qwen3.8-27B, arch qwen35, and Qwen3.8 Flash-Next,
-// arch qwen38; bf16, or GPTQ int4 Linears: dflash_dense_plan). Shared by the archs: the target hands over its sizes,
-// embedding tables and lm_head rows (DFlashTarget) and captures its own features (capture() copies a single-stream
-// residual's columns; an arch with several residual streams fills step_features / prefill_features with its own kernel).
+// arch qwen38; bf16). Shared by the archs: the target hands over its sizes, embedding tables and lm_head rows
+// (DFlashTarget) and captures its own features (capture() copies a single-stream residual's columns; an arch with
+// several residual streams fills step_features / prefill_features with its own kernel).
 //
 // Semantics (config.json + the checkpoint):
 //   features  F_p = [h_p(l_0) | ... | h_p(l_4)]: the target's residual after decoder layers dflash_config.target_layer_ids
@@ -38,7 +38,6 @@
 #include <string>
 #include <vector>
 
-#include "xenithium/arch/common/dflash_plan.hpp"
 #include "xenithium/arch/common/lm_mat.hpp"
 #include "xenithium/kernels/gemm/dense.hpp"
 #include "xenithium/kernels/drafter/dflash.hpp"
@@ -51,8 +50,8 @@
 namespace xenithium::arch {
 
 struct DFlashConfig {
-  // DSpine (`DFlashDraftModel` or `DSpineDraftModel` + the code bridge, kernels/drafter/dspine.hpp): no convolution,
-  // causal inside the block, the bridge after every layer, ds_select's scores.
+  // DSpine (`DFlashDraftModel` + the code bridge, kernels/drafter/dspine.hpp): no convolution, causal inside the block,
+  // the bridge after every layer, ds_select's scores.
   enum class Kind : uint8_t { dflash2, dspine };
   Kind kind = Kind::dflash2;
   int hidden = 0, layers = 0, q_heads = 0, kv_heads = 0, head_dim = 0, inter = 0;
@@ -66,7 +65,7 @@ struct DFlashConfig {
   // Throws naming the key or the broken invariant (the kernels' constants: head dim 128, two taps, top-16, ...).
   // max_block: the rows a pass may draft here (8: the 27B's verify per sequence; 16 with DFlashOptions::wide)
   static DFlashConfig load(const std::string &dir, int max_block = 8);
-  // config.json names a block drafter (drafter_archs.hpp)
+  // config.json names DFlash2DraftModel, or DFlashDraftModel with DSpine's bridge
   static bool is_dflash(const std::string &dir);
 };
 
@@ -96,6 +95,7 @@ struct DFlashOptions {
   int slots = 1;
   int rows = 0;  // block rows a pass holds (0 = kRows; the target's step rows, 16 unless 32-row steps)
   int prefill_rows = 2048;  // most prompt rows one prefill chunk captures features for
+  bool copy_wire = false;   // TP4: runtime copies for the drafter reductions
   bool profile = false;     // pass(): wait on both cards after every stage and add its wall time to stage_ms() (diagnostic)
   // A context-only pass (block_rows 0: no drafts, e.g. at depth 0 with many streams) only stashes its feature rows, up
   // to this many per slot; settle() runs them as one many-row context pass (prefill_ctx's kernels) before anything reads
@@ -192,9 +192,11 @@ class DFlash {
     bf16 *t = nullptr, *tn = nullptr;
     float *part = nullptr, *ykv = nullptr;
     const kernels::PairRowsWire *wire = nullptr;
+    const kernels::PairSplit *split = nullptr;
+    sycl::queue *split_side = nullptr;
   };
   // row0: the m rows start at prefill_features row row0 (a chunk's context in two parts).
-  void prefill_ctx(int m, int64_t pos0, int slot, const std::vector<Lend> &lend, int parity, int row0 = 0);
+  void prefill_ctx(int m, int64_t pos0, int slot, const std::vector<Lend> &lend, int parity, int row0 = 0, uint32_t *split_seq = nullptr);
   // The slot's deferred context rows at positions < pos into its ring (one many-row pass), the rest dropped (rewritten
   // later or never read): pos = INT64_MAX before reading the ring, 0 before replacing it.
   void settle(int slot, int64_t pos);
@@ -206,9 +208,7 @@ class DFlash {
   static const char *const *stage_names();
   const double *stage_ms() const { return stage_ms_; }
   int stage_passes() const { return stage_passes_; }
-  int graphs() const { return graphs_n_; }                                // pass graphs recorded so far
-  int graphs_held() const { return static_cast<int>(graphs_.size()); }  // of them still held (at most XEN_DRAFT_GRAPHS)
-  int graphs_evicted() const { return graphs_evicted_; }                // the least recently used, dropped at the cap
+  int graphs() const { return static_cast<int>(graphs_.size()); }  // pass graphs recorded so far
   double graphs_ms() const { return graphs_ms_; }                     // their recording time in all
   void clear_stages() {
     for (double &x : stage_ms_) x = 0;
@@ -254,6 +254,7 @@ class DFlash {
     bf16 *cos = nullptr, *sin = nullptr;
     void *topk_scratch = nullptr;
     uint64_t *keys = nullptr;
+    unsigned *nanw = nullptr;  // XEN_DF_STAGE witness: bit s set = stage s went non-finite
     int32_t *rec = nullptr, *pf_rec = nullptr, *anchors = nullptr, *drafts = nullptr;
     kernels::DraftNoiseRec *noise = nullptr;  // card 0's selector: the segments' noise records
     const bf16 *pred_cb = nullptr, *succ_cb = nullptr;  // card 0
@@ -264,9 +265,6 @@ class DFlash {
     float *brms = nullptr, *bproj = nullptr, *bpacked = nullptr;
     bf16 *bcode = nullptr, *bmsg = nullptr;
     kernels::PairWire wire;
-    // four cards: the pass's sums of kOwnerSumRows rows and more as an owner sum + a share by copies (dflash.cpp, submit)
-    kernels::PairWire own_wire;
-    kernels::OwnerShare own_share;
     kernels::DfTopkWire tw;
     // the deferred context: feature rows [slots][ctx_defer][F], the flush's own scratch and wire
     bf16 *backlog = nullptr, *fl_t = nullptr, *fl_tn = nullptr;
@@ -283,7 +281,7 @@ class DFlash {
   int fl_par_ = 0, flushes_ = 0;
   void defer(const std::vector<Seg> &segs, int ctx_rows, int ctx_row0);
   void flush(int slot, int m);
-  int confident(const std::vector<int32_t> &drafts, int row0) const;
+  int confident(const std::vector<int32_t> &drafts, int row0, float cut) const;
   Fabric &fab_;
   std::string dir_;
   DFlashConfig cfg_;
@@ -293,6 +291,7 @@ class DFlash {
   int ring_ = 0, fcols_ = 0, ipc_ = 0, hq_ = 0, hkv_ = 0, par_ = 0;
   std::unique_ptr<load::DenseStore> dense_, head_store_;
   std::vector<Card> cards_;
+  kernels::StepCopy step_copy_{}, flush_copy_{};
   std::vector<size_t> bytes_;
   bf16 *codebook_ = nullptr;  // DSpine: the bridge's codebook bf16 [vocab][code], pinned host (anchor rows)
   void load_dspine(const std::string &dir, const std::string &target_dir);
@@ -308,12 +307,8 @@ class DFlash {
   struct Graph {
     std::vector<sycl::ext::oneapi::experimental::command_graph<sycl::ext::oneapi::experimental::graph_state::executable>> exec;
     int end_par = 0;
-    uint64_t used = 0;  // the last replay (graph_tick_): the least recently used is evicted at the cap
   };
-  // at most XEN_DRAFT_GRAPHS (default 96) entries; each holds ~10 MiB of device memory per card
   std::map<GraphKey, Graph> graphs_;
-  uint64_t graph_tick_ = 0;
-  int graphs_n_ = 0, graphs_evicted_ = 0;
   double graphs_ms_ = 0;
   void submit(int ns, int ctx_rows, int block_rows, int ctx_row0, int tree = 0);
   double stage_ms_[kStages] = {};
@@ -322,10 +317,7 @@ class DFlash {
 };
 
 // The drafter's tensors with their placement (see above). dense_bytes 1 = int8 per row, 2 = bf16, 4 = int4 by RTN (q, o,
-// gate | up, down; the rest int8). A GPTQ `.qweight` Linear is packed as w4 (when the path would RTN) or dequantised
-// to the dense precision (fc and the other dense-only mats); the store is keyed as the canonical `.weight` name.
-inline std::vector<model::DenseSpec> dflash_dense_plan(const model::Checkpoint &ck, const DFlashConfig &cfg, int dense_bytes) {
-  return dflash_dense_plan(ck, cfg.layers, dense_bytes, cfg.kind == DFlashConfig::Kind::dspine);
-}
+// gate | up, down; the rest int8).
+std::vector<model::DenseSpec> dflash_dense_plan(const model::Checkpoint &ck, const DFlashConfig &cfg, int dense_bytes);
 
 }  // namespace xenithium::arch

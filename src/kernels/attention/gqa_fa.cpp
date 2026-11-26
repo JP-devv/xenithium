@@ -56,7 +56,7 @@ constexpr int kOp8 = 512;                    // bytes of one s8 B operand (32 di
 
 // D: head_dim (256: qwen35 with the sigmoid output gate; 128: arch llama, no gate, q.k scale 1 / sqrt(128)); the
 // per-D sizes below follow it (SLM 64 KB at D 256, 32 KB at 128; o accumulators D / 2 GRF)
-template <QsaKv KV, int G, int QB, bool LO, int QK, int D, bool FL, bool SEL, bool TRAINED = false, bool SKIP = false>
+template <QsaKv KV, int G, int QB, bool LO, int QK, int D, bool FL, bool SEL>
 class GqaAttnFaK;
 
 // 16 tokens x 16 dims bf16 (row-major [tok][dim]) -> the q.k B operand (k = dims, n = tokens): dword pairs transposed
@@ -96,12 +96,9 @@ struct FaTail {
   float *buf = nullptr;  // [tail][split][NI][8 x D o + 8 m + 8 l] fp32
 };
 
-template <QsaKv KV, int G, int QB, bool LO, int QK = 0, int D = 256, bool FL = false, bool SEL = false, bool TRAINED = false, bool SKIP = false>
+template <QsaKv KV, int G, int QB, bool LO, int QK = 0, int D = 256, bool FL = false, bool SEL = false>
 sycl::event attn_fa(sycl::queue &q, const GqaShape &s, int m, const GqaCache &c, const int32_t *pos_word, const float *y, int ldy, const bf16 *qb,
-                    bf16 *attn, const bf16 *sinks = nullptr, FaTail tp = {}, const GqaPageSets *sets = nullptr,
-                    GqaTrainedPrefill trained = {}) {
-  static_assert(!SKIP || (TRAINED && QK==1 && QB==40));
-  static_assert(!TRAINED || (KV == QsaKv::i8v4 && !FL && !SEL && D == 256 && G == 6));
+                    bf16 *attn, const bf16 *sinks = nullptr, FaTail tp = {}, const GqaPageSets *sets = nullptr) {
   static_assert(D == 256 || D == 128, "head_dim 256 (gated) or 128");
   static_assert(!SEL || (D == 256 && !FL), "page sets: head_dim 256, no window / ring");
   constexpr int kD = D;
@@ -137,7 +134,7 @@ sycl::event attn_fa(sycl::queue &q, const GqaShape &s, int m, const GqaCache &c,
   float *tbuf = tp.buf;
   const int32_t *sel_pages = SEL ? sets->pages : nullptr, *sel_counts = SEL ? sets->counts : nullptr;  // [block][kv head]..., as g below
   constexpr int kPart = 8 * kD + 16;  // floats per item's partial: o [dc][row][16], m [8], l [8]
-  return q.parallel_for<GqaAttnFaK<KV, G, QB, LO, QK, D, FL, SEL, TRAINED, SKIP>>(
+  return q.parallel_for<GqaAttnFaK<KV, G, QB, LO, QK, D, FL, SEL>>(
       sycl::nd_range<1>(static_cast<size_t>(whole + tail * split) * NI, NI), [=](sycl::nd_item<1> it) SYCL_ESIMD_KERNEL {
         esimd::slm_init<kSlmQ>();
         const int gg = static_cast<int>(it.get_group(0)), i = static_cast<int>(it.get_local_id(0));
@@ -159,18 +156,13 @@ sycl::event attn_fa(sycl::queue &q, const GqaShape &s, int m, const GqaCache &c,
           const int count = sel_counts[g];
           if (count > 0) walk = sel_pages + static_cast<size_t>(g) * kGqaSelMax, ntiles = count;
         }
-        if constexpr (TRAINED) {
-          // Share physical K/V staging, never share a query's selected masks.
-          walk = trained.pages + static_cast<size_t>(blk) * trained.pitch;
-          ntiles = trained.counts[blk];
-        }
         if (part) {  // this unit's contiguous share of the block's walk
           const int nt_all = ntiles;
           tlo = nt_all * sp / split;
           ntiles = nt_all * (sp + 1) / split;
         }
         auto tile_at = [&](int w) SYCL_ESIMD_FUNCTION {
-          if constexpr (SEL || TRAINED) {
+          if constexpr (SEL) {
             if (walk) return static_cast<int>(walk[w]);
           }
           return w;
@@ -219,8 +211,6 @@ sycl::event attn_fa(sycl::queue &q, const GqaShape &s, int m, const GqaCache &c,
         const esimd::simd<int32_t, kOp> rowi = esimd::simd<int32_t, kOp>(0, 1) >> 4;
 #pragma unroll 1
         for (int w = tlo; w < ntiles; ++w) {
-          const uint32_t work=SKIP?trained.subtiles[size_t(blk)*trained.pitch+w]:0xffffffffu;
-          const uint32_t active=(work>>(4+4*rg))&15u;
           const int tile = tile_at(w);
           const int t0 = tile * kTile, nt = ntok - t0 < kTile ? ntok - t0 : kTile;
           const size_t slot = (static_cast<size_t>(page_of(tile)) * hkv + kvh) * kPage;  // the tile's first slot
@@ -229,7 +219,6 @@ sycl::event attn_fa(sycl::queue &q, const GqaShape &s, int m, const GqaCache &c,
           for (int u = i; u < 2 * kUnits; u += NI) {
             const bool isv = u >= kUnits;
             const int uu = isv ? u - kUnits : u, sub = uu / (kD / kUw), gw = uu % (kD / kUw);
-            if constexpr(SKIP) if(!(work & (1u<<sub))) continue;
             const int live = nt - sub * 16;  // rows of this 16-token block holding tokens of the block's range
             if constexpr (V4) {
               if (isv) {  // a V unit = this sub's 16 tokens x 64 dims = 32 bytes of each 128-byte row; nibbles widened exactly
@@ -300,7 +289,6 @@ sycl::event attn_fa(sycl::queue &q, const GqaShape &s, int m, const GqaCache &c,
             for (int u = i; u < 2 * kUnits; u += NI) {
               const bool isv = u >= kUnits;
               const int uu = isv ? u - kUnits : u, sub = uu / (kD / kUw), gw = uu % (kD / kUw);
-              if constexpr(SKIP) if(!(trained.subtiles[size_t(blk)*trained.pitch+w+1] & (1u<<sub))) continue;
               if constexpr (V4) {
                 if (isv) esimd::prefetch_2d<uint8_t, kUw / 2, 16>(vp + nslot * (kD / 2), kD / 2 - 1, kPage - 1, kD / 2 - 1, gw * kUw / 2, sub * 16, pfp);
                 else esimd::prefetch_2d<uint8_t, kUw, 16>(kp + nslot * kD, kD - 1, kPage - 1, kD - 1, gw * kUw, sub * 16, pfp);
@@ -311,9 +299,6 @@ sycl::event attn_fa(sycl::queue &q, const GqaShape &s, int m, const GqaCache &c,
               }
             }
           }
-          // Every item still participates in both page barriers and staging.
-          // Only this bundle's private score/softmax/PV state can be skipped.
-          if constexpr(SKIP) if(!active) continue;
           esimd::simd<float, kTile> ks(1.f), vs(1.f);
           if constexpr (I8) {
             ks = esimd::block_load<float, kTile>(ksp + slot);
@@ -323,7 +308,7 @@ sycl::event attn_fa(sycl::queue &q, const GqaShape &s, int m, const GqaCache &c,
           esimd::simd<float, kSubs * 128> S(-INFINITY);
 #pragma unroll
           for (int sub = 0; sub < kSubs; ++sub) {
-            if (sub * 16 < nt && (!SKIP || (active & (1u<<sub)))) {
+            if (sub * 16 < nt) {
               if constexpr (QK == 0) {
                 esimd::simd<float, 128> cc(0.f);
 #pragma unroll
@@ -368,13 +353,6 @@ sycl::event attn_fa(sycl::queue &q, const GqaShape &s, int m, const GqaCache &c,
             if constexpr (I8) sv *= ks;
             const int rp = rpos[r];
             esimd::simd_mask<kTile> dead = (ti + t0 > rp) | (ti >= nt);
-            if constexpr (TRAINED) {
-              const int j = rg * 8 + r;
-              const size_t rr = r0 + (j < nrows ? j : 0);
-              const uint32_t bits = trained.masks[rr * trained.pitch + tile];
-              const esimd::simd<uint32_t, kTile> block = esimd::simd<uint32_t, kTile>(0, 1) >> 2;
-              dead |= ((esimd::simd<uint32_t, kTile>(bits) >> block) & 1u) == 0u;
-            }
             if constexpr (FL) {
               if (win > 0) dead |= ti + t0 <= rp - win;  // before the row's window
             }
@@ -382,13 +360,13 @@ sycl::event attn_fa(sycl::queue &q, const GqaShape &s, int m, const GqaCache &c,
             const float mt = esimd::hmax<float>(sv);
             const float mo = m_run[r];
             float mn = mo > mt ? mo : mt;
-            if constexpr (FL || TRAINED) mn = mn == -INFINITY ? 0.f : mn;  // no live token yet: the state stays (exp(-inf) = 0)
+            if constexpr (FL) mn = mn == -INFINITY ? 0.f : mn;  // no live token yet: the state stays (exp(-inf) = 0)
             else if (part) mn = mn == -INFINITY ? 0.f : mn;     // a tail unit's range may hold none of a row's tokens
             const esimd::simd<float, 1> al = esimd::exp(esimd::simd<float, 1>(mo - mn));  // 0 on the first tile
             esimd::simd<float, kTile> pe = esimd::exp(sv - mn);
             pe.merge(esimd::simd<float, kTile>(0.f), dead);
             l_run[r] = l_run[r] * static_cast<float>(al[0]) + esimd::reduce<float>(pe, std::plus<>());
-            if constexpr (FL || TRAINED) m_run[r] = mo > mt ? mo : mt;
+            if constexpr (FL) m_run[r] = mo > mt ? mo : mt;
             else m_run[r] = part ? (mo > mt ? mo : mt) : mn;
             if constexpr (I8 && !V4) {
               pe *= vs;
@@ -408,7 +386,7 @@ sycl::event attn_fa(sycl::queue &q, const GqaShape &s, int m, const GqaCache &c,
           // ---- P.V on all 256 dims ----
 #pragma unroll
           for (int sub = 0; sub < kSubs; ++sub) {
-            if (sub * 16 >= nt || (SKIP && !(active & (1u<<sub)))) continue;
+            if (sub * 16 >= nt) continue;
             const esimd::simd<float, 128> pw = S.template select<128, 1>(sub * 128);
             if constexpr (V4) {
               // P x each token's scale of a 32-dim group (fp32, then the hi / lo split: the decode kernel's fold),
@@ -607,20 +585,18 @@ sycl::event fa_flint(sycl::queue &q, const GqaShape &s, int m, const GqaCache &c
 }
 
 // The page-selected instances, in the numerics page selection is built for: exact (bf16 q.k, P hi + lo) on
-// either KV, int8-fast (int8 q.k, P hi only) on the int8 and int8-v4 KV and P hi only on the bf16 KV: XEN_PREFILL_ATTN's
-// exact and what its auto resolves to. On int8-v4 the walk over the selected pages is the same; only the V loads differ.
+// either KV, int8-fast (int8 q.k, P hi only) on the int8 KV and P hi only on the bf16 KV: XEN_PREFILL_ATTN's exact and
+// what its auto resolves to.
 template <int QB>
 sycl::event fa_selected(sycl::queue &q, const GqaShape &s, int m, const GqaCache &c, const int32_t *pos_word, const float *y, int ldy, const bf16 *qb,
                         bf16 *attn, bool p_lo, int qk, FaTail tp, const GqaPageSets &sets) {
   const bool exact = qk == 0 && p_lo, hi_only = qk == 0 && !p_lo, int8_fast = qk == 1 && !p_lo;
   if (s.kv == QsaKv::i8 && exact) return attn_fa<QsaKv::i8, 6, QB, true, 0, 256, false, true>(q, s, m, c, pos_word, y, ldy, qb, attn, nullptr, tp, &sets);
   if (s.kv == QsaKv::i8 && int8_fast) return attn_fa<QsaKv::i8, 6, QB, false, 1, 256, false, true>(q, s, m, c, pos_word, y, ldy, qb, attn, nullptr, tp, &sets);
-  if (s.kv == QsaKv::i8v4 && exact) return attn_fa<QsaKv::i8v4, 6, QB, true, 0, 256, false, true>(q, s, m, c, pos_word, y, ldy, qb, attn, nullptr, tp, &sets);
-  if (s.kv == QsaKv::i8v4 && int8_fast) return attn_fa<QsaKv::i8v4, 6, QB, false, 1, 256, false, true>(q, s, m, c, pos_word, y, ldy, qb, attn, nullptr, tp, &sets);
   if (s.kv == QsaKv::bf16 && exact) return attn_fa<QsaKv::bf16, 6, QB, true, 0, 256, false, true>(q, s, m, c, pos_word, y, ldy, qb, attn, nullptr, tp, &sets);
   if (s.kv == QsaKv::bf16 && hi_only) return attn_fa<QsaKv::bf16, 6, QB, false, 0, 256, false, true>(q, s, m, c, pos_word, y, ldy, qb, attn, nullptr, tp, &sets);
   throw std::invalid_argument("gqa_attn_fa: page sets run the exact numerics (qk 0, P hi + lo) on the int8 or bf16 KV, int8 q.k with P hi only (qk 1, "
-                              "p_lo false) on the int8 / int8-v4 KV, or P hi only on the bf16 KV");
+                              "p_lo false) on the int8 KV, or P hi only on the bf16 KV");
 }
 
 template <int G, int QB, int D = 256>
@@ -660,29 +636,6 @@ sycl::event fa_kv(sycl::queue &q, const GqaShape &s, int m, const GqaCache &c, c
 
 }  // namespace
 
-sycl::event gqa_attn_fa_trained(sycl::queue &q, const GqaShape &s, int m, const GqaCache &c, const int32_t *pos_word,
-                               const float *y, int ldy, const gqa_bf16 *qb, gqa_bf16 *attn, const GqaTrainedPrefill &plan) {
-  if (s.kv != QsaKv::i8v4 || s.head_dim != 256 || s.grp() != 6 || !s.gate || s.window || s.rope_rows || c.slot_pages || c.ring_pages ||
-      !plan.pages || !plan.counts || !plan.masks || plan.pitch != c.max_tokens / kPage)
-    throw std::invalid_argument("gqa_attn_fa_trained: expected one text K8V4 slot and a valid per-row plan");
-  auto run = [&]<int QB,bool Skip=false>() {
-    const FaTail tp = fa_tail_plan<(QB / 8) * 6>(q, (m + QB - 1) / QB * s.hkv());
-    auto e = attn_fa<QsaKv::i8v4, 6, QB, false, 1, 256, false, false, true,Skip>(q, s, m, c, pos_word, y, ldy, qb, attn, nullptr, tp, nullptr, plan);
-    if (tp.tail) e = attn_fa_merge<6, QB, 256>(q, s, m, pos_word, y, ldy, attn, tp);
-    return e;
-  };
-  if(plan.subtiles) {
-    if(plan.rows_per_group!=40) throw std::invalid_argument("subtile sparse FA needs 40-row dispatch");
-    return run.template operator()<40,true>();
-  }
-  switch (plan.rows_per_group) {
-    case 16: return run.template operator()<16>();
-    case 32: return run.template operator()<32>();
-    case 40: return run.template operator()<40>();
-  }
-  throw std::invalid_argument("gqa_attn_fa_trained: expected 16, 32 or 40 rows per group");
-}
-
 void gqa_attn_fa_set_tail(int mode) { g_tail_on = std::clamp(mode, 0, 2); }
 int gqa_attn_fa_tail() { return g_tail_on; }
 
@@ -696,8 +649,8 @@ sycl::event gqa_attn_fa(sycl::queue &q, const GqaShape &s, int m, const GqaCache
                         const gqa_bf16 *qb, gqa_bf16 *attn, int rows_per_group, bool p_lo, int qk, const gqa_bf16 *sinks, const GqaPageSets *page_sets) {
   if (c.slot_pages) throw std::invalid_argument("gqa_attn_fa: one slot (page table without slot stride)");
   if (page_sets) {
-    if (s.head_dim != 256 || s.grp() != 6 || s.window > 0 || sinks || c.ring_pages > 0)
-      throw std::invalid_argument("gqa_attn_fa: page sets are built for 6 q heads per kv head at head_dim 256 (no window / ring / sinks)");
+    if (s.head_dim != 256 || s.grp() != 6 || s.window > 0 || sinks || c.ring_pages > 0 || s.kv == QsaKv::i8v4)
+      throw std::invalid_argument("gqa_attn_fa: page sets are built for 6 q heads per kv head at head_dim 256 on the int8 or bf16 KV (no window / ring / sinks)");
     const int blocks = (m + gqa_attn_fa_rows(s, rows_per_group) - 1) / gqa_attn_fa_rows(s, rows_per_group);
     if (!page_sets->valid() || blocks > page_sets->blocks) throw std::invalid_argument("gqa_attn_fa: the page sets hold fewer row blocks than the call has");
   }

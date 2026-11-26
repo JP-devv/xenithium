@@ -270,14 +270,6 @@ void DenseStore::load(const model::Checkpoint &ck, const std::vector<DenseSpec> 
           } else {
             it.src_rows = slice_rows(d0, sp.sections, c, C);
           }
-          if (sp.peer_block > 0) {  // the partner's (card ^ 1) rows: the first peer_keep of each peer_block
-            if (C % 2 || sp.peer_keep <= 0 || sp.peer_keep > sp.peer_block)
-              throw std::runtime_error("dense store: " + sp.name + ": the partner's rows need an even card count and 0 < peer_keep <= peer_block");
-            for (const auto &r : slice_rows(d0, sp.sections, c ^ 1, C)) {
-              if ((r.second - r.first) % sp.peer_block) throw std::runtime_error("dense store: " + sp.name + ": a card's rows are not whole peer blocks");
-              for (int64_t b = r.first; b < r.second; b += sp.peer_block) it.src_rows.push_back({b, b + sp.peer_keep});
-            }
-          }
           it.cols = cols_all;
           break;
         case DenseSpec::Split::cols:

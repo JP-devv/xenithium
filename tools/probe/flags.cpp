@@ -27,7 +27,6 @@ int g_dflash_wide = 0;  // --dflash-wide N: ModelOptions:dflash_wide
 int g_dflash_tree_wide = 15;  // --dflash-tree-wide N: ModelOptions:dflash_tree_wide
 double g_dflash_cut = -1;  // --dflash-cut X: DFlashOptions:conf_cut (0 = every draft; -1 = the default)
 bool g_kv_v4 = false;  // --kv-v4 0|1: qwen38 / qsa: --kv-bytes 1 runs int8 K + int4 V
-bool g_kv_tokens = false;  // --kv-split heads|tokens: qwen38 TP4 ModelOptions::kv_split
 int g_mtp_defer = -1;  // --mtp-defer N: ModelOptions:mtp_kv_defer (0 = every KV-only pass runs; -1 = the default)
 bool g_pf_checks = true;  // --pf-checks 0|1: model35 --rows pf timing + continuation check
 int g_pf_merge_at = -1;  // --pf-merge-at P: the slots' history for --pf-merge (default --at; 0 = new prompts at position 0)
@@ -89,12 +88,6 @@ int g_gdn_cap_rows = 4096, g_gdn_cap_every = 4;  // model --w4 PAT.., int8 plan 
 bool g_gdn_scan = true;
 // --pf-cold-stage N: ModelOptions:prefill_cold_stage for every model command.
 int g_pf_cold_stage = 16;
-// --pf-fetch N: ModelOptions:prefill_fetch for every model command.
-int g_pf_fetch = 0;
-// --pf-graphs 0|1, --pf-graph-gate N, --pf-graph-sizes N,N (probe.hpp)
-bool g_pf_graphs = false;
-int g_pf_graph_gate = 0;
-std::string g_pf_graph_sizes = "16,32,64,96,127";
 // --moe-cpu off|auto|avx512|avx2 [off], --moe-cpu-pct P [70], --moe-cpu-threads N [8]: qwen38
 // ModelOptions:moe_cpu for probe model (the decode MoE's CPU path for cold experts; rank takes its own flags).
 std::string g_moe_cpu = "off";

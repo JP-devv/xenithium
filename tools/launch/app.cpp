@@ -580,7 +580,6 @@ Style log_style(const std::string &l) {
       s.find("needs a value") != std::string::npos || s.find("out of memory") != std::string::npos)
     return th::err;
   if (s.rfind("launcher: the server", 0) == 0 || s.find("server: crashed") != std::string::npos) return th::err;
-  if (s.find("\xE2\x9C\x97") != std::string::npos) return th::err;  // a failed check (xenithium-bench marks wrong answers with it)
   if (s.find("warn") != std::string::npos || s.rfind("start-server:", 0) == 0) return th::warn;
   if (s.find("server: serving") != std::string::npos || s.find("server: stub engine") != std::string::npos) return th::ok;
   if (s.rfind("server:", 0) == 0) return th::acc2;
@@ -597,9 +596,10 @@ struct Rect {
 // ---- the app --------------------------------------------------------------------------------
 
 struct App::Impl {
-  // The tabs, in the header's order. The Chat tab is hidden for now: the screen, its keys and its tests stay in the
-  // tree and the flag alone brings it back. A hidden tab keeps its enum number and loses its header slot - the digits
-  // name the visible tabs in order, so hiding Chat leaves Settings 1, Logs 2, Benchmark 3.
+  // The tabs, in the header's order. The Chat tab is hidden for now (the owner, 2026-11-20: "Hide the Chat tab from
+  // the TUI for now"): the screen, its keys and its tests stay in the tree and the flag alone brings it back. A
+  // hidden tab keeps its enum number and loses its header slot - the digits name the visible tabs in order, so
+  // hiding Chat leaves Settings 1, Logs 2, Benchmark 3.
   enum Tab { kSettings = 0, kServer = 1, kChat = 2, kBench = 3, kTabs = 4 };
   static constexpr bool kShowChatTab = false;
   static bool tab_shown(int t) { return kShowChatTab || t != kChat; }
@@ -714,7 +714,7 @@ struct App::Impl {
   LogTail bench_log;  // the run's output (state_dir/bench.log), tailed in the lower panel
   int bench_log_scroll = 0;  // display lines up from the bottom; 0 = follow
   std::string bench_streams_last = "1,8,16,32";  // the Streams mode's last stream counts (the input's start value)
-  std::string bench_difficulty = "easy";  // m: the benchmark mode, how easy the measured text is (xenithium-bench --mode)
+  std::string bench_corpus = "easy";  // m: the text the runs cut their long prompts from (xenithium-bench --corpus easy|hard)
   bool bench_log_wrap = true;
 
   void rebuild_bench() {
@@ -1227,15 +1227,6 @@ struct App::Impl {
     return hay.find(f) != std::string::npos;
   }
 
-  // A row is listed when the model uses the setting, when `a` shows the unused ones, or when a filter is typed and the
-  // setting applies to this model's arch but waits on another one (Images by http(s) link while Image input is off): a
-  // search finds it dimmed with its reason instead of answering "no setting matches". Settings of another arch stay
-  // hidden until `a`.
-  bool listed(const Spec &s) const {
-    if (show_na || unused_reason(s, model.arch, vals).empty()) return true;
-    return !filter.s.empty() && applies(s, model.arch);
-  }
-
   void rebuild_rows() {
     std::string keep;
     if (sel >= 0 && sel < static_cast<int>(rows.size())) keep = rows[sel].group ? "#" + rows[sel].name : (rows[sel].spec >= 0 ? spec(rows[sel].spec).key : "");
@@ -1245,7 +1236,7 @@ struct App::Impl {
     if (!filter.s.empty()) {
       bool any = false;
       for (const auto &sp : cat.specs)
-        if (listed(sp) && sp.key != "XEN_MODEL" && matches_filter(sp)) any = true;
+        if ((unused_reason(sp, model.arch, vals).empty() || show_na) && sp.key != "XEN_MODEL" && matches_filter(sp)) any = true;
       help_search = !any;
     }
     for (const auto &g : cat.groups) {
@@ -1253,7 +1244,7 @@ struct App::Impl {
       for (size_t i = 0; i < cat.specs.size(); ++i) {
         const Spec &s = cat.specs[i];
         if (s.group != g || s.key == "XEN_MODEL") continue;
-        if (!listed(s)) {
+        if (!unused_reason(s, model.arch, vals).empty() && !show_na) {
           ++hidden;
           continue;
         }
@@ -1330,10 +1321,6 @@ struct App::Impl {
     if (s.key == "XEN_DRAFTER_MODEL") {
       opts.push_back({"", ""});
       for (const auto &d : dflash_drafters(models_dir())) opts.push_back({d.path, human_bytes(d.bytes)});
-    }
-    if (is_bank_key(s.key)) {  // the banks found, with their layers
-      opts.push_back({"", "off"});
-      for (const auto &b : banks()) opts.push_back({b.path, qsa_bank_detail(b)});
     }
     if (s.key == "XEN_VISION_FFMPEG") {  // The name on PATH (the default), off, and the programs found
       opts.push_back({"ffmpeg", check_value(s, "ffmpeg", model.arch, cfg.root, nullptr, 0).empty() ? "on PATH" : "not on PATH"});
@@ -1460,7 +1447,7 @@ struct App::Impl {
       change(s.key, val(s.key) == "1" ? "0" : "1");
       return;
     }
-    if (s.kind == Kind::Choice || !s.choices.empty() || s.key == "XEN_MTP" || s.key == "XEN_HOT_RANK" || s.key == "XEN_DRAFTER_MODEL" || is_bank_key(s.key)) {
+    if (s.kind == Kind::Choice || !s.choices.empty() || s.key == "XEN_MTP" || s.key == "XEN_HOT_RANK" || s.key == "XEN_DRAFTER_MODEL") {
       open_choices(s);
       return;
     }
@@ -1488,10 +1475,6 @@ struct App::Impl {
       opts = {""};
       for (const auto &x : dflash_drafters(models_dir())) opts.push_back(x.path);
     }
-    if (is_bank_key(s->key)) {
-      opts = {""};
-      for (const auto &b : banks()) opts.push_back(b.path);
-    }
     if (s->key == "XEN_HOT_RANK") opts = {"auto", ""};
     if (opts.empty()) return;
     const std::string cur = val(s->key);
@@ -1512,15 +1495,6 @@ struct App::Impl {
     std::string d = expand_home(val("XEN_MODELS_DIR"));
     while (d.size() > 1 && d.back() == '/') d.pop_back();
     return d.empty() ? join_path(cfg.root, "models") : d;
-  }
-
-  // Trained page selection banks: the folders of the models folder and of the model's own parent folder (where its
-  // drafters and bank usually sit) that hold indexer tensors.
-  static bool is_bank_key(const std::string &k) { return k == "XEN_TRAINED_QSA_DELTA_DIR"; }
-  std::vector<QsaBank> banks() const {
-    std::vector<std::string> dirs = {models_dir()};
-    if (const size_t sl = model.path.find_last_of('/'); sl != std::string::npos && sl > 0) dirs.push_back(model.path.substr(0, sl));
-    return qsa_banks(dirs);
   }
 
   void open_models() {
@@ -2209,8 +2183,7 @@ struct App::Impl {
       say(err, th::err, 6);
       return;
     }
-    // the previous launch's output is kept once, as server.prev.log (still a .log for editors and viewers)
-    if (is_file(logf)) std::rename(logf.c_str(), join_path(cfg.state_dir, "server.prev.log").c_str());
+    if (is_file(logf)) std::rename(logf.c_str(), (logf + ".1").c_str());
     const pid_t pid = spawn_server(cfg.root, env, logf, err);
     if (pid < 0) {
       say(err, th::err, 6);
@@ -3225,21 +3198,18 @@ struct App::Impl {
             std::move(picks));
   }
 
-  // m: the mode of the next runs (xenithium-bench --mode). Easy (the default) = the public-benchmark style; medium =
-  // the hard method over conventional template-made text; hard = this engine's own code and docs, the published numbers.
+  // m: the text the next runs cut their long prompts from. Easy (the default) = conventional template-made code and
+  // prose a drafter guesses well; hard = this engine's own code and documentation.
   void bench_mode_menu() {
     std::vector<std::pair<std::string, std::function<void()>>> picks;
-    for (const auto &[id, title] : {std::pair<std::string, std::string>{"easy", "Easy: tasks that repeat or reshape their input, replies end where the model ends them"},
-                                    {"medium", "Medium: conventional code and prose (CRUD layers, tests, guides) - drafters guess it well"},
+    for (const auto &[id, title] : {std::pair<std::string, std::string>{"easy", "Easy: conventional code and prose (CRUD layers, tests, guides) - drafters guess it well"},
                                     {"hard", "Hard: this engine's own code and documentation - real text, guessed least well"}})
-      picks.push_back({title + (id == bench_difficulty ? "  (now)" : ""), [this, id] {
-                         bench_difficulty = id;
+      picks.push_back({title + (id == bench_corpus ? "  (now)" : ""), [this, id] {
+                         bench_corpus = id;
                          say("benchmark mode: " + id, th::dim);
                        }});
     picks.push_back({"Cancel", nullptr});
-    confirm("Benchmark mode",
-            {"How easy the measured text is for a draft model (xenithium-bench --mode).", "Easy measures the way the usual public benchmarks do; hard gives the published numbers.",
-             "Runs of different modes do not compare."},
+    confirm("Benchmark mode", {"The text the long prompts are cut from (xenithium-bench --corpus). Runs of different modes do not compare."},
             std::move(picks));
   }
 
@@ -3327,14 +3297,14 @@ struct App::Impl {
     for (char c : model) tag += (std::isalnum(static_cast<unsigned char>(c)) ? c : '-');
     while (tag.size() > 1 && tag.back() == '-') tag.pop_back();
     if (tag.empty()) tag = "run";
-    tag += std::string("-") + bench_mode_name(mode) + "-" + bench_difficulty;
+    tag += std::string("-") + bench_mode_name(mode) + "-" + bench_corpus;
     if (!is_file(cfg.bench_bin)) {
       say("no " + tilde(cfg.bench_bin) + " (scripts/build-host.sh xenithium-bench, or --bench-bin)", th::err);
       return;
     }
     std::vector<std::string> extra = bench_mode_args(mode);
     extra.insert(extra.end(), more.begin(), more.end());
-    extra.insert(extra.end(), {"--mode", bench_difficulty});
+    extra.insert(extra.end(), {"--corpus", bench_corpus});
     extra.insert(extra.end(), {"--out", cfg.bench_runs});
     auto notes = bench_notes(s, rp, mode);
     notes.insert(notes.end(), more_notes.begin(), more_notes.end());
@@ -3367,7 +3337,7 @@ struct App::Impl {
     };
     line("run       " + r.dir, th::plain);
     line("model     " + r.model, th::plain);
-    line("mode      " + bench_mode_text(r), th::plain);
+    line("mode      " + r.corpus + (r.corpus == "easy" ? " (conventional code and prose)" : r.corpus == "hard" ? " (the engine's own code and docs)" : ""), th::plain);
     if (!r.endpoint.empty()) line("endpoint  " + r.endpoint, th::dim);
     if (!r.host.empty()) line("host      " + r.host, th::dim);
     line("decode    " + fmt1(r.decode_tps) + " t/s   " +
@@ -3395,8 +3365,6 @@ struct App::Impl {
     }
     if (r.tokens_per_joule > 0) line("efficiency " + fmt1(r.tokens_per_joule) + " tokens per joule of GPU board power, at the best stream count", th::dim);
     if (r.quality_pct >= 0) line("quality   " + fmt1(r.quality_pct) + " % of the checkable questions answered correctly", r.quality_pct >= kQualityWarnBelowPct ? th::dim : th::warn);
-    for (const BenchRun::Miss &m : r.quality_misses)  // each wrong answer on a line of its own, in the failure colour
-      line("          \xE2\x9C\x97 " + m.item + ": expected \"" + m.expected + "\", got " + m.got, th::err);
     line("page      " + tilde(join_path(r.path, "report.html")) + "   (charts; open it in a browser)", th::dim);
     line("tables    xenithium-bench report " + tilde(r.path) + "   (every scenario; compare A B sets two runs side by side)", th::dim);
     if (!r.notes.empty()) {
@@ -3468,7 +3436,7 @@ struct App::Impl {
       for (int i = 0; i < lh && start + i < total; ++i) c.put(ly + 1 + i, 2, disp[start + i].first, disp[start + i].second, W - 4);
     }
     std::vector<std::pair<std::string, std::string>> hints = {{"↑↓", "list"}, {"⏎", "report"}, {"r", "run"},
-                                                              {"m", "mode: " + bench_difficulty},
+                                                              {"m", "mode: " + bench_corpus},
                                                               {"x", "stop"},
                                                               {"j/k", "log"}, {"G", "follow"}, {"w", "wrap"},
                                                               {"tab", "next tab"}};

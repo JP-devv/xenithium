@@ -68,11 +68,9 @@ struct GdnScanNorm {
 // snap_pos (a multiple of 64), part 2 = the rest (the scan alone, its pre stays part 1's): S holds the state at snap_pos
 // between a part 1 and a part 2 call, and the pair computes what part 0 does, bit for bit.
 // pre_ev, if set, receives the precompute launch's event (part 2 has none); the returned event is the
-// scan's (prefill stage traces time both). rec, if set (part 0 only): the call's first slice record on the device
-// (rows.hpp), the kernels read pos from it (kSegPos) and take S at its slot (S + rec[kSegSlot] slot_S), so a recorded
-// launch serves every position and slot.
+// scan's (prefill stage traces time both).
 sycl::event gdn_scan(sycl::queue &q, const GdnShape &s, int m, int pos, const int32_t *accept, const float *qn, const float *kn, const float *cv,
                      const float *gate, const float *lgate, float *S, gdn_bf16 *o, const GdnScanScratch &sc, const GdnScanNorm &nm = {}, int part = 0,
-                     int snap_pos = -1, sycl::event *pre_ev = nullptr, const int32_t *rec = nullptr, size_t slot_S = 0);
+                     int snap_pos = -1, sycl::event *pre_ev = nullptr);
 
 }  // namespace xenithium:kernels

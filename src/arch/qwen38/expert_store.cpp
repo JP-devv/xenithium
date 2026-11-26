@@ -122,15 +122,10 @@ int64_t ExpertStore::hot_total(int card) const {
 
 const uint8_t *ExpertStore::blob(int layer, int expert, bool *hot, int card) const {
   const int c = tp_ ? card : owner(expert);
-  if (hot) *hot = is_hot_[static_cast<size_t>(layer) * experts_ + expert] != 0;
-  return loc_[loc_idx(c, layer, expert)];
-}
-
-void ExpertStore::relocate(int card, int layer, int expert, uint8_t *to, bool hot) {
-  if (!tp_) throw std::logic_error("expert store: relocate needs the TP layout");
-  loc_[loc_idx(card, layer, expert)] = to;
-  is_hot_[static_cast<size_t>(layer) * experts_ + expert] = hot ? 1 : 0;
-  moved_ = true;
+  const size_t i = static_cast<size_t>(layer) * experts_ + expert;
+  const bool h = is_hot_[i] != 0;
+  if (hot) *hot = h;
+  return (h ? dev_ : cold_)[idx(c, layer)] + static_cast<size_t>(slot_[i]) * stride_;
 }
 
 void ExpertStore::place(int64_t want, const std::vector<double> *rank) {
@@ -199,16 +194,6 @@ void ExpertStore::load(const model::Checkpoint &ck, const ExpertStoreOptions &op
       stats_.pinned_bytes += static_cast<uint64_t>(max_hot) * S;
     }
   stats_.alloc_s = secs(t_alloc);
-  // where every blob lives (EP: on its owner card only)
-  loc_.assign(static_cast<size_t>(cards_) * layers_ * experts_, nullptr);
-  moved_ = false;
-  for (int c = 0; c < cards_; ++c)
-    for (int l = 0; l < layers_; ++l)
-      for (int e = 0; e < experts_; ++e) {
-        if (!tp_ && owner(e) != c) continue;
-        const size_t k = static_cast<size_t>(l) * experts_ + e;
-        loc_[loc_idx(c, l, e)] = (is_hot_[k] ? dev_ : cold_)[idx(c, l)] + static_cast<size_t>(slot_[k]) * S;
-      }
   if (opt.hash) hash_.assign(static_cast<size_t>(layers_) * experts_ * (tp_ ? cards_ : 1), 0);
 
 
@@ -455,7 +440,6 @@ void ExpertStore::load_native(const ExpertStoreOptions &opt, std::vector<uint8_t
 
 int64_t ExpertStore::verify(int threads) const {
   if (hash_.empty()) throw std::runtime_error("expert store: verify() needs load(..., hash = true)");
-  if (moved_) throw std::logic_error("expert store: verify() after the live exchange moved blobs");
   const size_t S = stride_;
   std::atomic<int64_t> bad{0};
   std::vector<uint8_t> back;

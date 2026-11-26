@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -32,35 +33,84 @@ static uint16_t bits(bf16 v) {
   std::memcpy(&b, &v, 2);
   return b;
 }
+// XEN_WIRE_CALLS overrides a mailbox test's call count: the paths' repeat loops are where a partly visible or stale take
+// shows up, so a stress run raises it (XEN_WIRE_CALLS=200). The copy paths (pair_split) ignore it. Unset or 0: default.
+static int wire_calls(int def) {
+  const char *s = std::getenv("XEN_WIRE_CALLS");
+  const int v = s ? std::atoi(s) : 0;
+  return v > 0 ? v : def;
+}
 
 // The four-card wires (WireQuad) on cards 0-3. Every card must write bf16((p0 + p1) + (p2 + p3))
 // (fp32 wire) or bf16((bf16 p0 + bf16 p1) + (bf16 p2 + bf16 p3)) (bf16 wire): the host sums in that order through
 // volatile temporaries (no reassociation). pair_reduce at 1-16 rows, pair_reduce_rows at 17-63, three calls each with the
 // parity alternating; the int8 wire is refused.
-static void test_quad(const xenithium::l0::Loader &loader) {
-  constexpr int kC = 4, kRowsMax = 64, kNMax = 5120, kCalls = 3;
+static void test_quad(const xenithium::l0::Loader &loader, bool copy = false) {
+  constexpr int kC = 4, kRowsMax = 64, kNMax = 5120;
+  const int kCalls = wire_calls(3);
   xenithium::Fabric f(loader, {0, 1, 2, 3}, false);
   float *part[kC];
   bf16 *out[kC];
   uint32_t *err[kC];
   k::WireQuad dq, rq;  // the decode and the rows inboxes
+  k::StepCopy copy_buffers;
+  std::vector<void *> copy_allocations;
+  if (copy) {
+    f.alloc_step_copy(copy_buffers, kRowsMax, kNMax, false, copy_allocations);
+    dq.copy = &copy_buffers;
+  }
+  const size_t words = k::pair_wire_words(kNMax, kC);
+  const size_t row_words = k::pair_rows_wire_words(kRowsMax, kNMax, kC);
   for (int c = 0; c < kC; ++c) {
     auto &q = f.compute(c);
     part[c] = static_cast<float *>(f.alloc(c, size_t(kRowsMax) * kNMax * 4));
-    out[c] = static_cast<bf16 *>(f.alloc(c, size_t(kRowsMax) * kNMax * 2));
+    const bool direct_out = copy && std::getenv("XEN_Q38_COPY_DIRECT_OUT");
+    const size_t output_bytes = size_t(kRowsMax) * kNMax * sizeof(bf16);
+    out[c] = static_cast<bf16 *>(direct_out ? f.alloc_mailbox(c, output_bytes) : f.alloc(c, output_bytes));
+    if (direct_out) copy_buffers.outputs[c] = out[c];
     err[c] = static_cast<uint32_t *>(f.alloc(c, 4096));
     q.memset(err[c], 0, 64).wait();
-    dq.inbox[c] = static_cast<uint32_t *>(f.alloc_mailbox(c, k::pair_wire_words(kNMax, kC) * 4));
-    k::pair_wire_init(q, kNMax, dq.inbox[c], kC).wait();
-    rq.inbox[c] = static_cast<uint32_t *>(f.alloc_mailbox(c, k::pair_rows_wire_words(kRowsMax, kNMax, kC) * 4));
-    k::pair_rows_wire_init(q, kRowsMax, kNMax, rq.inbox[c], kC).wait();
+    dq.inbox[c] = static_cast<uint32_t *>(f.alloc_kernel_mailbox(words * sizeof(uint32_t)));
+    k::owner_mail_init(q, dq.inbox[c], words).wait();
+    rq.inbox[c] = static_cast<uint32_t *>(f.alloc_kernel_mailbox(row_words * sizeof(uint32_t)));
+    k::owner_mail_init(q, rq.inbox[c], row_words).wait();
+  }
+  constexpr uint64_t wait_cycles = 2800000000ull;
+  if (copy) {
+    // Load the eager kernels on every rank before measuring inter-rank waits.
+    // Publish the fixture flags in advance so each warmup can run alone.
+    const int warm_rows = copy_buffers.shared_ready ? copy_buffers.split_min_rows : 1;
+    const size_t flag_bytes = 2 * kC * 64;
+    for (int c = 0; c < kC; ++c) {
+      auto &q = f.compute(c);
+      q.memset(part[c], 0, size_t(warm_rows) * 2560 * sizeof(float)).wait();
+      q.memset(copy_buffers.recv[c], 0, kC * copy_buffers.stride * sizeof(float)).wait();
+      if (copy_buffers.shared_ready) q.memset(copy_buffers.shared[c], 0, copy_buffers.stride * sizeof(bf16)).wait();
+    }
+    auto warm = [&](int rows) {
+      for (int c = 0; c < kC; ++c) {
+        copy_buffers.ready[c * 16] = 1;
+        if (copy_buffers.shared_ready) copy_buffers.shared_ready[c * 16] = 1;
+      }
+      for (int c = 0; c < kC; ++c) {
+        auto &q = f.compute(c);
+        k::step_copy_reduce(q, rows, 2560, part[c], copy_buffers, c, 0, err[c], wait_cycles, out[c]).wait_and_throw();
+        q.memset(copy_buffers.state[c], 0, 64).wait_and_throw();
+      }
+      std::memset(copy_buffers.ready, 0, flag_bytes);
+      if (copy_buffers.shared_ready) std::memset(copy_buffers.shared_ready, 0, flag_bytes);
+    };
+    warm(1);
+    if (copy_buffers.shared_ready) warm(warm_rows);
   }
   std::mt19937 rng(11);
   std::normal_distribution<float> nd(0.f, 1.f);
   int parity = 0;
-  for (const bool b16 : {false, true})
+  for (const bool b16 : (copy ? std::vector<bool>{false} : std::vector<bool>{false, true}))
     for (const int n : {2560, 5120, 1152})
       for (const int rows : {1, 2, 3, 4, 5, 8, 12, 16, 17, 40, 63}) {
+        if (copy)
+          for (int c = 0; c < kC; ++c) f.compute(c).memset(err[c], 0, sizeof(uint32_t)).wait();
         size_t bad = 0, differ = 0;
         for (int call = 0; call < kCalls; ++call) {
           std::vector<float> h[kC];
@@ -71,9 +121,11 @@ static void test_quad(const xenithium::l0::Loader &loader) {
           }
           for (int c = 0; c < kC; ++c) {
             if (rows <= k::kPairRows) {
-              k::PairWire w{nullptr, nullptr, err[c], 2800000000ull, b16};
+              k::PairWire w{nullptr, nullptr, err[c], wait_cycles, b16};
               w.quad = dq, w.quad.card = c;
               k::pair_reduce(f.compute(c), rows, n, part[c], &w, parity, out[c]);
+            } else if (copy) {
+              k::step_copy_reduce(f.compute(c), rows, n, part[c], copy_buffers, c, parity, err[c], wait_cycles, out[c]);
             } else {
               k::PairRowsWire w;
               w.error = err[c], w.rows_max = kRowsMax, w.n_max = kNMax, w.bf16 = b16;
@@ -120,6 +172,7 @@ static void test_quad(const xenithium::l0::Loader &loader) {
     f.release(dq.inbox[c]), f.release(rq.inbox[c]);
     f.release(part[c]), f.release(out[c]), f.release(err[c]);
   }
+  for (void *ptr : copy_allocations) f.release(ptr);
 }
 
 // The split four-card sum (PairSplit:cards 4): card c owns rows [m c / 4, m (c + 1) / 4), the
@@ -276,64 +329,36 @@ static void test_quad_split(const xenithium::l0::Loader &loader) {
 // on one parity (as the model's once-a-step mailboxes use it); row counts with unequal owners (5, 9, 30); n 2,560 and
 // 10,240 (the widest items), 1,152 (the share's narrowest) and 1,088 (the sum's narrowest; no share: n % 128). Row
 // counts under kOwnerMinRows, the bf16 / int8 wires and an incomplete mailbox are refused.
-// The copy path (OwnerSumCopy / OwnerCopy on the same wires): the same checks from kOwnerCopyMinRows rows (24) up to
-// kPairRows, where the sums and shares go by peer copies (the widths it does not take fall back to the mailbox), and
-// below it (16, 23), where the mailbox still runs with the copy path armed.
 static void test_owner(const xenithium::l0::Loader &loader) {
-  constexpr int kC = 4, kNMax = 10240, kCalls = 3;
+  constexpr int kC = 4, kNMax = 10240;
+  const int kCalls = wire_calls(3);
   constexpr uint16_t kSentinel = 0x1234;
   xenithium::Fabric f(loader, {0, 1, 2, 3}, false);
   float *part[kC];
   bf16 *out[kC];
   uint32_t *err[kC];
   k::OwnerMail sum_mail, share_mail;
-  // the copy path's memory: per use every card's flag lines (mailbox memory) and count line, the sum's receive buffers
-  k::OwnerFlags sum_flags[kC], share_flags[kC];
-  float *recv[kC];
-  std::vector<void *> copy_mem;
-  auto zeroed = [&](int c, size_t bytes, bool mailbox) {
-    bytes = std::max<size_t>(bytes, 4096);
-    void *p = mailbox ? f.alloc_mailbox(c, bytes) : f.alloc(c, bytes);
-    f.compute(c).memset(p, 0, bytes).wait();
-    copy_mem.push_back(p);
-    return p;
-  };
-  for (k::OwnerFlags *use : {sum_flags, share_flags}) {
-    std::array<uint32_t *, kC> lines{};
-    for (int c = 0; c < kC; ++c) lines[static_cast<size_t>(c)] = static_cast<uint32_t *>(zeroed(c, k::kOwnerCopyLineBytes, true));
-    for (int c = 0; c < kC; ++c) use[c].lines = lines, use[c].count = static_cast<uint32_t *>(zeroed(c, k::kOwnerCopyCountBytes, false));
-  }
-  for (int c = 0; c < kC; ++c) recv[c] = static_cast<float *>(zeroed(c, k::owner_sum_copy_elems(kNMax) * 4, false));
-  bool copy = false;  // the wires below carry the copy path
   for (int c = 0; c < kC; ++c) {
     auto &q = f.compute(c);
     part[c] = static_cast<float *>(f.alloc(c, size_t(k::kPairRows) * kNMax * 4));
     out[c] = static_cast<bf16 *>(f.alloc(c, size_t(k::kPairRows) * kNMax * 2));
     err[c] = static_cast<uint32_t *>(f.alloc(c, 4096));
     q.memset(err[c], 0, 64).wait();
-    sum_mail.inbox[c] = static_cast<uint32_t *>(f.alloc_mailbox(c, k::owner_sum_words(kNMax) * 4));
+    sum_mail.inbox[c] = static_cast<uint32_t *>(f.alloc_kernel_mailbox(k::owner_sum_words(kNMax) * 4));
     k::owner_mail_init(q, sum_mail.inbox[c], k::owner_sum_words(kNMax)).wait();
-    share_mail.inbox[c] = static_cast<uint32_t *>(f.alloc_mailbox(c, k::owner_share_words(kNMax) * 4));
+    share_mail.inbox[c] = static_cast<uint32_t *>(f.alloc_kernel_mailbox(k::owner_share_words(kNMax) * 4));
     k::owner_mail_init(q, share_mail.inbox[c], k::owner_share_words(kNMax)).wait();
   }
   auto sum_wire = [&](int c) {
     k::PairWire w;
     w.error = err[c];
     w.owner = sum_mail, w.owner.card = c;
-    if (copy) {
-      w.copy.flags = sum_flags[c];
-      for (int d = 0; d < kC; ++d) w.copy.recv[static_cast<size_t>(d)] = recv[d];
-    }
     return w;
   };
   auto share_of = [&](int c) {
     k::OwnerShare s;
     s.mail = share_mail, s.mail.card = c;
     s.error = err[c];
-    if (copy) {
-      s.copy.flags = share_flags[c];
-      for (int d = 0; d < kC; ++d) s.copy.buf[static_cast<size_t>(d)] = out[d];
-    }
     return s;
   };
   bool inverse = true;  // owner_rows and row_owner agree for every row count
@@ -348,13 +373,9 @@ static void test_owner(const xenithium::l0::Loader &loader) {
   std::mt19937 rng(23);
   std::normal_distribution<float> nd(0.f, 1.f);
   int parity = 0;
-  for (const bool with_copy : {false, true})
   for (const bool same_parity : {false, true})
     for (const int n : {2560, 10240, 1152, 1088})
-      for (const int rows : {4, 5, 8, 9, 16, 17, 23, 24, 30, 32, 33, 47, 48, 63, 64}) {
-        // armed: the mailbox still runs below kOwnerCopyMinRows (16, 23), the copies from it (24 .. 64)
-        if (with_copy ? rows != 16 && rows < 23 : rows > 32 || rows == 23 || rows == 24) continue;
-        copy = with_copy;
+      for (const int rows : {4, 5, 8, 9, 16, 17, 30, 32}) {
         size_t bad_sum = 0, touched = 0, bad_share = 0;
         for (int call = 0; call < kCalls; ++call) {
           std::vector<float> h[kC];
@@ -403,7 +424,7 @@ static void test_owner(const xenithium::l0::Loader &loader) {
           e |= x;
         }
         expect(bad_sum == 0 && touched == 0 && bad_share == 0 && e == 0,
-               std::string(with_copy ? "copy path armed: " : "") + "owner sum" + (n % 128 == 0 ? " + owner_share" : "") + ", n " + std::to_string(n) + ", " + std::to_string(rows) + " rows, " +
+               std::string("owner sum") + (n % 128 == 0 ? " + owner_share" : "") + ", n " + std::to_string(n) + ", " + std::to_string(rows) + " rows, " +
                    std::to_string(kCalls) + " calls" + (same_parity ? " on one parity" : "") +
                    ": own rows == host (p0 + p1) + (p2 + p3), other rows untouched" + (n % 128 == 0 ? ", every row on every card after the share" : "") +
                    (bad_sum ? " (" + std::to_string(bad_sum) + " sum elements differ)" : "") + (touched ? " (" + std::to_string(touched) + " foreign elements written)" : "") +
@@ -442,23 +463,6 @@ static void test_owner(const xenithium::l0::Loader &loader) {
            k::owner_share(f.compute(0), 8, 2560, out[0], s, 0);
          }),
          "owner sum / owner_share: a mailbox without every card's inbox is refused");
-  copy = true;
-  expect(refuses([&] {
-           k::PairWire w = sum_wire(0);
-           w.copy.recv[1] = nullptr;
-           k::pair_reduce(f.compute(0), 64, 2560, part[0], &w, 0, out[0]);
-         }) && refuses([&] {
-           k::OwnerShare s = share_of(0);
-           s.copy.buf[0] = out[1];
-           k::owner_share(f.compute(0), 64, 2560, out[0], s, 0);
-         }) && refuses([&] {
-           k::OwnerShare s = share_of(0);
-           s.copy.flags.lines[2] = nullptr;
-           k::owner_share(f.compute(0), 64, 2560, out[0], s, 0);
-         }),
-         "copy path: a missing receive buffer or flag line, or another buffer named for this card, is refused");
-  for (int c = 0; c < kC; ++c) f.compute(c).wait();
-  for (void *p : copy_mem) f.release(p);
   for (int c = 0; c < kC; ++c) {
     f.compute(c).wait();
     f.release(sum_mail.inbox[c]), f.release(share_mail.inbox[c]);
@@ -468,8 +472,18 @@ static void test_owner(const xenithium::l0::Loader &loader) {
 
 int main() {
   const auto loader = xenithium::l0::Loader::open();
+  if (std::getenv("XEN_TEST_COPY_WIRE")) {
+    if (loader.size() < 4) {
+      std::printf("[SKIP] copy wire requires four cards\n");
+      return 77;
+    }
+    test_quad(loader, true);
+    std::printf("copy wire: %d checks, %d failed\n", g_checks, g_fail);
+    return g_fail ? 1 : 0;
+  }
   xenithium::Fabric f(loader, {0, 1}, false);
-  constexpr int kRowsMax = 64, kNMax = 5120, kCalls = 3;
+  constexpr int kRowsMax = 64, kNMax = 5120;
+  const int kCalls = wire_calls(3);
   float *part[2];
   bf16 *out[2];
   uint32_t *inbox[2], *rinbox[2], *err[2];
@@ -479,9 +493,9 @@ int main() {
     out[c] = static_cast<bf16 *>(f.alloc(c, size_t(kRowsMax) * kNMax * 2));
     err[c] = static_cast<uint32_t *>(f.alloc(c, 64));
     q.memset(err[c], 0, 64).wait();
-    inbox[c] = static_cast<uint32_t *>(f.alloc_mailbox(c, k::pair_wire_words(kNMax) * 4));
+    inbox[c] = static_cast<uint32_t *>(f.alloc_kernel_mailbox(k::pair_wire_words(kNMax) * 4));
     k::pair_wire_init(q, kNMax, inbox[c]).wait();
-    rinbox[c] = static_cast<uint32_t *>(f.alloc_mailbox(c, k::pair_rows_wire_words(kRowsMax, kNMax) * 4));
+    rinbox[c] = static_cast<uint32_t *>(f.alloc_kernel_mailbox(k::pair_rows_wire_words(kRowsMax, kNMax) * 4));
     k::pair_rows_wire_init(q, kRowsMax, kNMax, rinbox[c]).wait();
   }
   std::mt19937 rng(7);

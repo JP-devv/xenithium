@@ -39,8 +39,7 @@ struct Meta {
 };
 // status: "in_progress", "completed" or "incomplete" (the token limit ended it). output / usage: null when absent.
 std::string response_json(const Meta &m, const char *status, const json::Value *output, const json::Value *usage);
-// cached: the input tokens the prefix cache served (input_tokens_details.cached_tokens)
-json::Value usage(long long input, long long cached, long long output, long long reasoning);
+json::Value usage(long long input, long long output, long long reasoning);
 
 // The streaming output: a state machine (one item open at a time; a change of kind or of tool call closes
 // the open item). Each call appends SSE events ("event: <type>\ndata: {...}\n\n") to sse.

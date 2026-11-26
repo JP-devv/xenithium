@@ -32,7 +32,6 @@ extern int g_dflash_wide;  // --dflash-wide N
 extern int g_dflash_tree_wide;  // --dflash-tree-wide N
 extern double g_dflash_cut;  // --dflash-cut X: DFlashOptions:conf_cut (0 = every draft; -1 = the default)
 extern bool g_kv_v4;  // --kv-v4 0|1: --kv-bytes 1 runs int8 K + int4 V (qwen38 / qsa
-extern bool g_kv_tokens;  // --kv-split heads|tokens: qwen38 TP4 ModelOptions::kv_split (true = tokens)
 extern int g_mtp_defer;  // --mtp-defer N: ModelOptions:mtp_kv_defer (0 = every KV-only pass runs; -1 = the default)
 extern bool g_pf_checks;  // --pf-checks 0|1: model35 --rows pf timing + continuation check
 extern int g_pf_merge_at;  // --pf-merge-at P (model35)
@@ -89,14 +88,6 @@ extern int g_gdn_cap_rows, g_gdn_cap_every;  // model --w4 PAT.., int8 plan matr
 extern bool g_gdn_scan;
 // --pf-cold-stage N: ModelOptions:prefill_cold_stage for every model command.
 extern int g_pf_cold_stage;
-// --pf-fetch N: ModelOptions:prefill_fetch for every model command.
-extern int g_pf_fetch;
-// --pf-graphs 0|1: ModelOptions:prefill_graphs for every qwen38 model command. --pf-graph-gate N: probe model runs
-// the prompt-call graph gate (pf_graphs.cpp: N calls per slot on two slots, then the timing of --pf-graph-sizes
-// N,N.. rows per call) and exits.
-extern bool g_pf_graphs;
-extern int g_pf_graph_gate;
-extern std::string g_pf_graph_sizes;
 extern std::string g_moe_cpu;  // --moe-cpu
 extern int g_moe_cpu_pct, g_moe_cpu_threads, g_moe_cpu_min_cold;
 // --pf-route-trace F: probe model writes every prefill call's MoE inputs and
@@ -157,6 +148,10 @@ int cmd_serve_run(const std::string &model, const std::string &ppl, int nseq, in
                   bool graphs, const std::string &hot_rank, double reserve_gib, int threads, int kv_bytes, double stall_ms,
                   const std::string &mtp);  // serve.cpp
 int cmd_rank(int argc, char **argv);
+// peers.cpp: the TP wire's peer path per ordered pair (a peer store vs a host-staged copy)
+int cmd_peers(int mib, int iters);
+// wiremin.cpp (scratch): the two-card pair_reduce mismatch, per call
+int cmd_wiremin(int argc, char **argv);
 // The DFlash host-reference gate's view of a target (qwen35_dflash.cpp: qwen35's; dflash38.cpp: qwen38's).
 namespace xenithium::arch {
 class DFlash;

@@ -39,8 +39,7 @@ void StubEngine::submit(uint64_t id, std::vector<int32_t> prompt, const Sampling
   }
   {
     std::lock_guard<std::mutex> lk(mu_);
-    const size_t len = prompt.size();
-    submits_.push_back({id, len, params, std::chrono::steady_clock::now(), cfg_.prefix_cache ? std::move(prompt) : std::vector<int32_t>{}});
+    submits_.push_back({id, prompt.size(), params, std::chrono::steady_clock::now()});
   }
   cv_.notify_one();
 }
@@ -152,19 +151,6 @@ void StubEngine::loop() {
       // start; a seed shifts the start, so seeded sampling still differs per seed.
       if (r.params.has_seed && r.params.temperature > 0.0f) r.pos = r.params.seed % cfg_.script.size();
       new_prompt += s.prompt_len;
-      if (cfg_.prefix_cache && !s.prompt.empty()) {
-        for (const auto& p : seen_) {
-          const size_t lim = std::min(p.size(), s.prompt.size() - 1);
-          size_t k = 0;
-          while (k < lim && p[k] == s.prompt[k]) ++k;
-          r.cached = std::max(r.cached, k);
-        }
-        seen_.push_back(std::move(s.prompt));
-        if (seen_.size() > 16) seen_.pop_front();
-        std::lock_guard<std::mutex> sl(stats_mu_);
-        stats_.prefix_queries += s.prompt_len;
-        stats_.prefix_hits += r.cached;
-      }
       {
         std::lock_guard<std::mutex> sl(stats_mu_);
         stats_.waiting--;
@@ -215,7 +201,6 @@ void StubEngine::loop() {
           break;
         }
       }
-      if (!r.prefilled) e.cached_tokens = static_cast<int32_t>(r.cached);
       if (!r.prefilled && r.params.prompt_logprobs >= 0) {
         e.prompt_logprobs.resize(r.prompt_len);
         for (size_t k = 0; k < r.prompt_len; ++k) e.prompt_logprobs[k].logprob = k == 0 ? std::nanf("") : -0.5f;

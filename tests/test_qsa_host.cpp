@@ -3,14 +3,12 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
-#include <numeric>
 #include <random>
 #include <string>
 #include <vector>
 
 #include "xenithium/kernels/pack.hpp"
 #include "xenithium/kernels/attention/qsa_ref.hpp"
-#include "xenithium/kernels/attention/trained_qsa_pages.hpp"
 
 namespace {
 namespace k = xenithium::kernels;
@@ -119,81 +117,10 @@ void test_host() {
   }
 }
 
-void test_trained_pages() {
-  std::vector<int32_t> ids(k::kTrainedQsaTopBlocks);
-  std::iota(ids.begin(), ids.end(), 0);
-  int32_t entries[k::kTrainedQsaPages]{};
-  expect(k::trained_qsa_pack_row(2047, ids.data(), 512, entries) == 0 &&
-         k::trained_qsa_pack_row(2048, ids.data(), 512, entries) == 0,
-         "trained page pack: all-visible prefix and first partial block stay dense");
-
-  // 512 selected blocks end on page 31; the current block on page 33 is
-  // mandatory even though the intermediate page wasn't selected.
-  const int pos = 33 * k::kQsaPage + 4;
-  const int n = k::trained_qsa_pack_row(pos, ids.data(), 512, entries);
-  const uint32_t last = k::trained_qsa_mask(entries[32]);
-  expect(n == 33 && k::trained_qsa_page(entries[31]) == 31 && k::trained_qsa_mask(entries[31]) == 0xffffu &&
-         k::trained_qsa_page(entries[32]) == 33 && last == 2 &&
-         !k::trained_qsa_keeps(last, 3) && k::trained_qsa_keeps(last, 4) && !k::trained_qsa_keeps(last, 8),
-         "trained page pack: ordered logical pages include the current block without adding skipped blocks");
-
-  int32_t physical[34]{};
-  physical[33] = 7;
-  expect(k::trained_qsa_page_base(physical, k::trained_qsa_page(entries[32]), 3, 1) == (7 * 3 + 1) * k::kQsaPage,
-         "trained page walk uses the slot's nonidentity physical page table");
-  ids.back() = (pos + 1) / k::kQsaCompress;
-  const bool rejects_future = k::trained_qsa_pack_row(pos, ids.data(), 512, entries) == -1;
-  ids.back() = ids[510];
-  expect(rejects_future && k::trained_qsa_pack_row(pos, ids.data(), 512, entries) == -1,
-         "trained page pack rejects future and duplicate blocks");
-}
-
-// The packed plan is shared by the decode handoff and the XMX prefill mask
-// path. Test mixed dense/sparse rows and per-head fallback without a GPU.
-void test_trained_plan_regressions() {
-  std::vector<int32_t> first(512); std::iota(first.begin(), first.end(), 0);
-  std::vector<int32_t> with_own=first; with_own.back()=528;
-  int32_t a[k::kTrainedQsaPages]{}, b[k::kTrainedQsaPages]{};
-  const int n0=k::trained_qsa_pack_row(2115,first.data(),512,a);
-  const int n1=k::trained_qsa_pack_row(2115,with_own.data(),512,b);
-  expect(n0==33 && n1==33 && k::trained_qsa_page(a[32])==33 && k::trained_qsa_mask(a[32])==1 &&
-         k::trained_qsa_page(b[32])==33 && k::trained_qsa_mask(b[32])==1,
-         "trained plan: current block appears exactly once whether selected or appended");
-
-  auto reversed=first; std::reverse(reversed.begin(),reversed.end());
-  const std::vector<k::TrainedQsaRow> mixed={{2047,first},{2115,reversed}};
-  const auto plan=k::trained_qsa_plan(mixed,4);
-  bool ok=plan.sparse() && plan.counts.size()==8 && plan.entries.size()==2*k::kTrainedQsaPages;
-  if(ok) {
-    for(int h=0;h<4;++h) ok &= plan.counts[h]==0 && plan.counts[4+h]==n0;
-    ok &= std::all_of(plan.entries.begin(),plan.entries.begin()+k::kTrainedQsaPages,[](int x){return x==0;});
-    ok &= std::equal(a,a+n0,plan.entries.begin()+k::kTrainedQsaPages);
-  }
-  expect(ok,"trained plan: mixed dense/sparse rows retain per-head dense fallback and sort unsorted input");
-  const std::vector<k::TrainedQsaRow> all_dense={{2047,first}};
-  const auto dense=k::trained_qsa_plan(all_dense,1);
-  expect(!dense.sparse() && dense.counts.empty(),"trained plan: all-visible rows use stock dense dispatch");
-
-  bool duplicate=false, future=false, missing=false, bad_heads=false;
-  auto rejects=[&](const std::vector<int32_t> &v){try { const std::vector<k::TrainedQsaRow> rows={{2115,v}}; (void)k::trained_qsa_plan(rows,1); return false; } catch(const std::invalid_argument&) { return true; }};
-  auto bad=first; bad.back()=bad[510]; duplicate=rejects(bad);
-  bad=first; bad.back()=529; future=rejects(bad);
-  bad=first; bad.pop_back(); missing=rejects(bad);
-  try { (void)k::trained_qsa_plan(mixed,0); } catch(const std::invalid_argument&) { bad_heads=true; }
-  expect(duplicate && future && missing && bad_heads,"trained plan: duplicate, future, incomplete and invalid head count rejected");
-
-  int32_t pages[34]{}; pages[0]=19; pages[33]=7;
-  expect(k::trained_qsa_page_base(pages,0,4,3)==(19*4+3)*k::kQsaPage &&
-         k::trained_qsa_page_base(pages,33,4,3)==(7*4+3)*k::kQsaPage,
-         "trained plan: separated logical pages use nonidentity slot mapping for every KV head");
-}
-
 }  // namespace
 
 int main() {
   test_host();
-  test_trained_pages();
-  test_trained_plan_regressions();
   if (g_failures) {
     std::printf("FAILED: %d failure(s)\n", g_failures);
     return 1;

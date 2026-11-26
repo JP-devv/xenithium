@@ -13,11 +13,6 @@ sycl::event gqa_attn_seg_xl(sycl::queue &q, const GqaShape &s, int rows, const G
     if (s.grp() != 6 || s.head_dim != 256) throw std::invalid_argument("gqa_attn_seg_xl: int8-v4 KV is built for 6 q heads per kv head at head_dim 256");
 #define XEN_V4(RM, QK, LO) return attn_seg<QsaKv::i8v4, 6, RM, 1, false, 256, QK, LO>(q, s, rows, c, rec, stride, seg_rows, qb, part, ns, nullptr, nullptr, pf);
     if (!s.dec_exact()) {
-      // tree steps on int8-fast: the tree instance on 2- / 4-row groups (same as int8 KV)
-      if (tree && s.dec_qk == 1 && !s.dec_p_lo && (rm == 2 || rm == 4)) {
-        if (rm == 2) return attn_seg<QsaKv::i8v4, 6, 2, 1, false, 256, 1, false, 1>(q, s, rows, c, rec, stride, seg_rows, qb, part, ns, nullptr, nullptr, pf);
-        return attn_seg<QsaKv::i8v4, 6, 4, 1, false, 256, 1, false, 1>(q, s, rows, c, rec, stride, seg_rows, qb, part, ns, nullptr, nullptr, pf);
-      }
 #define XEN_V4N(RM)                          \
   if (rm == RM) {                            \
     if (s.dec_qk == 0) XEN_V4(RM, 0, false)  \
@@ -30,11 +25,6 @@ sycl::event gqa_attn_seg_xl(sycl::queue &q, const GqaShape &s, int rows, const G
       XEN_V4N(4)
 #undef XEN_V4N
       throw std::invalid_argument("gqa_attn_seg_xl: the decode attention numerics run groups of 1 / 2 / 4 rows");
-    }
-    // exact trees on 2- / 4-row groups: the tree instance, int4 V + its bf16 scales
-    if (tree && (rm == 2 || rm == 4)) {
-      if (rm == 2) return attn_seg<QsaKv::i8v4, 6, 2, 1, false, 256, 0, true, 1>(q, s, rows, c, rec, stride, seg_rows, qb, part, ns, nullptr, nullptr, pf);
-      return attn_seg<QsaKv::i8v4, 6, 4, 1, false, 256, 0, true, 1>(q, s, rows, c, rec, stride, seg_rows, qb, part, ns, nullptr, nullptr, pf);
     }
     if (rm == 1) XEN_V4(1, 0, true)
     if (rm == 2) XEN_V4(2, 0, true)
@@ -124,27 +114,6 @@ sycl::event gqa_attn_seg_sel_xl(sycl::queue &q, const GqaShape &s, int rows, con
   XEN_SEG(6, 8)
 #undef XEN_SEG
   throw std::invalid_argument("gqa_attn_seg_sel_xl: page selection is built for 6 q heads per kv head, groups of 1 / 2 / 4 / 8 rows");
-}
-
-// The same grouped attention body and K8V4 operands as the dense path.
-// Only the logical-page walk and four-token mask differ; use the requested
-// native QK / P numerics, not a separate attention implementation. The
-// one-row group still uses the stock tree's virtual-depth, ancestor overlay
-// and causal cut when kSegTree is set. Its page mask pins the path tiles.
-sycl::event gqa_attn_seg_trained_xl(sycl::queue &q, const GqaShape &s, int rows, const GqaCache &c, const GqaStep &step,
-                                   const gqa_bf16 *qb, float *part, int ns) {
-  using gqa_detail::attn_seg;
-#define XEN_TRAINED(QK, LO) \
-  return attn_seg<QsaKv::i8v4, 6, 1, 1, true, 256, QK, LO, 0, true>(q, s, rows, c, step.pos, step.stride, step.seg_rows, \
-    qb, part, ns, step.trained_qsa.entries, step.trained_qsa.counts)
-  if (s.dec_qk == 2) { XEN_TRAINED(2, false); }
-  if (s.dec_qk == 1) {
-    if (s.dec_p_lo) { XEN_TRAINED(1, true); }
-    XEN_TRAINED(1, false);
-  }
-  if (s.dec_p_lo) { XEN_TRAINED(0, true); }
-  XEN_TRAINED(0, false);
-#undef XEN_TRAINED
 }
 
 }  // namespace xenithium::kernels

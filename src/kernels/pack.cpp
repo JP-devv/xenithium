@@ -211,6 +211,33 @@ uint16_t bf16_bits(float v) {
   return static_cast<uint16_t>(u >> 16);
 }
 
+uint16_t bf16_bits_from_double(double v) {
+  uint64_t u;
+  std::memcpy(&u, &v, 8);
+  if ((u & 0x7fffffffffffffffull) > 0x7ff0000000000000ull) return static_cast<uint16_t>((u >> 48) | 0x40);  // NaN stays NaN
+  const uint16_t sign = static_cast<uint16_t>((u >> 48) & 0x8000u);
+  const int ex = static_cast<int>((u >> 52) & 0x7ffu);
+  if (ex == 0x7ff) return static_cast<uint16_t>(sign | 0x7f80);  // +/- infinity
+  if (ex == 0) return sign;  // a subnormal double is below the smallest bf16 magnitude (2^-133): +0 / -0
+  // the value is sig (leading 1 at bit 52) x 2^(e - 52); bf16 has an 8-bit significand, so its top 8 bits are
+  // kept, and below 2^-126 the grid is flat at 2^-133 (bf16 subnormals).
+  uint64_t sig = (u & 0x000fffffffffffffull) | (1ull << 52);
+  const int e = ex - 1023;
+  const int drop = e >= -126 ? 45 : 45 + (-126 - e);
+  if (drop >= 64) return sign;  // at most half of 2^-133
+  uint64_t kept = sig >> drop;
+  const uint64_t rest = sig & ((1ull << drop) - 1);
+  const uint64_t half = 1ull << (drop - 1);
+  if (rest > half || (rest == half && (kept & 1))) ++kept;  // nearest, ties even
+  if (e >= -126) {
+    int x = e;
+    if (kept == 0x100) kept = 0x80, ++x;  // 1.1111111 + 1 ulp = 10.0000000
+    if (x > 127) return static_cast<uint16_t>(sign | 0x7f80);  // beyond the largest finite bf16
+    return static_cast<uint16_t>(sign | (static_cast<uint16_t>(x + 127) << 7) | (kept & 0x7f));
+  }
+  return static_cast<uint16_t>(sign | kept);  // subnormal mantissa in 2^-133 units (0x80 is 2^-126, the first normal)
+}
+
 void quantize_i8_rows(const uint16_t *w, int n, int k, int8_t *codes, float *scale, int clips) {
   for (int r = 0; r < n; ++r) {
     const uint16_t *row = w + static_cast<size_t>(r) * k;

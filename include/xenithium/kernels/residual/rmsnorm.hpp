@@ -38,13 +38,9 @@ struct RmsNormQ8 {
   float *s = nullptr;
   int lds = 0;
   float *s_rows = nullptr;  // optional: the same scales row-major [rows][hidden / 128] (oneDNN's W4A8 reads them so)
-  bool codes_only = false;  // the codes and scales only: xn is not written (its only readers take the codes)
 };
 sycl::event rms_norm_q8(sycl::queue &q, int rows, int hidden, rn_bf16 *res, const rn_bf16 *add_bf16, const float *add_f32, const rn_bf16 *w,
                         float eps, rn_bf16 *xn, const RmsNormQ8 &q8, int plain = 0);
-// s[g x lds + r] = s_rows[r x groups + g] for rows [0, rows): the group-major scales of rows whose row-major scales came
-// from another card (the prefill norm on its owner's rows); pass s_rows and s offset to the first row.
-sycl::event rms_q8_scales_cols(sycl::queue &q, int rows, int groups, const float *s_rows, float *s, int lds);
 
 // (the DFlash 2 drafter, a Qwen3 model): the plain Qwen3RMSNorm, two roundings,
 // res' = bf16(res + add) (with add), xn = bf16(w x bf16(res' x rsqrt(mean(res'^2) + eps))); the same kernel otherwise.

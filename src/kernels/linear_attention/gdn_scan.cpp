@@ -4,9 +4,6 @@
 #include <sycl/ext/intel/esimd.hpp>
 
 #include <functional>
-#include <stdexcept>
-
-#include "xenithium/kernels/rows.hpp"
 
 namespace xenithium::kernels {
 namespace {
@@ -88,8 +85,7 @@ GdnScanSizes gdn_scan_sizes(const GdnShape &s, int rows_max) {
 
 sycl::event gdn_scan(sycl::queue &q, const GdnShape &sh, int m, int pos, const int32_t *accept, const float *qn, const float *kn, const float *cv,
                      const float *gate, const float *lgate, float *S, bf16 *o, const GdnScanScratch &sc, const GdnScanNorm &nm, int part, int snap_pos,
-                     sycl::event *pre_ev, const int32_t *rec, size_t slot_S) {
-  if (rec && part != 0) throw std::invalid_argument("gdn_scan: the snapshot split takes the host's position and state");
+                     sycl::event *pre_ev) {
   const int vh = sh.vh(), rep = sh.rep(), KW = sh.key_w(), VW = sh.val_w(), CC = sh.conv_ch();
   const int nmax = gdn_scan_max_chunks(m);
   if (nmax == 0) return {};
@@ -110,7 +106,7 @@ sycl::event gdn_scan(sycl::queue &q, const GdnShape &sh, int m, int pos, const i
     const int ch = grp / vh, hv = grp % vh, khh = hv / rep;
     const int A = clamp_accept(accept[0]), T = A + m;
     int lead, full;
-    gdn_scan_split((rec ? rec[kSegPos] : pos) - A, T, lead, full);
+    gdn_scan_split(pos - A, T, lead, full);
     if (ch >= full) return;  // uniform per work-group
     const int s = lead + ch * kC;
     const size_t unit = static_cast<size_t>(ch) * vh + hv;
@@ -382,8 +378,8 @@ sycl::event gdn_scan(sycl::queue &q, const GdnShape &sh, int m, int pos, const i
     const int hv = static_cast<int>(it.get_group(0)), li = static_cast<int>(it.get_local_id(0)), r0 = li * kRows;
     const int A = clamp_accept(accept[0]), T = A + m;
     int lead, full;
-    gdn_scan_split((rec ? rec[kSegPos] : pos) - A, T, lead, full);
-    float *Sp = (rec ? S + static_cast<size_t>(rec[kSegSlot]) * slot_S : S) + (static_cast<size_t>(hv) * kD + r0) * kD;
+    gdn_scan_split(pos - A, T, lead, full);
+    float *Sp = S + (static_cast<size_t>(hv) * kD + r0) * kD;
     esimd::simd<float, kRows * kD> Sa;  // [cb][8 rows][16]
 #pragma unroll
     for (int rr = 0; rr < kRows; ++rr) {
