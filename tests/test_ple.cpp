@@ -304,14 +304,10 @@ void test_two(xenithium::Fabric &f, const Model &m, const char *tag) {
   free_card(f, d[1]);
 }
 
-// ple_rows (prefill) against ple_decode on 4-row slices: bit-identical by design (the gate and conv
-// round the same way per row). The kv GEMM is the one input they do not share: pf_dense sums k in order
-// (a row's result must not depend on the chunk around it) while dense_gemm splits k where a shape leaves
-// it few tiles (dense_auto_ksplit: 4 at the small shape, 1 at the model's), so the projection lands a
-// fraction of an fp32 ulp apart and a bf16 rounding can flip: the slice path is pinned to the in-order
-// sum (kv_ks = 1), leaving the block's own arithmetic compared exactly. History: two decode steps (6
-// positions) before the chunk, so its first rows read the ring; then one decode step after the chunk,
-// which reads the ring the rows left.
+// Compare prefill with 4-row decode slices using the same KV accumulation order. Prefill sums K in
+// order, while decode can auto-select split-K and round a projection differently. Pin decode to one
+// split so the gate and convolution can be checked bit for bit. The chunk reads the ring left by
+// two decode steps, and the first decode step after the chunk reads the ring left by prefill.
 void test_rows(xenithium::Fabric &f, const Model &m, const char *tag, int M) {
   const int C = m.s.width(), E = m.s.emb;
   Card d = make_card(f, 0, m);

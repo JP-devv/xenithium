@@ -109,7 +109,7 @@ sycl::event df_conv(sycl::queue &q, int rows, int seg_rows, int hidden, int grou
 void df_conv_ref(int rows, int seg_rows, int hidden, int group, const uint16_t *x, const float *dyn, int ld_dyn, int which, const uint16_t *base,
                  uint16_t *out) {
   const int G = hidden / group, sr = seg_rows > 0 ? seg_rows : rows;
-  auto r16 = [](double v) { return bf16_value(bf16_bits_from_double(v)); };
+  auto r16 = [](double v) { return bf16_value(bf16_bits(static_cast<float>(v))); };
   for (int t = 0; t < rows; ++t)
     for (int c = 0; c < hidden; ++c) {
       const int t0 = t / sr * sr, g = c / group;

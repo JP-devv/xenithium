@@ -10,7 +10,7 @@
 
 namespace xenithium::kernels {
 namespace {
-float bfv(double v) { return bf16_value(bf16_bits_from_double(v)); }
+float bfv(double v) { return bf16_value(bf16_bits(static_cast<float>(v))); }
 }  // namespace
 
 QsaYarnBounds qsa_yarn_bounds(int rot_dim, double theta, int64_t orig, double beta_fast, double beta_slow) {

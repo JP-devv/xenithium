@@ -116,10 +116,6 @@ void quantize_e4m3_rows(const uint16_t *w, int n, int k, uint8_t *codes, float *
 float e4m3_value(uint8_t code);
 float bf16_value(uint16_t bits);
 uint16_t bf16_bits(float v);  // round to nearest even
-// bf16 of a double in ONE rounding (rne), integer arithmetic only, so it does not depend on the host FP
-// flags. bf16_bits(float(v)) rounds twice: a value whose float cast lands on a bf16 midpoint (~1 in 10^5
-// random doubles) comes out an ulp away from the correctly rounded one, where the card rounds once from fp32.
-uint16_t bf16_bits_from_double(double v);
 // dst[i] = bf16_value(bf16_bits(src[i])) for n floats, bit for bit (NaN stays NaN with the quiet bit set), branch-free
 // so the loop vectorises. dst may equal src.
 // Engine (DenseSpec:Store:w4r): one BF16 row of k values (k % 128 == 0) -> compressed-tensors words (code i

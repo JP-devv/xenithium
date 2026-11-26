@@ -77,9 +77,7 @@ GdnEvents gdn_decode(sycl::queue &q, const GdnShape &s, int rows, const bf16 *x,
 
 // ---- host reference ------------------------------------------------------------------------------
 namespace {
-// one rounding (bf16_bits_from_double): rounding through float puts a value that lands on a bf16 midpoint on
-// the other side of it than the card's single rounding from fp32 does
-float bfv(double v) { return bf16_value(bf16_bits_from_double(v)); }
+float bfv(double v) { return bf16_value(bf16_bits(static_cast<float>(v))); }
 }  // namespace
 
 void GdnRefState::reset(const GdnShape &s) {
@@ -102,7 +100,7 @@ void gdn_ref_proj(const GdnShape &s, const GdnRefWeights &w, const float *x, flo
 }
 
 void gdn_ref_core(const GdnShape &s, const GdnRefWeights &w, GdnRefState &st, const float *qkvz, const float *ab, float *o, float *y) {
-  const int CC = s.conv_ch(), KW = s.key_w(), D = s.k_dim, vh = s.vh();
+  const int CC = s.conv_ch();
   // conv (fp32 taps oldest first, as the device accumulates)
   std::vector<float> c(CC);
   for (int ch = 0; ch < CC; ++ch) {
@@ -116,6 +114,12 @@ void gdn_ref_core(const GdnShape &s, const GdnRefWeights &w, GdnRefState &st, co
     st.win[CC + ch] = st.win[2 * CC + ch];
     st.win[2 * CC + ch] = qkvz[ch];
   }
+  gdn_ref_recur(s, w, st, c.data(), qkvz + CC, ab, o, y);
+}
+
+void gdn_ref_recur(const GdnShape &s, const GdnRefWeights &w, GdnRefState &st, const float *c, const float *z,
+                   const float *ab, float *o, float *y) {
+  const int KW = s.key_w(), D = s.k_dim, vh = s.vh();
   const double scale = 1.0 / std::sqrt(static_cast<double>(D));
   std::vector<double> qn(D), kn(D), ov(D);
   for (int hv = 0; hv < vh; ++hv) {
@@ -154,9 +158,9 @@ void gdn_ref_core(const GdnShape &s, const GdnRefWeights &w, GdnRefState &st, co
     }
     const double rr = 1.0 / std::sqrt(ss / D + s.eps);
     for (int v = 0; v < D; ++v) {
-      const double z = qkvz[CC + hv * D + v];
-      const double sg = 1.0 / (1.0 + std::exp(-z));
-      y[hv * D + v] = bfv(ov[v] * rr * w.norm[v] * (s.swish ? z * sg : sg));
+      const double gate = z[hv * D + v];
+      const double sg = 1.0 / (1.0 + std::exp(-gate));
+      y[hv * D + v] = bfv(ov[v] * rr * w.norm[v] * (s.swish ? gate * sg : sg));
     }
   }
 }
