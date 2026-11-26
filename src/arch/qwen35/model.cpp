@@ -1654,7 +1654,15 @@ bool Model::graph_step() const {
     std::fprintf(stderr, "qwen35: decode step graphs on (XEN_STEP_GRAPHS=1)\n");
     return true;
   }();
-  return on && !attn_q_fn_;
+  if (!on || attn_q_fn_) return false;
+  // Page-selected attention (--attn-select) takes its route from the exact context bound, which the graph key holds
+  // only as a class; replays measured different greedy text (under and past the budget), so those steps run eagerly.
+  if (attn_select() > 0) {
+    static bool told = false;
+    if (!told) told = true, std::fprintf(stderr, "qwen35: XEN_STEP_GRAPHS ignored with page-selected attention (--attn-select): the steps run eagerly\n");
+    return false;
+  }
+  return true;
 }
 
 int Model::graphs_recorded() const { return graphs_ ? static_cast<int>(graphs_->map.size()) : 0; }

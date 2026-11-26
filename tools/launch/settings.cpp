@@ -1022,7 +1022,8 @@ const char *brief_of(std::string_view key) {
        "\n"
        "Gives (1): + decode speed when the host CPU or its link is the bottleneck. On a fast host: the same.\n"
        "Takes (1): - ~42 ms the first time each step shape runs, - about 7.5 MiB per step graph per card (XEN_STEP_GRAPHS_MAX); the drafter's pass graphs (XEN_DRAFT_GRAPHS) drop to 72 so the total stays about the same.\n"
-       "Note: off while XEN_QSA_SCORE_CHECK or XEN_QSA_PACK_CHECK is set."},
+       "Output: the same greedy text, except with a trained bank and the adaptive depth on: the replays time differently, so the depth picks other step shapes at some steps, and the trained selection follows them (XEN_ADAPTIVE_DEPTH 0: the same).\n"
+       "Note: not used with page-selected attention (XEN_ATTN_SELECT) or while XEN_QSA_SCORE_CHECK or XEN_QSA_PACK_CHECK is set."},
       {"XEN_STEP_GRAPHS_MAX",
        "The most decode step graphs kept (XEN_STEP_GRAPHS 1); the least recently replayed is dropped at the cap.\n"
        "\n"
@@ -2570,6 +2571,8 @@ std::string unused_reason(const Spec &s, std::string_view arch, const Values &va
     return "needs XEN_GRAPHS on";
   if ((s.key == "XEN_STEP_GRAPHS_MAX" || s.key == "XEN_GRAPH_ROOM_MIB") && arch != "flint" && v("XEN_STEP_GRAPHS") != "1")
     return "needs XEN_STEP_GRAPHS 1";
+  if (s.key == "XEN_STEP_GRAPHS" && !v("XEN_ATTN_SELECT").empty() && v("XEN_ATTN_SELECT") != "0")
+    return "not used with page-selected attention (XEN_ATTN_SELECT)";
   if (arch == "qwen38") {  // A drafter is XEN_MTP or the DFlash drafter (which replaces it); XEN_DRAFTER is qwen35's
     const bool df = !v("XEN_DRAFTER_MODEL").empty();
     if ((s.key == "XEN_DRAFT_VOCAB" || s.key == "XEN_ADAPTIVE_DEPTH" || s.key == "XEN_LOOKUP") && v("XEN_MTP").empty() && !df) return "needs a drafter (XEN_MTP or XEN_DRAFTER_MODEL)";
