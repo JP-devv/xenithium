@@ -201,7 +201,7 @@ PleEvents ple_decode(sycl::queue &q, const PleShape &s, int rows, const ple_bf16
 }
 
 PleEvents ple_rows(sycl::queue &q, const PleShape &s, int m, int64_t pos0, const ple_bf16 *emb_host, const PleWeights &w, const PleState &st,
-                   const PleRowsScratch &sc, ple_bf16 *res) {
+                   const PleRowsScratch &sc, ple_bf16 *res, const int32_t *rec) {
   const int S = s.streams, H = s.hidden, C = s.width(), KV = s.kv_n();
   const int gate_n = gate_items(H);
   if (m < 1 || !gate_n) throw std::invalid_argument("ple_rows: rows / hidden");
@@ -213,7 +213,8 @@ PleEvents ple_rows(sycl::queue &q, const PleShape &s, int m, int64_t pos0, const
   const float eps = s.eps, inv_sqrt_h = 1.f / sycl::sqrt(static_cast<float>(H));
   const ple_bf16 *nk = w.nk, *nq = w.nq, *ncw = w.ncw, *cw = w.conv;
   const float *kv = sc.kv;
-  ple_bf16 *gated = sc.gated, *xs = sc.x, *ring = st.ring;
+  ple_bf16 *gated = sc.gated, *xs = sc.x, *ring0 = st.ring;
+  const size_t slot_elems = st.slot_elems;
   // The gate: decode's arithmetic, conv inputs into the chunk buffer.
   ev.gate = q.parallel_for<PleGate<true>>(
       sycl::nd_range<1>(static_cast<size_t>(m) * S * gate_n, gate_n), [=](sycl::nd_item<1> it) {
@@ -270,11 +271,13 @@ PleEvents ple_rows(sycl::queue &q, const PleShape &s, int m, int64_t pos0, const
           }
       });
   const size_t items = static_cast<size_t>(m) * C;
-  const int64_t p0 = pos0;
+  const int64_t host_p0 = pos0;
   ev.conv = q.parallel_for<PleConvRows>(
       sycl::nd_range<1>((items + kConvItems - 1) / kConvItems * kConvItems, kConvItems), [=](sycl::nd_item<1> it) {
         const size_t gi = it.get_global_id(0);
         if (gi >= items) return;
+        const int64_t p0 = rec ? static_cast<int64_t>(rec[kSegPos]) : host_p0;
+        const ple_bf16 *ring = rec ? ring0 + static_cast<size_t>(rec[kSegSlot]) * slot_elems : ring0;
         const int row = static_cast<int>(gi / C), c = static_cast<int>(gi % C);
         const int64_t p = p0 + row;
         float acc = 0.f;
@@ -293,6 +296,8 @@ PleEvents ple_rows(sycl::queue &q, const PleShape &s, int m, int64_t pos0, const
   // The chunk's last kPleRing positions into the ring (the next steps' conv history).
   const int first = m > kPleRing ? m - kPleRing : 0, n = m - first;
   q.parallel_for<PleRing>(sycl::range<1>(static_cast<size_t>(n) * C), [=](sycl::id<1> id) {
+    const int64_t p0 = rec ? static_cast<int64_t>(rec[kSegPos]) : host_p0;
+    ple_bf16 *ring = rec ? ring0 + static_cast<size_t>(rec[kSegSlot]) * slot_elems : ring0;
     const int r = first + static_cast<int>(id[0] / C), c = static_cast<int>(id[0] % C);
     ring[static_cast<size_t>((p0 + r) % kPleRing) * C + c] = xs[static_cast<size_t>(r) * C + c];
   });

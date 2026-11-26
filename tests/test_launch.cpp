@@ -221,6 +221,14 @@ void test_catalog(const std::string &root) {
   const Spec *dprof = cat.find("XEN_DEC_PROFILE");
   expect(dprof && dprof->diag && unused_reason(*dprof, "qwen38", dv).empty() && !unused_reason(*dprof, "qwen35", dv).empty(), "XEN_DEC_PROFILE is a qwen38-only diagnostic");
   expect(vocab && unused_reason(*vocab, "qwen35", dv).empty(), "draft vocabulary shown with the drafter on");
+  {  // The KV split by tokens: qwen38 on four cards only
+    const Spec *ks = cat.find("XEN_KV_SPLIT");
+    Values t4 = dv, t2 = dv;
+    t4["XEN_Q38_TP"] = "4", t2["XEN_Q38_TP"] = "2";
+    expect(ks && ks->kind == Kind::Choice && dv.at("XEN_KV_SPLIT") == "heads" && unused_reason(*ks, "qwen38", t4).empty() && !unused_reason(*ks, "qwen38", t2).empty() &&
+               !unused_reason(*ks, "qwen35", t4).empty() && moves_memory("XEN_KV_SPLIT"),
+           "XEN_KV_SPLIT: qwen38 at TP4 only, heads by default, moves the memory plan");
+  }
   {  // Unequal segments on the dense 27B with its drafter (not llama / flint)
     const Spec *uq = cat.find("XEN_UNEQUAL_SEGMENTS");
     Values nd = dv;
@@ -287,15 +295,89 @@ void test_catalog(const std::string &root) {
       expect(false, "lookup drafting: XEN_LOOKUP in the catalog (round 53)");
     }
   }
-  {  // MTP depth: the user's cap on one decoding sequence's drafts, qwen38 with XEN_MTP
+  {  // MTP depth: the user's cap on one decoding sequence's drafts, qwen38 with XEN_MTP (1-3), the dense 27B with its drafter (1-6)
     const Spec *md = cat.find("XEN_MTP_DEPTH");
-    Values with = dv, without = dv;
+    Values with = dv, without = dv, q35 = dv, q35_depths = dv, q35_off = dv;
     with["XEN_MTP"] = "/models/mtp";
     without["XEN_MTP"] = "";
-    expect(md && md->def == "3" && md->flag == "--mtp-depth" && md->choices.size() == 3 && md->choices[0] == "3" && md->choices[2] == "1" &&
-               unused_reason(*md, "qwen38", with).empty() && !unused_reason(*md, "qwen38", without).empty() &&
-               !unused_reason(*md, "qwen35", with).empty(),
-           "MTP depth: a qwen38 choice (3/2/1), default 3, flag from the docs, needs XEN_MTP, hidden for qwen35");
+    q35["XEN_DRAFTER"] = "1", q35["XEN_DRAFT_DEPTHS"] = "";
+    q35_depths = q35, q35_depths["XEN_DRAFT_DEPTHS"] = "15,7,4,3";
+    q35_off["XEN_DRAFTER"] = "0";
+    expect(md && md->def == "3" && md->flag == "--mtp-depth" && md->choices.size() == 6 && md->choices[0] == "3" && md->choices[2] == "1" &&
+               unused_reason(*md, "qwen38", with).empty() && !unused_reason(*md, "qwen38", without).empty() && unused_reason(*md, "qwen35", q35).empty() &&
+               !unused_reason(*md, "qwen35", q35_depths).empty() && !unused_reason(*md, "qwen35", q35_off).empty() && !unused_reason(*md, "llama", q35).empty() &&
+               !check_value(*md, "6", "qwen38", "").empty() && check_value(*md, "3", "qwen38", "").empty() && check_value(*md, "6", "qwen35", "").empty(),
+           "MTP depth: default 3, flag from the docs; qwen38 1-3 with XEN_MTP, the dense 27B 1-6 with its drafter (not with per-stream depths), not llama");
+  }
+  {  // Trained page selection: the dense 27B's server-read switches, each shown once its bank and the switch it builds on are set
+    const char *const keys[] = {"XEN_TRAINED_QSA_DELTA_DIR", "XEN_TRAINED_QSA_TILED_SCORE", "XEN_TRAINED_QSA_POOL_FP16", "XEN_TRAINED_QSA_TREE",
+                                "XEN_QSA_XMX_SCORE", "XEN_QSA_GATHER", "XEN_QSA_RESIDENT_SNAPSHOTS", "XEN_QSA_RESIDENT_FORK_COPY",
+                                "XEN_TRAINED_QSA_DECODE_MIN_POS", "XEN_TRAINED_QSA_PREFILL_XMX", "XEN_TRAINED_QSA_PREFILL_MIN_POS",
+                                "XEN_TRAINED_QSA_STREAM_PROJECTION", "XEN_QSA_TRIAL_ROUTE_LOG"};
+    bool shape = true;
+    for (const char *k : keys) {
+      const Spec *x = cat.find(k);
+      shape = shape && x && x->known && x->diag && x->in_docs && !x->brief.empty() && unused_reason(*x, "llama", dv) == "ignored for llama" &&
+              !unused_reason(*x, "qwen38", dv).empty();
+    }
+    expect(shape, "trained page selection: known, server-read, documented, described; the dense 27B only (not llama / qwen38)");
+    const Spec *bank = cat.find("XEN_TRAINED_QSA_DELTA_DIR"), *tile = cat.find("XEN_TRAINED_QSA_TILED_SCORE");
+    const Spec *tree = cat.find("XEN_TRAINED_QSA_TREE"), *xmx = cat.find("XEN_QSA_XMX_SCORE"), *snap = cat.find("XEN_QSA_RESIDENT_SNAPSHOTS");
+    const Spec *fork = cat.find("XEN_QSA_RESIDENT_FORK_COPY"), *pfx = cat.find("XEN_TRAINED_QSA_PREFILL_XMX"), *pfmin = cat.find("XEN_TRAINED_QSA_PREFILL_MIN_POS");
+    const Spec *merged = cat.find("XEN_TRAINED_QSA_PREFILL_MERGED");
+    Values nob = dv, b = dv;
+    nob["XEN_TRAINED_QSA_DELTA_DIR"] = "";
+    b = nob, b["XEN_TRAINED_QSA_DELTA_DIR"] = "/m/bank", b["XEN_PREFIX_CACHE"] = "1", b["XEN_PREFILL_SELECT"] = "0";
+    Values tiled = b, fp16 = b, snaps = b, pf = b, pfsel = b;
+    tiled["XEN_TRAINED_QSA_TILED_SCORE"] = "1";
+    fp16["XEN_TRAINED_QSA_POOL_FP16"] = "1";
+    snaps["XEN_QSA_RESIDENT_SNAPSHOTS"] = "1";
+    pf["XEN_TRAINED_QSA_PREFILL_XMX"] = "1";
+    pfsel["XEN_PREFILL_SELECT"] = "256";
+    expect(bank && unused_reason(*bank, "qwen35", nob).empty() && tile && !unused_reason(*tile, "qwen35", nob).empty() && unused_reason(*tile, "qwen35", b).empty() &&
+               !cat.find("XEN_TRAINED_QSA_LAYER3_DELTA_DIR") && !cat.find("XEN_TRAINED_QSA_TRACE_MARKER") && !cat.find("XEN_PF_TOPK_REPLAY_DIR") &&
+               !cat.find("XEN_BENCH_VERIFY_LOG"),
+           "trained page selection: the switches wait for a bank (the bank folder does not); no layer-3 bank, trace or replay setting");
+    expect(tree && !unused_reason(*tree, "qwen35", b).empty() && unused_reason(*tree, "qwen35", tiled).empty() && xmx && !unused_reason(*xmx, "qwen35", b).empty() &&
+               unused_reason(*xmx, "qwen35", fp16).empty() && fork && !unused_reason(*fork, "qwen35", b).empty() && unused_reason(*fork, "qwen35", snaps).empty() &&
+               snap && unused_reason(*snap, "qwen35", b).empty(),
+           "trained page selection: trees need tiled scoring, XMX FP16 summaries, the fork copy the snapshots");
+    expect(pfx && unused_reason(*pfx, "qwen35", b).empty() && !unused_reason(*pfx, "qwen35", pfsel).empty() && pfmin && !unused_reason(*pfmin, "qwen35", b).empty() &&
+               unused_reason(*pfmin, "qwen35", pf).empty() && merged && !unused_reason(*merged, "qwen35", pf).empty() && check_value(*pfmin, "32768", "qwen35", "").empty() &&
+               !check_value(*pfmin, "32769", "qwen35", "").empty() && !check_value(*pfmin, "1024", "qwen35", "").empty(),
+           "trained page selection: the selected prompt reading off beside XEN_PREFILL_SELECT; its start a multiple of 64 from 2,112; merged calls need the 4-slot switch");
+    const Spec *share = cat.find("XEN_PREFILL_SHARE");
+    expect(share && share->diag && share->kind == Kind::Float && unused_reason(*share, "llama", dv).empty() && check_value(*share, "0.33", "qwen35", "").empty() &&
+               check_value(*share, "", "qwen35", "").empty() && !check_value(*share, "2", "qwen35", "").empty(),
+           "XEN_PREFILL_SHARE: a server-read share for every arch, 0..1 or empty");
+    {  // Page selection on the int8-v4 KV: the long-prompt one runs, the decode one has no kernel; the bank's start-up needs
+      auto errs = [&](const Values &x, const std::string &key) {
+        int n = 0;
+        for (const auto &i : validate(cat, x, "qwen35", "")) n += i.key == key && i.error && i.msg != "directory not found";  // (made-up paths)
+        return n;
+      };
+      const Spec *as = cat.find("XEN_ATTN_SELECT"), *ps = cat.find("XEN_PREFILL_SELECT");
+      Values v4 = dv, i8 = dv;
+      v4["XEN_KV"] = "int8-v4", v4["XEN_ATTN_SELECT"] = "512", v4["XEN_PREFILL_SELECT"] = "512";
+      i8 = v4, i8["XEN_KV"] = "int8";
+      expect(as && ps && !unused_reason(*as, "qwen35", v4).empty() && unused_reason(*as, "qwen35", i8).empty() && unused_reason(*ps, "qwen35", v4).empty() &&
+                 errs(v4, "XEN_ATTN_SELECT") == 0 && errs(v4, "XEN_PREFILL_SELECT") == 0,
+             "page selection on int8-v4: the long-prompt one runs (512 pages); the decode one is unused (launched as 0), never an error");
+      Values ok = dv;
+      ok["XEN_KV"] = "int8-v4", ok["XEN_KV_POOL_TOKENS"] = "884416", ok["XEN_CONTEXT"] = "262144", ok["XEN_DRAFTER"] = "1", ok["XEN_DRAFTER_MODEL"] = "/m/dspine",
+      ok["XEN_ATTN_SELECT"] = "0", ok["XEN_TRAINED_QSA_DELTA_DIR"] = "/m/bank", ok["XEN_TRAINED_QSA_TREE"] = "1", ok["XEN_TRAINED_QSA_TILED_SCORE"] = "1";
+      Values autopool = ok, notile = ok, i8kv = ok, nodraft = ok, sel = ok;
+      autopool["XEN_KV_POOL_TOKENS"] = "auto", notile["XEN_TRAINED_QSA_TILED_SCORE"] = "0", i8kv["XEN_KV"] = "int8", nodraft["XEN_DRAFTER_MODEL"] = "";
+      sel["XEN_ATTN_SELECT"] = "512";
+      int all = 0;
+      for (const Values *x : {&ok, &autopool, &notile, &sel})
+        for (const auto &i : validate(cat, *x, "qwen35", "")) all += i.error && i.msg != "directory not found" && i.key.find("QSA") != std::string::npos;
+      expect(all == 0 && errs(i8kv, "XEN_TRAINED_QSA_DELTA_DIR") == 1 && errs(nodraft, "XEN_TRAINED_QSA_DELTA_DIR") == 1,
+             "trained bank: refused without int8-v4 or a block drafter; an auto pool, unused page selection or an unused tree switch never block");
+    }
+    const auto g = std::find(cat.groups.begin(), cat.groups.end(), std::string("Trained page selection"));
+    const auto n = std::find(cat.groups.begin(), cat.groups.end(), std::string("Numerics & kernels"));
+    expect(g != cat.groups.end() && n != cat.groups.end() && g == n + 1, "trained page selection: its own group, after the numerics");
   }
   const Spec *dfl = cat.find("XEN_DRAFTER_MODEL");
   expect(dfl && unused_reason(*dfl, "qwen35", dv).empty() && unused_reason(*dfl, "qwen38", dv).empty() && !unused_reason(*dfl, "llama", dv).empty(),
@@ -394,8 +476,8 @@ void test_catalog(const std::string &root) {
     }
     const Spec *yt = cat.find("XEN_YARN_TIERS");
     expect(yt && yt->def == "on" && yt->flag == "--yarn-tiers" && yt->choices.size() == 2 && unused_reason(*yt, "qwen35", dv).empty() &&
-               !unused_reason(*yt, "qwen38", dv).empty(),
-           "YaRN per request: a qwen35 choice on / off, default on, flag from the docs");
+               unused_reason(*yt, "qwen38", dv).empty() && unused_reason(*yt, "llama", dv).empty() && !unused_reason(*yt, "flint", dv).empty(),
+           "YaRN per request: a choice on / off for qwen35, qwen38 and llama (not flint), default on, flag from the docs");
     // qwen38 keeps its own pair: XEN_TP=1 for qwen35 leaves qwen38's TP alone
     const Spec *t8 = cat.find("XEN_Q38_TP"), *c8 = cat.find("XEN_Q38_CARD");
     Values one8 = dv;
@@ -429,10 +511,11 @@ void test_catalog(const std::string &root) {
     Values von = dv, voff = dv;
     von["XEN_VISION"] = "1", voff["XEN_VISION"] = "0";
     expect(vi && vp && vn && vi->def == "0" && vi->flag == "--vision" && vp->def == "1048576" && vp->flag == "--vision-max-pixels" && vn->def == "16" &&
-               vn->flag == "--vision-images" && unused_reason(*vi, "qwen38", voff).empty() && unused_reason(*vi, "qwen35", voff).empty() &&
+               vn->flag == "--vision-images" && vi->scope == Scope::Vision && scope_name(vi->scope).find("qwen35") != std::string::npos &&
+               unused_reason(*vi, "qwen38", voff).empty() && unused_reason(*vi, "qwen35", voff).empty() &&
                !unused_reason(*vi, "llama", voff).empty() && unused_reason(*vp, "qwen35", von).empty() &&
                !unused_reason(*vp, "qwen35", voff).empty() && !check_value(*vp, "1000", "qwen38", "").empty() && check_value(*vn, "64", "qwen38", "").empty(),
-           "image input (round 167): qwen38 / qwen35 only, defaults 0 / 1048576 / 16 and flags from the docs, size settings shown with it on");
+           "image input (round 167): qwen38 / qwen35 only (Scope::Vision, named so in the help), defaults 0 / 1048576 / 16 and flags from the docs, size settings shown with it on");
     const Spec *mu = cat.find("XEN_MEDIA_URLS"), *md = cat.find("XEN_MEDIA_DOMAINS"), *mt = cat.find("XEN_MEDIA_TIMEOUT");
     Values uoff = von;
     uoff["XEN_MEDIA_URLS"] = "0";
@@ -801,12 +884,12 @@ void test_app(const std::string &root) {
     return;
   }
   const std::string t = tdir;
-  // Fake checkpoints, an MTP drafter, a DFlash 2 drafter and a DSpine drafter (DFlashDraftModel).
+  // Fake checkpoints, an MTP drafter, a DFlash 2 drafter and DSpine drafters under both names.
   const std::string models = t + "/models";
   mkdir(models.c_str(), 0755);
   for (const auto &[name, type] : std::vector<std::pair<std::string, std::string>>{
            {"moe-a", "qwen4_exp"}, {"dense-b", "qwen3_5"}, {"other-c", "gemma3"}, {"moe-a-mtp", "qwen4_exp"},
-           {"moe-a-dflash2", "DFlash2DraftModel"}, {"dense-b-dspine", "DFlashDraftModel"}}) {
+           {"moe-a-dflash2", "DFlash2DraftModel"}, {"dense-b-dspine", "DFlashDraftModel"}, {"dense-b-dspine2", "DSpineDraftModel"}}) {
     mkdir((models + "/" + name).c_str(), 0755);
     write(models + "/" + name + "/config.json", "{\"model_type\": \"" + type + "\"}");
   }
@@ -820,13 +903,16 @@ void test_app(const std::string &root) {
     else if (m.arch == "qwen35") ++q35;
     else if (m.arch.empty()) ++none;
   }
-  expect(q38 == 1 && q35 == 1 && none == 1 && drafters == 1 && dflashes == 2, "model scan: arch from the registry, MTP and DFlash drafters told apart");
+  expect(q38 == 1 && q35 == 1 && none == 1 && drafters == 1 && dflashes == 3, "model scan: arch from the registry, MTP and DFlash drafters told apart");
   const auto dr = drafters_for(models + "/moe-a");
   expect(dr.size() == 1 && dr[0] == models + "/moe-a-mtp", "drafters: <target>-mtp* siblings");
   const auto df = dflash_drafters(models);
-  bool df2 = false, dsp = false;
-  for (const auto &d : df) df2 |= d.path == models + "/moe-a-dflash2" && d.bytes > 0, dsp |= d.path == models + "/dense-b-dspine" && d.bytes > 0;
-  expect(df.size() == 2 && df2 && dsp, "dflash drafters: DFlash2DraftModel and DFlashDraftModel (DSpine) checkpoints under the models directory");
+  bool df2 = false, dsp = false, dsp2 = false;
+  for (const auto &d : df)
+    df2 |= d.path == models + "/moe-a-dflash2" && d.bytes > 0, dsp |= d.path == models + "/dense-b-dspine" && d.bytes > 0,
+        dsp2 |= d.path == models + "/dense-b-dspine2" && d.bytes > 0;
+  expect(df.size() == 3 && df2 && dsp && dsp2,
+         "dflash drafters: DFlash2DraftModel, DFlashDraftModel and DSpineDraftModel (DSpine) checkpoints under the models directory");
   write(models + "/dense-b/config.json", "{\"model_type\": \"qwen3_5\", \"text_config\": {\"max_position_embeddings\": 262144}}");
   const ModelInfo db = probe_model(models + "/dense-b");
   expect(db.max_positions == 262144 && trained_positions_of(db) == 262144 && max_context_of(db) == 1048576,
@@ -864,6 +950,16 @@ void test_app(const std::string &root) {
   expect(!app.dirty(), "nothing unsaved after open");
   expect(app.values().at("XEN_SERVED_NAME") == "moe-a", "the served name defaults to the checkpoint's folder name on open");
   expect(has(app.preview(), "--served-model-name moe-a"), "the preview carries the folder name as the served model");
+
+  // A search finds a setting that waits on another one (dimmed, n/a), not one of the other arch.
+  s = run({ch('/'), ch('h'), ch('t'), ch('t'), ch('p'), ch('s')});
+  expect(app.values().at("XEN_VISION") == "0" && has(s, "Images by http(s) link") && has(s, "n/a"),
+         "filter: / https finds Images by http(s) link while Image input is off (dimmed, n/a)");
+  run({Key::of(Key::Esc)});
+  s = run({ch('/'), ch('k'), ch('-'), ch('s'), ch('p'), ch('l'), ch('i'), ch('t')});
+  expect(!has(s, "W4 k-split target"), "filter: a qwen35-only setting stays hidden for a qwen38 model");
+  s = run({Key::of(Key::Esc)});
+  expect(!has(s, "find: "), "Esc clears the filter");
 
   // Find Slots, pick 2 from its popup.
   s = run({ch('/'), ch('s'), ch('l'), ch('o'), ch('t'), Key::of(Key::Enter)});
@@ -985,7 +1081,7 @@ void test_app(const std::string &root) {
   s = run({ch('/'), ch('f'), ch('l'), ch('a'), Key::of(Key::Enter), Key::of(Key::Enter)});
   expect(app.selected_key() == "XEN_DRAFTER_MODEL" && app.popup_open() && has(s, "MTP layer") && has(s, "moe-a-dflash2") && has(s, "dense-b-dspine"),
          "DFlash drafter: Enter lists the DFlash 2 and DSpine checkpoints");
-  s = run({Key::of(Key::Down), Key::of(Key::Down), Key::of(Key::Enter)});  // MTP layer, dense-b-dspine, moe-a-dflash2
+  s = run({Key::of(Key::Down), Key::of(Key::Down), Key::of(Key::Down), Key::of(Key::Enter)});  // MTP layer, dense-b-dspine, dense-b-dspine2, moe-a-dflash2
   expect(!app.popup_open() && app.values().at("XEN_DRAFTER_MODEL") == models + "/moe-a-dflash2", "picking one sets XEN_DRAFTER_MODEL");
   expect(has(app.preview(), "--drafter-model"), "the preview gains --drafter-model");
   s = run({Key::of(Key::Right)});
@@ -1207,8 +1303,8 @@ void test_bench(const std::string &root) {
   std::string s = run({ch('3')});  // Benchmark is the third shown tab while Chat stays hidden
   expect(app.tab() == 3 && has(s, "Benchmark") && has(s, "beta") && has(s, "alpha") && has(s, "3 runs"),
          "bench: key 3 opens the Benchmark tab (the digits name the shown tabs), runs grouped by model with a run count");
-  // The mouse regression (the owner: "when you enter Bench you can't click another tab"): a left click on a
-  // header chip switches tabs from any tab - the Benchmark tab used to swallow every mouse event for its scroll handling.
+  // A mouse regression: a left click on a header chip switches tabs from any tab - the Benchmark tab used to swallow
+  // every mouse event for its scroll handling.
   auto click_tab = [&](int t) {
     int x = 0, y = 0;
     if (!app.tab_click_point(t, x, y)) return false;
@@ -1263,14 +1359,15 @@ void test_bench(const std::string &root) {
   s = run({Key::of(Key::Enter)});
   expect(!has(s, "Run the benchmark") && !has(s, "Concurrency at your stream counts") && has(s, "no ready server"),
          "bench: the stream-count mode without a ready server warns instead of asking for counts");
-  // m on Benchmark picks the mode (the corpus the long prompts are cut from): easy by default, hard = the engine's own
-  // code. The tab stays: a letter acts only on the tab whose hint row shows it (m once jumped to Settings' model list).
+  // m on Benchmark picks the mode (xenithium-bench --mode): easy by default, then medium and hard. The tab stays: a
+  // letter acts only on the tab whose hint row shows it (m once jumped to Settings' model list).
   // (the hint row shows "m mode: easy" / "hard"; a toast covers it here, so the menu's "(now)" mark is read instead)
   s = run({ch('m')});
-  expect(app.tab() == 3 && app.popup_open() && has(s, "Benchmark mode") && has(s, "Easy: conventional code") && has(s, "Hard: this engine's own code") &&
-             has(s, "guess it well  (now)") && !has(s, "guessed least well  (now)") && !has(s, "dense-b"),
+  expect(app.tab() == 3 && app.popup_open() && has(s, "Benchmark mode") && has(s, "Easy: tasks that repeat") && has(s, "Medium: conventional code") &&
+             has(s, "Hard: this engine's own code") && has(s, "model ends them  (now)") && !has(s, "guess it well  (now)") && !has(s, "guessed least well  (now)") &&
+             !has(s, "dense-b"),
          "bench: m opens the mode menu on the Benchmark tab (easy by default), not the model list");
-  s = run({Key::of(Key::Down), Key::of(Key::Enter)});
+  s = run({Key::of(Key::Down), Key::of(Key::Down), Key::of(Key::Enter)});
   expect(app.tab() == 3 && !app.popup_open() && has(s, "benchmark mode: hard"), "bench: picking Hard sets the mode; the tab stays");
   s = run({ch('m')});
   expect(has(s, "guessed least well  (now)"), "bench: the menu marks the mode now in use");
@@ -1465,6 +1562,38 @@ void test_model_env(const std::string &root) {
   }
   expect(find_model_env(t + "/menvs", t + "/pm") == pd + "/p.env" && find_model_env(t + "/menvs", t + "/shadowed").empty(),
          "find_model_env: a preset is found by its XEN_MODEL; a replaced preset is not");
+  write(pd + "/q.env", "XEN_PRESET_EXPLICIT=1\nXEN_MODEL=" + t + "/qm\n");  // needs files beyond the checkpoint: by name only
+  expect(find_model_env(t + "/menvs", t + "/qm").empty() && resolve_model_env(root, t + "/menvs", "q") == pd + "/q.env",
+         "find_model_env: a preset marked XEN_PRESET_EXPLICIT=1 is never the model's file; its id still names it");
+  unlink((pd + "/q.env").c_str());
+  {  // Trained page selection banks: folders whose safetensors hold indexer tensors, listed with their layers
+    const std::string banks = t + "/banks", full = banks + "/bank-all", l7 = banks + "/bank-7", ck = banks + "/ckpt";
+    for (const std::string &d : {banks, full, l7, ck}) mkdir(d.c_str(), 0755);
+    auto st = [&](const std::string &path, std::vector<int> layers) {  // a minimal safetensors: header + one f32 per tensor
+      std::string h = "{";
+      for (size_t i = 0; i < layers.size(); ++i)
+        h += (i ? "," : "") + std::string("\"model.language_model.layers.") + std::to_string(layers[i]) + ".self_attn._qsa_indexer.q_norm\":{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[" +
+             std::to_string(4 * i) + "," + std::to_string(4 * i + 4) + "]}";
+      h += "}";
+      std::string body(8, '\0');
+      for (int i = 0; i < 8; ++i) body[i] = static_cast<char>((h.size() >> (8 * i)) & 0xff);
+      write(path, body + h + std::string(4 * layers.size(), '\0'));
+    };
+    st(full + "/qsa-indexers.safetensors", {3, 7, 11, 15, 63});
+    st(l7 + "/b.safetensors", {7});
+    st(ck + "/model.safetensors", {3});
+    write(ck + "/config.json", "{}\n");  // a checkpoint folder is never a bank
+    const auto found = qsa_banks({banks, banks});
+    QsaBank one;
+    expect(found.size() == 2 && found[0].path == l7 && found[1].path == full && found[1].layers == std::vector<int>({3, 7, 11, 15, 63}) &&
+               qsa_bank_detail(found[1]).rfind("5 layers (3, 7 ... 63), ", 0) == 0 && qsa_bank_detail(found[0]).rfind("1 layer (7), ", 0) == 0 &&
+               !probe_qsa_bank(ck, one) && !probe_qsa_bank(t + "/none", one),
+           "qsa_banks: the folders holding indexer tensors (not checkpoints), each once, with their layers");
+    const Catalog bc = load_catalog(root);
+    const Spec *bank = bc.find("XEN_TRAINED_QSA_DELTA_DIR");
+    expect(bank && check_value(*bank, full, "qwen35", root).empty() && check_value(*bank, l7, "qwen35", root).empty() && !check_value(*bank, ck, "qwen35", root).empty(),
+           "the bank folder must hold indexer tensors (a checkpoint folder does not)");
+  }
   expect(resolve_model_env(root, t + "/menvs", "p") == pd + "/p.env" && resolve_model_env(root, t + "/menvs", t + "/menvs/p.env") == pd + "/p.env" &&
              resolve_model_env(root, t + "/menvs", pd + "/b.env") == t + "/menvs/b.env",
          "resolve_model_env: an id or a path without a user file is its preset; a preset's path with a user file is the user's");

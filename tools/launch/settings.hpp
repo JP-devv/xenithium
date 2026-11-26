@@ -13,7 +13,9 @@
 namespace xenithium::launch {
 
 enum class Kind { Int, Float, Choice, Bool, Path, Text };
-enum class Scope { All, Qwen38, Qwen35, MoE };  // MoE: the routed-expert archs with a hot/cold split (qwen38)
+// MoE: the routed-expert archs with a hot/cold split (qwen38); Vision: the archs whose checkpoints carry a vision tower
+// (qwen38, qwen35).
+enum class Scope { All, Qwen38, Qwen35, MoE, Vision };
 
 struct Spec {
   std::string key, label, group;
@@ -30,7 +32,7 @@ struct Spec {
   bool allow_auto = false;  // Int: the word "auto" is also valid
   bool path_file = false;  // Path: a file (else a directory)
   bool path_auto = false;  // Path: the word "auto" is also valid (the model's own file, resolved by the script)
-  bool diag = false;  // read by the server from its environment (docs' diagnostic table)
+  bool diag = false;  // read by the server from its environment (a two-column table of docs/server-env.md)
   bool known = true;  // in the launcher's schema (else a plain text setting under "Other")
   bool in_script = false, in_docs = false;
   std::string def, flag, help;  // help = the setting's row of docs/server-env.md (shown only for settings outside the schema)
@@ -201,7 +203,7 @@ std::string human_bytes(uint64_t b);
 struct ModelInfo {
   std::string path, name;
   std::string arch, arch_desc, model_type;  // arch "" = not served by this engine
-  bool has_config = false, drafter = false, dflash = false;  // drafter: an MTP checkpoint; dflash: config names DFlash2DraftModel or DFlashDraftModel (DSpine)
+  bool has_config = false, drafter = false, dflash = false;  // drafter: an MTP checkpoint; dflash: config names a block drafter (DFlash 2 or DSpine)
   uint64_t bytes = 0;
   int64_t max_positions = 0;  // max_position_embeddings (text_config first), 0 = not in config.json
   int64_t experts = 0, layers = 0;  // routed experts (per layer) and layers (text_config first), 0 = not in config.json
@@ -215,9 +217,22 @@ std::vector<ModelInfo> scan_models(const std::string &dir);
 // MTP drafter directories that fit a qwen38 target: <target>/runtime/mtp-int4-g32 and the sibling
 // directories named <target>-mtp*.
 std::vector<std::string> drafters_for(const std::string &target);
-// DFlash 2 drafter checkpoints under a models directory: the directories whose config.json names
-// DFlash2DraftModel (qwen35 block drafters).
+// Block drafter checkpoints under a models directory: the directories whose config.json names DFlash 2 or DSpine
+// (arch/common/drafter_archs.hpp).
 std::vector<ModelInfo> dflash_drafters(const std::string &dir);
+
+// A trained page selection bank (XEN_TRAINED_QSA_DELTA_DIR): a folder without config.json whose safetensors hold the
+// indexer tensors "...layers.<n>.self_attn._qsa_indexer.*" of one or more attention layers.
+struct QsaBank {
+  std::string path;
+  uint64_t bytes = 0;
+  std::vector<int> layers;  // ascending
+};
+bool probe_qsa_bank(const std::string &dir, QsaBank &out);
+// The banks in these folders' subfolders (each folder once, by path), sorted by path.
+std::vector<QsaBank> qsa_banks(const std::vector<std::string> &dirs);
+// "16 layers (3, 7 ... 63), 200.0 MiB"
+std::string qsa_bank_detail(const QsaBank &b);
 
 bool read_text(const std::string &path, std::string &out);
 bool write_text_atomic(const std::string &path, const std::string &text, std::string *err);

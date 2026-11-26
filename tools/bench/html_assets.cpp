@@ -100,6 +100,19 @@ tbody tr:hover td{background:var(--hl)}
 .notes{margin:14px 0 0;padding:0;list-style:none;font-size:13px;color:var(--mute)}.notes li{margin-top:4px;overflow-wrap:anywhere}
 .notes li.err{color:var(--bad)}
 
+/* wrong answers: first in their section, in the failure colour */
+.miss{margin-top:18px;border:1px solid var(--bad);border-left-width:4px;border-radius:12px;background:var(--panel);overflow:hidden}
+.mbar{padding:9px 14px;border-bottom:1px solid var(--rule);font:13px var(--mono);color:var(--bad)}.mbar b{font-weight:600}
+.miss ol{margin:0;padding:0;list-style:none}
+.miss li{padding:11px 14px;border-bottom:1px solid var(--rule)}.miss li:last-child{border-bottom:0}
+.mq{display:flex;align-items:baseline;gap:10px;font:12.5px var(--mono)}.mq code{color:var(--ink);font-weight:600}.mq span{color:var(--mute)}
+.miss p{margin:5px 0 0;font-size:13px;color:var(--mute);overflow-wrap:anywhere}
+.miss pre{margin:6px 0 0;padding:8px 10px;border-radius:8px;background:var(--bg);font:12px/1.45 var(--mono);color:var(--mute);white-space:pre-wrap;overflow-wrap:anywhere}
+.miss dl{display:grid;grid-template-columns:max-content 1fr;gap:3px 14px;margin:8px 0 0;font:12.5px var(--mono)}
+.miss dt{color:var(--mute)}.miss dd{margin:0;overflow-wrap:anywhere}
+.miss dd.want{color:var(--ok)}.miss dd.got{color:var(--bad)}.miss dd.none{color:var(--bad);font-style:italic}
+a.fig.bad{border-color:var(--bad)}.fig .w{font:12.5px var(--mono);color:var(--bad);margin-top:6px}
+
 /* setup */
 dl.setup{display:grid;grid-template-columns:max-content 1fr;gap:6px 22px;margin:16px 0 0;font:12.5px var(--mono)}
 dl.setup dt{color:var(--mute)}dl.setup dd{margin:0;overflow-wrap:anywhere}

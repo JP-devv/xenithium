@@ -5,14 +5,14 @@
 
 namespace xenithium::arch::qwen38 {
 
-QsaSet QsaSet::from(const load::DenseStore &dense, const Config &cfg, int cards, kernels::QsaKv kv) {
+QsaSet QsaSet::from(const load::DenseStore &dense, const Config &cfg, int cards, kernels::QsaKv kv, kernels::QsaKvSplit split) {
   if (cfg.head_dim != kernels::kQsaDim || cfg.idx_head_dim != kernels::kQsaIdxDim || cfg.idx_heads != kernels::kQsaIdxHeads ||
       cfg.idx_kv_heads != 1 || cfg.idx_compress != kernels::kQsaCompress || cfg.idx_budget != kernels::kQsaTopBlocks * kernels::kQsaCompress ||
       static_cast<int>(cfg.partial_rotary * cfg.head_dim + 0.5) != kernels::kQsaRot || cfg.output_gate != "sigmoid")
     throw std::runtime_error("qwen38 qsa: the kernels are built for head_dim 256, rotary 64, indexer 4 x 128 / compress 4 / budget 2048, "
                              "sigmoid output gate");
   QsaSet g;
-  g.shape = kernels::QsaShape{cfg.hidden, cfg.q_heads, cfg.kv_heads, cards, 0, static_cast<float>(cfg.rms_eps), kv};
+  g.shape = kernels::QsaShape{cfg.hidden, cfg.q_heads, cfg.kv_heads, cards, 0, static_cast<float>(cfg.rms_eps), kv, split};
   g.w.assign(static_cast<size_t>(cards), std::vector<kernels::QsaWeights>(static_cast<size_t>(cfg.layers)));
   for (int l = 0; l < cfg.layers; ++l) {
     if (!cfg.full_attention[l]) continue;

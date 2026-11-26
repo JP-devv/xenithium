@@ -88,6 +88,11 @@ class ExpertStore {
   // host pointer. `hot` reports which.
   // Under TP every card has a blob of every expert: `card` picks it (ignored under EP).
   const uint8_t *blob(int layer, int expert, bool *hot = nullptr, int card = 0) const;
+  // The live exchange (TP only, Model ModelOptions::exchange): expert (layer, e)'s blob on `card` is at `to` from here, in
+  // VRAM (hot) or pinned host memory (cold); every card of an expert moves together (the hot flag is shared). A layer's
+  // hot count stays as it was: the caller swaps a hot and a cold expert of one layer. verify() refuses after a move.
+  void relocate(int card, int layer, int expert, uint8_t *to, bool hot);
+  uint8_t *where(int layer, int expert, int card) { return loc_[loc_idx(card, layer, expert)]; }
   const ExpertStoreStats &stats() const { return stats_; }
 
   // Reads every hot blob back from the cards and compares its hash with the one taken at pack
@@ -96,6 +101,7 @@ class ExpertStore {
 
  private:
   size_t idx(int card, int layer) const { return static_cast<size_t>(card) * layers_ + layer; }
+  size_t loc_idx(int card, int layer, int expert) const { return (static_cast<size_t>(card) * layers_ + layer) * experts_ + expert; }
   void place(int64_t want_per_card, const std::vector<double> *rank);
   void load_native(const ExpertStoreOptions &opt, std::vector<uint8_t *> &stage, std::vector<int> &inflight);
   struct Reader;
@@ -113,6 +119,8 @@ class ExpertStore {
   std::vector<uint8_t *> dev_;           // [card][layer] device allocation (hot blobs), may be null
   std::vector<uint8_t *> cold_;          // [card][layer] pinned host allocation (cold blobs), may be null
   std::vector<uint64_t> hash_;           // [layer][expert]
+  std::vector<uint8_t *> loc_;           // [card][layer][expert]: where its blob is now (load: slot_'s place)
+  bool moved_ = false;                   // relocate() ran
   ExpertStoreStats stats_;
 };
 

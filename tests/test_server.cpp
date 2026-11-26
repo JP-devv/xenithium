@@ -1246,9 +1246,11 @@ struct Collect final : core::EventSink {
   std::map<uint64_t, core::Finish> fin;
   std::map<uint64_t, bool> stop_tok;
   std::map<uint64_t, int> lps;
+  std::map<uint64_t, std::vector<int32_t>> cached;  // each event's cached_tokens report (>= 0)
   void on_events(const core::Event *e, size_t n) override {
     std::lock_guard<std::mutex> lk(mu);
     for (size_t i = 0; i < n; ++i) {
+      if (e[i].cached_tokens >= 0) cached[e[i].id].push_back(e[i].cached_tokens);
       auto &t = toks[e[i].id];
       t.insert(t.end(), e[i].tokens, e[i].tokens + e[i].n);
       lps[e[i].id] += static_cast<int>(e[i].logprobs.size());
@@ -3400,6 +3402,66 @@ void test_responses_tools(const std::string &tokdir) {
          "server: /v1/responses stream: function_call item added, argument deltas, arguments done, completed");
 }
 
+// usage.prompt_tokens_details.cached_tokens is the request's own prefix-cache share (the stub's cache: the longest
+// prefix shared with an earlier prompt, up to the last token), on every endpoint, streamed or not
+void test_cached_usage(const std::string &tokdir) {
+  text::Tokenizer tok;
+  std::string err;
+  if (!tok.load(tokdir, err)) return;
+  const auto chat = text::open_chat_format("qwen38");
+  core::StubConfig sc;
+  sc.model.name = "test-model";
+  sc.model.max_model_len = 4096;
+  sc.script = tok.encode("The answer is 4.");
+  sc.step_ms = 1;
+  sc.slots = 2;
+  sc.prefix_cache = true;
+  core::StubEngine stub(sc);
+  Running r;
+  start_server(r, stub, tok, chat.get());
+  auto details = [](const json::Value &u, const char *key) -> int {
+    const json::Value *d = u.get_object(key);
+    const json::Value *c = d ? d->get("cached_tokens") : nullptr;
+    return c && c->is_number() ? static_cast<int>(c->num) : -1;
+  };
+  const std::string body = "{\"messages\":[{\"role\":\"user\",\"content\":\"Tell me about the prefix cache and its tokens.\"}],\"max_tokens\":6,\"temperature\":0";
+  int prompt = -1, cold = -2, warm = -2;
+  for (int k = 0; k < 2; ++k) {
+    const auto v = post(r.base + "/v1/chat/completions", body + "}");
+    if (const json::Value *u = v.get_object("usage")) {
+      prompt = u->get("prompt_tokens") ? static_cast<int>(u->get("prompt_tokens")->num) : -1;
+      (k == 0 ? cold : warm) = details(*u, "prompt_tokens_details");
+    }
+  }
+  expect(prompt > 1 && cold == 0 && warm == prompt - 1, "server: chat usage reports the request's cached prompt tokens (cold " + std::to_string(cold) +
+                                                            ", again " + std::to_string(warm) + " of " + std::to_string(prompt) + ")");
+  {
+    const auto res = xenithium::http::request("POST", r.base + "/v1/chat/completions", body + ",\"stream\":true,\"stream_options\":{\"include_usage\":true}}", 30);
+    bool done = false;
+    int got = -2;
+    for (const auto &e : sse(res.body, done))
+      if (const json::Value *u = e.get_object("usage")) got = details(*u, "prompt_tokens_details");
+    expect(done && got == prompt - 1, "server: the streamed usage chunk carries cached_tokens (" + std::to_string(got) + ")");
+  }
+  {
+    int st = 0;
+    const auto a = post(r.base + "/v1/completions", "{\"prompt\":[5,6,7,8,9,10,11,12,13,14,15,16],\"max_tokens\":3}", &st);
+    const auto b = post(r.base + "/v1/completions", "{\"prompt\":[5,6,7,8,9,10,11,12,40,41],\"max_tokens\":3}", &st);
+    const json::Value *ua = a.get_object("usage"), *ub = b.get_object("usage");
+    const int ca = ua ? details(*ua, "prompt_tokens_details") : -2, cb = ub ? details(*ub, "prompt_tokens_details") : -2;
+    expect(st == 200 && ca == 0 && cb == 8, "server: completions usage: a new prompt 0 cached, one sharing 8 tokens 8 (" + std::to_string(ca) + ", " + std::to_string(cb) + ")");
+  }
+  {
+    const std::string rb = "{\"input\":\"Tell me about the cached responses.\",\"max_output_tokens\":6,\"temperature\":0}";
+    post(r.base + "/v1/responses", rb);
+    const auto v = post(r.base + "/v1/responses", rb);
+    const json::Value *u = v.get_object("usage");
+    const int in = u && u->get("input_tokens") ? static_cast<int>(u->get("input_tokens")->num) : -1;
+    const int c = u ? details(*u, "input_tokens_details") : -2;
+    expect(in > 1 && c == in - 1, "server: /v1/responses usage reports input_tokens_details.cached_tokens (" + std::to_string(c) + " of " + std::to_string(in) + ")");
+  }
+}
+
 void test_prefix_mark(const std::string &tokdir) {
   text::Tokenizer tok;
   std::string err;
@@ -4029,6 +4091,9 @@ struct PcRun {
   core::Stats st;
   int errors = 0, snap_errors = 0, strict_errors = 0, restores = 0, forks = 0, resumes = 0, saves = 0;
   bool ok = true;
+  // per-request prefix-cache reports: each request reported once, 0 <= cached < its prompt; their sum
+  bool cached_once = true;
+  uint64_t cached_sum = 0;
 };
 
 PcRun pc_run(bool cache, int slots, int pool_pages, int depth, int snap_cap, bool sampled, int turns = 6, int extra = 0, int sessions = 3, int align = 1, bool live = false) {
@@ -4057,6 +4122,7 @@ PcRun pc_run(bool cache, int slots, int pool_pages, int depth, int snap_cap, boo
   }
   uint64_t id = 0;
   size_t want = 0;
+  std::map<uint64_t, size_t> plen;
   for (int t = 0; t < turns && res.ok; ++t) {
     std::vector<uint64_t> ids(static_cast<size_t>(sessions));
     for (int s = 0; s < sessions; ++s) {
@@ -4068,6 +4134,7 @@ PcRun pc_run(bool cache, int slots, int pool_pages, int depth, int snap_cap, boo
       p.max_tokens = 12 + 3 * s + t + extra;
       p.prefix_mark = static_cast<int32_t>(prompt[static_cast<size_t>(s)].size()) - 3;  // a 3-token "generation prompt"
       ids[static_cast<size_t>(s)] = ++id;
+      plen[id] = prompt[static_cast<size_t>(s)].size();
       e.submit(id, prompt[static_cast<size_t>(s)], p);
     }
     want += static_cast<size_t>(sessions);
@@ -4108,6 +4175,11 @@ PcRun pc_run(bool cache, int slots, int pool_pages, int depth, int snap_cap, boo
   e.stop();
   res.toks = c.toks;
   res.st = e.stats();
+  for (const auto &[rid, len] : plen) {
+    const auto it = c.cached.find(rid);
+    if (it == c.cached.end() || it->second.size() != 1 || static_cast<size_t>(it->second[0]) >= len) res.cached_once = false;
+    else res.cached_sum += static_cast<uint64_t>(it->second[0]);
+  }
   res.errors = fm.errors;
   res.snap_errors = fm.snap_errors;
   res.strict_errors = fm.strict_errors;
@@ -4162,6 +4234,11 @@ void test_prefix_cache() {
     expect(got.st.prompt_tokens == ref.st.prompt_tokens && got.st.running == 0 && got.st.waiting == 0 && got.st.ttft.count == ref.st.ttft.count,
            tag + "stats: the same prompt tokens and TTFT samples, nothing left running (" + std::to_string(got.st.preemptions) + " preemptions, " +
                std::to_string(ref.st.preemptions) + " without the cache)");
+    // place() counts a preempted request's every placement, the reports its first token's: equal without preemptions
+    expect(ref.cached_once && got.cached_once && ref.cached_sum == 0 &&
+               (got.st.preemptions == 0 ? got.cached_sum == got.st.prefix_hits : got.cached_sum <= got.st.prefix_hits) && got.cached_sum > 0,
+           tag + "each request reports its cached prompt tokens once (" + std::to_string(got.cached_sum) + " of the " +
+               std::to_string(got.st.prefix_hits) + " hit tokens)");
     restores += got.restores, forks += got.forks, resumes += got.resumes;
   }
   expect(restores > 0 && forks > 0 && resumes > 0, "prefix cache: the matrix ran live resumes (" + std::to_string(resumes) + "), restores (" +
@@ -4535,6 +4612,7 @@ int main() {
   test_images(dir);
   test_responses(dir);
   test_responses_tools(dir);
+  test_cached_usage(dir);
   test_prepare(dir);
   std::filesystem::remove_all(dir);
   std::printf("server: %d checks, %d failed\n", g_checks, g_failures);

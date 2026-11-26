@@ -424,6 +424,10 @@ class Qwen38 final : public model::Arch {
           if (!ck.find(L(l, t))) throw std::runtime_error("qwen38 dense plan: missing " + L(l, t));
         out.back().append = {L(l, "self_attn.k_proj.weight"), L(l, "self_attn.v_proj.weight")};
         out.back().append_heads = c_.kv_heads;  // TP4 = a kv head on two cards (each takes it whole)
+        if (kv_by_tokens(p)) {  // the KV split by tokens: + the partner's q heads (q of each q | gate pair)
+          out.back().peer_block = 2 * c_.head_dim;
+          out.back().peer_keep = c_.head_dim;
+        }
         add(L(l, "self_attn.o_proj.weight"), S::Split::cols, mat, A, l);
         add(L(l, "self_attn.q_norm.weight"), S::Split::replicate, S::Store::raw, A, l);
         add(L(l, "self_attn.k_norm.weight"), S::Split::replicate, S::Store::raw, A, l);
@@ -466,6 +470,8 @@ class Qwen38 final : public model::Arch {
   }
 
   Config c_;
+  // The KV split by tokens applies (DeployParams::KvShard::tokens with fewer kv heads than cards: qwen38 TP4).
+  bool kv_by_tokens(const model::DeployParams &p) const { return p.kv_shard == model::DeployParams::KvShard::tokens && c_.kv_heads < p.cards; }
 };
 
 // ---------------------------------------------------------------- budget
@@ -541,11 +547,11 @@ model::Budget Qwen38::budget(const model::Checkpoint &ck, const model::DeployPar
   }
 
   // KV per token per card per slot. K and V of every KV head (+ one fp32 scale per token and
-  // head for 8-bit KV), plus the indexer's compressed key (bf16). Split over the cards:
-  //   heads:  each card stores all tokens of kv_heads / C heads; the indexer is replicated.
-  //   tokens: each card stores 1 / C of the tokens for all heads, indexer keys included.
-  // K/V bytes per card are the same either way; only the replicated indexer keys differ.
-  const bool by_tokens = p.kv_shard == model::DeployParams::KvShard::tokens;
+  // head for 8-bit KV), plus the indexer's compressed key (bf16, replicated: every card selects). Split over the cards:
+  //   heads:  each card stores all tokens of its kv heads; with fewer kv heads than cards (TP4) a kv head's cards each
+  //           store all of them (KV per card as at kv_heads cards).
+  //   tokens: (fewer kv heads than cards) a kv head's cards split its tokens: each stores 1 / C of the K / V.
+  const bool by_tokens = kv_by_tokens(p);
   const int kv_layers = full + (p.drafter ? 1 : 0);
   // K + V (int8-v4: V at half a byte per element) + the two fp32 scales of an 8-bit KV
   // (int8-v4: 4-bit V + one bf16 scale per 32 dims)
@@ -553,13 +559,13 @@ model::Budget Qwen38::budget(const model::Checkpoint &ck, const model::DeployPar
                         (p.kv_bytes == 1 ? (4.0 + (p.kv_v4 ? 2.0 * kernels::kQsaV4Scales : 4.0)) * c_.kv_heads : 0);
   const double idx_all = static_cast<double>(c_.idx_head_dim) * 2 / c_.idx_compress;
   const double kv_tok_layer = by_tokens ? kv_all / C : kv_all / KVC;
-  const double idx_tok_layer = by_tokens ? idx_all / C : idx_all;
+  const double idx_tok_layer = idx_all;
   b.kv_bytes_per_token = kv_layers * (kv_tok_layer + idx_tok_layer);
   {
     const double ctx = static_cast<double>(p.context);
     const double resident = b.kv_bytes_per_token * ctx * p.seqs;
     // Sparse attention: a query reads the selected blocks' K/V (at most the budget plus the
-    // open block) and scores every compressed key once. Token sharding splits both reads.
+    // open block) and scores every compressed key once. The split by tokens halves the K / V read.
     const double attended = std::min(ctx, static_cast<double>(c_.idx_budget + c_.idx_compress - 1));
     const double step = kv_layers * (attended * kv_tok_layer + ctx * idx_tok_layer) * p.seqs;
     row("KV cache (" + std::to_string(p.context) + " x " + std::to_string(p.seqs) + " slot)", resident, step,
@@ -568,15 +574,14 @@ model::Budget Qwen38::budget(const model::Checkpoint &ck, const model::DeployPar
             "; a step reads <= " + std::to_string(static_cast<int>(attended)) + " tokens + all compressed keys");
   }
   if (by_tokens) {
-    // Every card attends its tokens with ALL query heads: q (query | gate) is needed whole on
-    // each card, so q_proj is replicated instead of split (the alternative, an all-gather of
-    // q per layer, is another cross-card wait). o_proj stays split by input columns after
-    // the merge. Per full-attention layer and step: one partial-softmax merge across cards
-    // (max, sum, weighted V per head) and one global top-k of the indexer's block scores.
+    // Every card attends its tokens with all q heads of its kv head: the partner's q heads (no gates) are replicated
+    // rows of the card's q_proj slice (an exchange of q per layer costs more, measured in a micro test). o_proj stays split by
+    // its own heads' columns after the pair's merge: one partial-softmax exchange per attention layer per step; the
+    // selection needs none (the indexer is replicated).
     const double QD = static_cast<double>(c_.q_heads) * c_.head_dim;
-    const double extra = (dense(2 * QD, H, 1) - dense(2 * QD, H, C)) * kv_layers;
-    row("q_proj replicated (token sharding)", extra, extra, "each card needs every query head for its tokens");
-    b.notes.push_back("token-sharded KV adds 2 cross-card exchanges per attention layer per step (softmax merge + block top-k)");
+    const double extra = dense(QD, H, C) * kv_layers;
+    row("q_proj: the partner's q heads (KV split by tokens)", extra, extra, "each card attends with every q head of its kv head");
+    b.notes.push_back("KV split by tokens: one cross-card exchange per attention layer per step (the pair's softmax merge)");
   }
 
   // Routed experts as the card stores them: int4 codes + fp16 group scales. The checkpoint's

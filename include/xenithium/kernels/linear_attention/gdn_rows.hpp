@@ -75,6 +75,13 @@ struct GdnRowsState {
   // The absolute position of the first new row. >= 0: full 64-row chunks at absolute
   // multiples of 64 run on the chunked scan (GdnRowsScratch:scan); < 0: every row on the row core.
   int pos = -1;
+  // Null, or the call's first slice record on the device (rows.hpp): the kernels then read the position (kSegPos, for
+  // pos >= 0 the chunk split), the slot (kSegSlot) and the GDN parity (kSegParity) from it and take the state from
+  // bufs as a step's sequence does (S and its window, pending log of that slot; win_in = win[parity ^ 1], win_out =
+  // win[parity], log_y / log_ab = y / ab[parity ^ 1]): S, win_in, win_out, log_y and log_ab are then unused. The same
+  // bits; one recorded launch serves every position and slot. Not with snap_pos.
+  const int32_t *rec = nullptr;
+  GdnState bufs;
   // With snap_pos (an absolute multiple of 64 inside the call, on the chunked scan: pos >= 0)
   // the state at snap_pos also goes to snap_S (S, gdn_S_elems floats) and snap_win (the window there, gdn_win_elems), the
   // same bits a call ending at snap_pos leaves in S / win_out; the call's own outputs are unchanged.

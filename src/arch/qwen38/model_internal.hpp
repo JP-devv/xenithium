@@ -36,7 +36,6 @@ struct GraphRecordError : std::runtime_error {
 struct Model::Card {
   using bf16 = sycl::ext::oneapi::bfloat16;
   bf16 *xa = nullptr, *ya = nullptr, *xm = nullptr, *ym = nullptr;  // [4][hidden]: mixer outputs, block outputs
-  unsigned *nanwatch = nullptr;
   int32_t *seg = nullptr;                                           // the step's segment records [kMaxSegs][kSegRec]
   bf16 *rope = nullptr;                                             // [capacity][64]
   kernels::PairWire pw;                                             // GDN / QSA two-card sums
@@ -83,7 +82,22 @@ struct Model::Card {
     // the QSA selection shared by owner rows, a flag line of its own per lane (on the lane's line, a peer's next write
     // could land before this card read the out projection's flag value: a wait on == seq)
     kernels::PairSplit sel[kPfLanesMax];
+    // The split sums' flag lines (pf.split's): [0] the launches' (the lines pf.split names at load), [1 + i] prompt-call
+    // graph flag set i (Model::pf_flag_set). A recorded graph replays its sequence numbers, so it owns its lines: a
+    // line then only ever holds that graph's numbers (or 0), and its first wait never matches the line's old value.
+    uint32_t *flag_lines[1 + kPfGraphsMax] = {};
     std::optional<sycl::queue> side;     // the split's copies, beside the compute queue
+    // The layer-ahead fetch (ModelOptions::prefill_fetch): the side queue copies a layer's cold experts into a VRAM
+    // buffer (layer l: buffer l % kPfFetchBufs) while the layers before it compute; the MoE reads ftab (its blob table:
+    // the buffer's slot or the expert's own blob) and fflag (the cold flags of what was not fetched, for the staging).
+    uint8_t *fbuf[kPfFetchBufs] = {};
+    const uint8_t **ftab[kPfFetchBufs] = {};  // [per_card]
+    uint8_t *fflag[kPfFetchBufs] = {};        // [per_card]
+    // host (pinned): the card's blob table and cold flags as the call sees them, fetched entries already pointing at
+    // their buffer slot; per layer the host blobs to fetch, in slot order
+    const uint8_t **htab = nullptr;  // [layers][per_card]
+    uint8_t *hflag = nullptr;        // [layers][per_card]
+    std::vector<std::vector<const uint8_t *>> hsrc;  // [layers]
     kernels::QsaRowsScratch qsa;         // QSA's chunk projections (stage A)
     kernels::PleRowsScratch ple;         // the many-row PLE block
     kernels::PfA8 a8;                    // W8A8 scratch for every many-row int8 dense GEMM (ModelOptions:prefill_dense_a8;
@@ -216,6 +230,16 @@ struct Model::PfRun {
   std::vector<kernels::HcState> cs;  // the chunk's HC state per card
   int start_cur[kMaxCards] = {}, start_lcur[kMaxCards] = {};
   int l = 0;                   // the next layer
+  // While the call's layers record into a graph: the QSA grid bound every batch takes (the key's bucket, so the
+  // launches do not depend on the position); unset = each batch's own (kernels::qsa_rows).
+  std::optional<int64_t> qsa_bound;
+  // the layer-ahead fetch (pf_fetch_some): on for this call; per card the next layer to fetch, its next blob, the last
+  // copy queued, and per buffer the copy that completes its layer
+  bool fetch = false;
+  int fq_l[kMaxCards] = {};
+  size_t fq_j[kMaxCards] = {};
+  sycl::event fq_ev[kMaxCards];
+  sycl::event fetched[kMaxCards][kPfFetchBufs];
   // Model::pf_layers_owner: the call's rows by owner, in lanes. Empty: every card holds every row.
   struct Lane {
     int r0 = 0, m = 0;         // the call's rows [r0, r0 + m)
@@ -261,6 +285,33 @@ struct Model::PfRun {
   };
   std::vector<SplitSpan> split_span;
   uint64_t *pend_span[kMaxCards] = {};
+};
+
+// The recorded prompt-call graphs (prefill.cpp, "prompt-call graphs").
+struct Model::PfGraphs {
+  using Exec = sycl::ext::oneapi::experimental::command_graph<sycl::ext::oneapi::experimental::graph_state::executable>;
+  struct Hc {
+    int cur = 0, lcur = 0, lora_ld = 0;
+  };
+  struct Entry {
+    std::vector<Exec> exec;       // [card]
+    std::vector<Hc> end_hc;       // [card]: the call's HC state indices after the recorded layers
+    int end_pair = 0, end_kv = 0, end_moe = 0;  // the prefill wires' parities after them
+    int flag_set = 0;             // its split flag lines (Card::Pf::flag_lines index; 0 = none: no split sum)
+    uint64_t used = 0;            // Model::graph_tick_ at the last replay (the LRU order, with the step graphs')
+  };
+  std::map<PfGraphKey, Entry> map;
+  std::map<PfGraphKey, int> seen;  // the calls of each key not recorded yet
+  std::vector<int> free_flag_sets = [] {
+    std::vector<int> v;
+    for (int i = kPfGraphsMax; i >= 1; --i) v.push_back(i);
+    return v;
+  }();
+  // drops entry `it`; its flag set goes back to the free list
+  void erase(std::map<PfGraphKey, Entry>::iterator it) {
+    if (it->second.flag_set > 0) free_flag_sets.push_back(it->second.flag_set);
+    map.erase(it);
+  }
 };
 
 }  // namespace xenithium::arch::qwen38

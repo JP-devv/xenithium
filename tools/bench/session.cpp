@@ -1,5 +1,6 @@
 #include "session.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -35,6 +36,18 @@ ChatRequest Session::sampled(std::string user_text, int max_tokens) {
   r.sampling.seed = static_cast<int64_t>(options_.seed + requests_seeded_++);
   r.ignore_eos = options_.reply_length == ReplyLength::fixed;
   r.thinking = options_.thinking;
+  return r;
+}
+
+ChatRequest Session::sampled(const ShortPrompt &prompt) {
+  ChatRequest r = sampled(std::string(prompt.text), prompt.max_tokens);
+  std::vector<Message> earlier;
+  for (const EarlierTurn &turn : prompt.earlier) earlier.push_back({std::string(turn.role), std::string(turn.text)});
+  r.messages.insert(r.messages.begin(), earlier.begin(), earlier.end());
+  if (options_.fresh_prompts) {  // before the conversation's first user turn: the whole request is new to a prefix cache
+    const auto first_user = std::ranges::find(r.messages, std::string_view("user"), &Message::role);
+    first_user->content.insert(0, unique_line());
+  }
   return r;
 }
 
@@ -80,8 +93,13 @@ Session::DocumentPrompt Session::document_prompt(std::string_view kind, int64_t 
 Sample Session::chat_alone(const ChatRequest &request) const {
   const auto before = counters();
   Sample sample = client_.chat(request);
+  // the counter is server-wide: growth beyond this prompt is another client's hits, and the request's share is unknown
   if (sample.ok && sample.cached_tokens < 0 && before)
-    if (const auto after = counters()) sample.cached_tokens = static_cast<int>(after->prefix_hit_tokens - before->prefix_hit_tokens);
+    if (const auto after = counters()) {
+      const double grew = after->prefix_hit_tokens - before->prefix_hit_tokens;
+      if (grew >= 0 && grew <= sample.prompt_tokens) sample.cached_tokens = static_cast<int>(grew);
+      else sample.cached_unknown = true;
+    }
   return sample;
 }
 

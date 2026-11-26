@@ -33,6 +33,8 @@ struct SessionOptions {
   std::function<void(std::string_view)> progress;  // one line per finished step of a scenario (may be empty)
   PowerMeter *power = nullptr;  // the cards' power meter when the run samples power (not owned)
   ReplyLength reply_length = ReplyLength::fixed;
+  std::span<const ShortPrompt> prompts = short_prompts();  // the run's short prompts (the mode's set)
+  bool fresh_prompts = false;  // a unique first line on every short prompt: no reply starts from the prefix cache
 };
 
 class Session {
@@ -46,12 +48,16 @@ class Session {
   uint64_t seed() const { return options_.seed; }
   Thinking thinking() const { return options_.thinking; }
   ReplyLength reply_length() const { return options_.reply_length; }
+  std::span<const ShortPrompt> prompts() const { return options_.prompts; }
   PowerMeter *power() const { return options_.power; }
   void progress(std::string_view line) const;
 
   // A single-turn request with the run's sampling and thinking mode, the run's reply length (ReplyLength) and the
   // run's next seed. Not thread-safe (the seed counter): build requests before sending them in parallel.
   ChatRequest sampled(std::string user_text, int max_tokens);
+  // The same for one of the short prompts: its earlier turns, then its text at its reply length - after a unique first
+  // line when the run asks for fresh prompts.
+  ChatRequest sampled(const ShortPrompt &prompt);
   // At temperature 0 and without a seed, a fixed reply length (ignore_eos where the endpoint has it).
   ChatRequest greedy(std::string user_text, int max_tokens) const;
 
@@ -70,7 +76,8 @@ class Session {
   std::string unique_line();
 
   // One request with nothing else in flight. Where the endpoint's usage does not say how many prompt tokens came from
-  // its prefix cache but its /metrics counts them, the sample's cached_tokens is that counter's growth over the request.
+  // its prefix cache but its /metrics counts them, the sample's cached_tokens is that counter's growth over the request;
+  // a growth past the prompt (another client's hits) leaves it unknown (-1).
   Sample chat_alone(const ChatRequest &request) const;
 
   // Sends the requests at once (request i after start_after_s[i] seconds, 0 when the span is shorter) and waits for all.

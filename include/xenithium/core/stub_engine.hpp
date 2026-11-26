@@ -31,6 +31,9 @@ struct StubConfig {
   double step_ms = 2.0;
   int tokens_per_step = 4;
   int slots = 0;  // requests decoded at once; 0 = all of them (no queue). Others wait, as in GpuEngine
+  // A prefix cache: a request continues the longest prefix it shares with an earlier admitted prompt
+  // (up to its last token), reported on its first event and counted in the prefix-cache stats
+  bool prefix_cache = false;
   AdmissionConfig admission;
 };
 
@@ -50,6 +53,7 @@ class StubEngine final : public Engine {
   struct Req {
     SamplingParams params;
     size_t prompt_len = 0;
+    size_t cached = 0;  // prompt tokens continued from the prefix cache
     size_t pos = 0;  // into the script
     int32_t generated = 0;
     bool prefilled = false;
@@ -60,6 +64,7 @@ class StubEngine final : public Engine {
     size_t prompt_len;
     SamplingParams params;
     std::chrono::steady_clock::time_point t_submit;
+    std::vector<int32_t> prompt;  // with prefix_cache only
   };
 
   void loop();
@@ -80,6 +85,7 @@ class StubEngine final : public Engine {
 
   std::deque<Submit> waiting_;                // admitted in arrival order or by policy; engine thread only
   std::unordered_map<uint64_t, Req> active_;  // engine thread only
+  std::deque<std::vector<int32_t>> seen_;     // prefix_cache: the latest admitted prompts; engine thread only
 };
 
 }  // namespace xenithium::core

@@ -304,10 +304,14 @@ void test_two(xenithium::Fabric &f, const Model &m, const char *tag) {
   free_card(f, d[1]);
 }
 
-// ple_rows (prefill) against ple_decode on 4-row slices: bit-identical by design (decode's
-// kv GEMM sums k in order; the gate and conv do the same arithmetic per row). History: two
-// decode steps (6 positions) before the chunk, so the chunk's first rows read the ring; then one
-// decode step after the chunk, which reads the ring the rows left.
+// ple_rows (prefill) against ple_decode on 4-row slices: bit-identical by design (the gate and conv
+// round the same way per row). The kv GEMM is the one input they do not share: pf_dense sums k in order
+// (a row's result must not depend on the chunk around it) while dense_gemm splits k where a shape leaves
+// it few tiles (dense_auto_ksplit: 4 at the small shape, 1 at the model's), so the projection lands a
+// fraction of an fp32 ulp apart and a bf16 rounding can flip: the slice path is pinned to the in-order
+// sum (kv_ks = 1), leaving the block's own arithmetic compared exactly. History: two decode steps (6
+// positions) before the chunk, so its first rows read the ring; then one decode step after the chunk,
+// which reads the ring the rows left.
 void test_rows(xenithium::Fabric &f, const Model &m, const char *tag, int M) {
   const int C = m.s.width(), E = m.s.emb;
   Card d = make_card(f, 0, m);
@@ -342,7 +346,7 @@ void test_rows(xenithium::Fabric &f, const Model &m, const char *tag, int M) {
         const int rows = std::min(4, M - 4 * sl), pos = p0 + 4 * sl;
         d.q->memcpy(d.pos, &pos, 4).wait();
         k::ple_decode(*d.q, m.s, rows, reinterpret_cast<const bf16 *>(pinned + static_cast<size_t>(sl) * 4 * E), d.w, d.st, d.pos, d.sc,
-                      res + static_cast<size_t>(sl) * 4 * C)
+                      res + static_cast<size_t>(sl) * 4 * C, /*kv_ks=*/1)
             .conv.wait();
       }
     } else {

@@ -1,7 +1,6 @@
 // Xenithium · two-card sum of fp32 partials (see wire.hpp).
 #include "xenithium/kernels/comm/wire.hpp"
 
-#include <cstdlib>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -693,8 +692,6 @@ sycl::event pair_reduce_rows(sycl::queue &q, int m, int n, const float *part, co
   if (wire->quad.on()) {
     check_quad(wire->quad, "pair_reduce_rows");
     if (wire->split) throw std::invalid_argument("pair_reduce_rows: the split form is two-card only");
-    if (wire->quad.copy && !wire->bf16)
-      return step_copy_reduce(q, m, n, part, *wire->quad.copy, wire->quad.card, p, wire->error, wire->wait_cycles, out);
     return reduce_rows_wire<true>(q, m, n, part, *wire, p, out);
   }
   return reduce_rows_wire<false>(q, m, n, part, *wire, p, out);
@@ -772,132 +769,147 @@ sycl::event share_rows(sycl::queue &q, int rows, int n, bf16 *buf, const OwnerSh
   });
 }
 constexpr int kOwnerShareWideRows = 17;  // 256 words per item from here
+
+// ---- the copy path (wire.hpp) ----
+class OwnerCopyFlagK;
+class OwnerCopyWaitK;
+class OwnerCopyTakeK;
+template <int COLS>
+class OwnerSumCopyK;
+constexpr auto kLineUc = esimd::properties{esimd::cache_hint_L1<esimd::cache_hint::uncached>, esimd::cache_hint_L2<esimd::cache_hint::uncached>,
+                                           esimd::alignment<64>};
+// This card's send count + 1, kept in its count line and stored to its flag line on the three other cards. In order
+// behind the queue's copies: the count lands after the rows it announces (posted writes of one sender keep their order).
+sycl::event owner_copy_flag(sycl::queue &q, int card, const OwnerFlags &fl) {
+  uint32_t *sent = fl.count;
+  uint32_t *l0 = fl.lines[static_cast<size_t>((card + 1) % kWireCardsMax)] + 16 * card, *l1 = fl.lines[static_cast<size_t>((card + 2) % kWireCardsMax)] + 16 * card,
+           *l2 = fl.lines[static_cast<size_t>((card + 3) % kWireCardsMax)] + 16 * card;
+  return q.parallel_for<OwnerCopyFlagK>(sycl::range<1>(1), [=](sycl::id<1>) SYCL_ESIMD_KERNEL {
+    esimd::simd<uint32_t, 16> v = esimd::block_load<uint32_t, 16>(sent);
+    v += 1u;
+    esimd::block_store<uint32_t, 16>(sent, v);
+    esimd::fence<esimd::memory_kind::global, esimd::fence_flush_op::none, esimd::fence_scope::system>();
+    esimd::block_store<uint32_t, 16>(l0, v, kLineUc);
+    esimd::block_store<uint32_t, 16>(l1, v, kLineUc);
+    esimd::block_store<uint32_t, 16>(l2, v, kLineUc);
+  });
+}
+// One item: until the three other cards' lines here hold this card's own send count (its flag launch is ahead of this
+// one on its queue), i.e. their rows have landed. A timed-out wait sets *error. (A wait of one item per row was 50 %
+// of a step slower: the fenced polls of hundreds of items.)
+sycl::event owner_copy_wait(sycl::queue &q, int card, const OwnerFlags &fl, uint32_t *error, uint64_t wait_cycles) {
+  const uint32_t *lines = fl.lines[static_cast<size_t>(card)];
+  const uint32_t *sent = fl.count;
+  return q.parallel_for<OwnerCopyWaitK>(sycl::range<1>(1), [=](sycl::id<1>) SYCL_ESIMD_KERNEL {
+    const uint32_t x = esimd::block_load<uint32_t, 16>(sent)[0];
+    const uint64_t t0 = esimd::rdtsc();
+    bool timed_out = false;
+    for (int s = 0; s < kWireCardsMax; ++s) {
+      if (s == card) continue;
+      esimd::simd<uint32_t, 16> v = esimd::block_load<uint32_t, 16>(lines + 16 * s, kLineUc);
+      while (v[0] != x && !timed_out) {
+        esimd::fence<esimd::memory_kind::global, esimd::fence_flush_op::none, esimd::fence_scope::system>();
+        v = esimd::block_load<uint32_t, 16>(lines + 16 * s, kLineUc);
+        if (v[0] != x && esimd::rdtsc() - t0 > wait_cycles) {
+          error[0] = 1u;
+          timed_out = true;
+        }
+      }
+    }
+  });
+}
+void check_flags(const OwnerFlags &fl, const char *who) {
+  for (const uint32_t *l : fl.lines)
+    if (!l) throw std::invalid_argument(std::string(who) + ": the copy path needs every card's flag lines");
+}
+// The share's take: the other owners' rows of buf, read past L1 and stored back (one item per row and KiB), so the
+// rows are this card's own writes for every later reader, and warm for the next launch.
+sycl::event owner_copy_take(sycl::queue &q, int card, int rows, size_t row_bytes, void *buf, uint32_t zero) {
+  constexpr size_t kPiece = 1024;
+  const RowRange own = owner_rows(card, rows);
+  auto *base = static_cast<uint8_t *>(buf);
+  return q.parallel_for<OwnerCopyTakeK>(sycl::nd_range<2>({static_cast<size_t>(rows), row_bytes / kPiece}, {1, 1}), [=](sycl::nd_item<2> it) SYCL_ESIMD_KERNEL {
+    const int r = static_cast<int>(it.get_global_id(0));
+    if (r >= own.lo && r < own.hi) return;
+    uint32_t *at = reinterpret_cast<uint32_t *>(base + static_cast<size_t>(r) * row_bytes + static_cast<size_t>(it.get_global_id(1)) * kPiece);
+    esimd::simd<uint32_t, 64> v[4];
+#pragma unroll
+    for (int i = 0; i < 4; ++i) v[i] = esimd::block_load<uint32_t, 64>(at + i * 64, kPeerLd);
+#pragma unroll
+    for (int i = 0; i < 4; ++i) esimd::block_store<uint32_t, 64>(at + i * 64, v[i] ^ zero);  // (zero: a runtime 0, so the store stays)
+  });
+}
+sycl::event share_copy(sycl::queue &q, int rows, int n, bf16 *buf, const OwnerShare &share) {
+  const OwnerCopy &cp = share.copy;
+  const int card = share.mail.card;
+  check_flags(cp.flags, "owner_share");
+  for (const bf16 *b : cp.buf)
+    if (!b) throw std::invalid_argument("owner_share: the copy path needs every card's buffer");
+  const size_t row_bytes = static_cast<size_t>(n) * sizeof(bf16);
+  if (cp.buf[static_cast<size_t>(card)] != buf) throw std::invalid_argument("owner_share: the copy path's buffers name another buffer for this card");
+  const RowRange own = owner_rows(card, rows);
+  const size_t at = static_cast<size_t>(own.lo) * static_cast<size_t>(n), bytes = static_cast<size_t>(own.rows()) * row_bytes;
+  for (int k = 1; k < kWireCardsMax; ++k) q.memcpy(cp.buf[static_cast<size_t>((card + k) % kWireCardsMax)] + at, buf + at, bytes);
+  owner_copy_flag(q, card, cp.flags);
+  owner_copy_wait(q, card, cp.flags, share.error, share.wait_cycles);
+  return owner_copy_take(q, card, rows, row_bytes, buf, static_cast<uint32_t>(rows < 0));
+}
+
+// The owner sum by copies. recv: [parity][source card][the owner's row][n].
+inline size_t sum_copy_at(int parity, int src, int n) { return (static_cast<size_t>(parity) * kWireCardsMax + static_cast<size_t>(src)) * kOwnerRowsMax * static_cast<size_t>(n); }
+template <int COLS>
+sycl::event owner_reduce_copy(sycl::queue &q, int rows, int n, const float *part, const PairWire &wire, int parity, bf16 *out) {
+  static_assert(COLS % kCols == 0, "the received partials are read in 64-column messages");
+  const OwnerSumCopy &cp = wire.copy;
+  const int card = wire.owner.card, chunks = n / COLS;
+  check_flags(cp.flags, "pair_reduce");
+  for (const float *r : cp.recv)
+    if (!r) throw std::invalid_argument("pair_reduce: the copy path needs every card's receive buffer");
+  for (int k = 1; k < kWireCardsMax; ++k) {
+    const int d = (card + k) % kWireCardsMax;
+    const RowRange theirs = owner_rows(d, rows);
+    q.memcpy(cp.recv[static_cast<size_t>(d)] + sum_copy_at(parity, card, n), part + static_cast<size_t>(theirs.lo) * n, static_cast<size_t>(theirs.rows()) * n * sizeof(float));
+  }
+  owner_copy_flag(q, card, cp.flags);
+  owner_copy_wait(q, card, cp.flags, wire.error, wire.wait_cycles);
+  const RowRange own = owner_rows(card, rows);
+  const float *rv = cp.recv[static_cast<size_t>(card)] + sum_copy_at(parity, 0, n);
+  const float *mine = part + static_cast<size_t>(own.lo) * n;
+  bf16 *o = out + static_cast<size_t>(own.lo) * n;
+  const size_t src_stride = static_cast<size_t>(kOwnerRowsMax) * n;
+  const uint32_t zero = static_cast<uint32_t>(rows < 0);  // 0: a kernel argument, unknown to the compiler
+  return q.parallel_for<OwnerSumCopyK<COLS>>(sycl::nd_range<2>({static_cast<size_t>(own.rows()), static_cast<size_t>(chunks)}, {1, 1}), [=](sycl::nd_item<2> it) SYCL_ESIMD_KERNEL {
+    const size_t at = it.get_global_id(0) * static_cast<size_t>(n) + it.get_global_id(1) * COLS;  // (the owner's row, chunk)
+#pragma unroll
+    for (int c = 0; c < COLS / kCols; ++c) {
+      esimd::simd<float, kCols> p[kWireCardsMax];
+#pragma unroll
+      for (int s = 0; s < kWireCardsMax; ++s) {
+        if (s == card) p[s] = esimd::block_load<float, kCols>(mine + at + c * kCols);
+        else p[s] = esimd::block_load<float, kCols>(rv + static_cast<size_t>(s) * src_stride + at + c * kCols, kPeerLd);
+      }
+      // (p0 + p1) + (p2 + p3), operands by card index: the mailbox owner sum's order (mail::owner_sum)
+      const esimd::simd<bf16, kCols> v = mail::opaque<kCols>(p[0] + p[1], zero) + mail::opaque<kCols>(p[2] + p[3], zero);
+      v.copy_to(o + at + c * kCols);
+    }
+  });
+}
 }  // namespace
 
 size_t owner_sum_words(int n_max) { return 2ull * kWireCardsMax * kOwnerRowsMax * static_cast<size_t>(n_max); }
 size_t owner_share_words(int n_max) { return 2ull * kM * static_cast<size_t>(n_max / 2); }
+size_t owner_sum_copy_elems(int n_max) { return 2ull * kWireCardsMax * kOwnerRowsMax * static_cast<size_t>(n_max); }
 sycl::event owner_mail_init(sycl::queue &q, uint32_t *inbox, size_t words) { return q.fill(inbox, kPairMailEmpty, words); }
 
 sycl::event owner_share(sycl::queue &q, int rows, int n, bf16 *buf, const OwnerShare &share, int parity) {
   if (rows < kOwnerMinRows || rows > kM || n < 128 || n % 128) throw std::invalid_argument("owner_share: rows 4..kPairRows (32), n % 128 == 0");
   if (!share.mail.complete() || !share.error)
     throw std::invalid_argument("owner_share: the mailbox needs its card in 0..3 (got " + std::to_string(share.mail.card) + "), every card's inbox and an error word");
+  if (share.copy.on() && rows >= kOwnerCopyMinRows && n % 512 == 0) return share_copy(q, rows, n, buf, share);  // (its take: rows of whole KiB)
   const int p = parity & 1;
   if (rows >= kOwnerShareWideRows && n % 512 == 0) return share_rows<256>(q, rows, n, buf, share, p);
   if (n % 256 == 0) return share_rows<128>(q, rows, n, buf, share, p);
   return share_rows<64>(q, rows, n, buf, share, p);
-}
-
-namespace {
-class StepCopyWait;
-class StepCopySum;
-constexpr auto kStepFlag = esimd::properties{esimd::cache_hint_L1<esimd::cache_hint::uncached>,
-                                               esimd::cache_hint_L2<esimd::cache_hint::uncached>, esimd::alignment<16>};
-class StepCopyShareWait;
-class StepCopyDirectWait;
-class StepCopyShareOut;
-
-template <bool SHARE, bool DIRECT = false>
-sycl::event step_copy_sync(sycl::queue &q, uint32_t *state, uint32_t *ready, int card, uint32_t *error, uint64_t wait_cycles,
-                           bf16 *out = nullptr, size_t items = 0) {
-  constexpr int C = kWireCardsMax, kFlagWords = 16;
-  using Wait = std::conditional_t<DIRECT, StepCopyDirectWait, std::conditional_t<SHARE, StepCopyShareWait, StepCopyWait>>;
-  return q.single_task<Wait>([=]() SYCL_ESIMD_KERNEL {
-    uint32_t seq = state[0];
-    if constexpr (!SHARE) {
-      state[0] = ++seq;
-      state[1] = 0;
-    }
-    esimd::fence<esimd::memory_kind::global, esimd::fence_flush_op::none, esimd::fence_scope::system>();
-    esimd::block_store<uint32_t, 4>(ready + card * kFlagWords, esimd::simd<uint32_t, 4>(seq), kStepFlag);
-    const uint64_t start = esimd::rdtsc();
-    constexpr auto poll = esimd::properties{esimd::cache_hint_L1<esimd::cache_hint::uncached>,
-                                             esimd::cache_hint_L2<esimd::cache_hint::uncached>, esimd::alignment<4>};
-    const esimd::simd<uint32_t, C> offsets(0, kFlagWords * sizeof(uint32_t));
-    while (true) {
-      const auto seen = esimd::gather<uint32_t, C>(ready, offsets, esimd::simd_mask<C>(1), poll);
-      if ((seen == seq).all()) break;
-      if (esimd::rdtsc() - start > wait_cycles) {
-        error[0] = state[1] = 1u;
-        break;
-      }
-      esimd::fence<esimd::memory_kind::global, esimd::fence_flush_op::none, esimd::fence_scope::system>();
-    }
-    if constexpr (DIRECT) {
-      if (state[1]) {
-        const esimd::simd<bf16, kCols> bad = bf16(__builtin_nanf(""));
-        for (size_t off = 0; off < items; off += kCols) bad.copy_to(out + off);
-      }
-    }
-  });
-}
-}  // namespace
-
-sycl::event step_copy_reduce(sycl::queue &q, int rows, int n, const float *part, const StepCopy &buffers, int card, int parity,
-                             uint32_t *error, uint64_t wait_cycles, bf16 *out) {
-  constexpr int C = kWireCardsMax, kFlagWords = 16;
-  const size_t items = static_cast<size_t>(rows) * n;
-  if (card < 0 || card >= C || rows < 1 || n < 1 || n % kCols || items > buffers.stride || !buffers.ready)
-    throw std::invalid_argument("step copy: mailbox shape");
-  // A rank cannot start reusing a parity until the other ranks have published
-  // the intervening operation, which follows their reads of this one.
-  const size_t base = static_cast<size_t>(parity & 1) * C * buffers.stride;
-  const size_t flag_base = static_cast<size_t>(parity & 1) * C * kFlagWords;
-  const bool split = buffers.shared_ready && rows >= buffers.split_min_rows;
-  const auto row_begin = [=](int rank) { return static_cast<size_t>(rows * rank / C) * n; };
-  for (int hop = 1; hop < C; ++hop) {
-    const int dest = (card + hop) % C;
-    const size_t start = split ? row_begin(dest) : 0;
-    const size_t count = split ? row_begin(dest + 1) - start : items;
-    q.memcpy(buffers.recv[dest] + base + card * buffers.stride + start, part + start, count * sizeof(float));
-  }
-  auto *state = buffers.state[card];
-  step_copy_sync<false>(q, state, buffers.ready + flag_base, card, error, wait_cycles);
-  const size_t begin = split ? row_begin(card) : 0;
-  const size_t count = split ? row_begin(card + 1) - begin : items;
-  const size_t shared_at = static_cast<size_t>(parity & 1) * buffers.stride;
-  bool direct = split && buffers.outputs[card] == out;
-  for (const auto *output : buffers.outputs) direct = direct && output != nullptr;
-  bf16 *const reduced = split && !direct ? buffers.shared[card] + shared_at : out;
-  const float *src[C];
-  for (int i = 0; i < C; ++i) src[i] = i == card ? part : buffers.recv[card] + base + i * buffers.stride;
-  const uint32_t zero = static_cast<uint32_t>(rows < 0);
-  auto sum = q.parallel_for<StepCopySum>(sycl::range<1>(count / kCols), [=](sycl::id<1> item) SYCL_ESIMD_KERNEL {
-    const size_t off = begin + item[0] * kCols;
-    esimd::simd<bf16, kCols> result;
-    if (state[1]) {
-      result = bf16(__builtin_nanf(""));
-    } else {
-      const auto p0 = esimd::block_load<float, kCols>(src[0] + off, mail::kUc);
-      const auto p1 = esimd::block_load<float, kCols>(src[1] + off, mail::kUc);
-      const auto p2 = esimd::block_load<float, kCols>(src[2] + off, mail::kUc);
-      const auto p3 = esimd::block_load<float, kCols>(src[3] + off, mail::kUc);
-      result = mail::opaque<kCols>(p0 + p1, zero) + mail::opaque<kCols>(p2 + p3, zero);
-    }
-    result.copy_to(reduced + off);
-  });
-  if (!split) return sum;
-  // Only the assigned rows are reduced on each rank, then shared at BF16.
-  // The second flag bank separates partial arrival from output arrival.
-  for (int hop = 1; hop < C; ++hop) {
-    const int dest = (card + hop) % C;
-    bf16 *const target = direct ? buffers.outputs[dest] : buffers.shared[dest] + shared_at;
-    q.memcpy(target + begin, reduced + begin, count * sizeof(bf16));
-  }
-  if (direct) {
-    // All peers passed the first barrier after their previous consumers of out.
-    // The second barrier publishes the BF16 copies before this rank consumes them.
-    return step_copy_sync<true, true>(q, state, buffers.shared_ready + flag_base, card, error, wait_cycles, out, items);
-  }
-  step_copy_sync<true>(q, state, buffers.shared_ready + flag_base, card, error, wait_cycles);
-  return q.parallel_for<StepCopyShareOut>(sycl::range<1>(items / kCols), [=](sycl::id<1> item) SYCL_ESIMD_KERNEL {
-    const size_t off = item[0] * kCols;
-    esimd::simd<bf16, kCols> result = bf16(__builtin_nanf(""));
-    if (!state[1]) result.copy_from(reduced + off, esimd::properties{esimd::cache_hint_L1<esimd::cache_hint::uncached>,
-                                                                     esimd::cache_hint_L2<esimd::cache_hint::cached>,
-                                                                     esimd::alignment<128>});
-    result.copy_to(out + off);
-  });
 }
 
 sycl::event pair_reduce(sycl::queue &q, int rows, int n, const float *part, const PairWire *wire, int parity, bf16 *out) {
@@ -908,13 +920,12 @@ sycl::event pair_reduce(sycl::queue &q, int rows, int n, const float *part, cons
     if (!wire->owner.complete() || !wire->error)
       throw std::invalid_argument("pair_reduce: an owner sum needs its card in 0..3 (got " + std::to_string(wire->owner.card) + "), every card's inbox and an error word");
     if (rows < kOwnerMinRows || wire->bf16 || wire->i8) throw std::invalid_argument("pair_reduce: an owner sum takes 4+ rows of fp32 partials");
+    if (wire->copy.on() && rows >= kOwnerCopyMinRows && n % kOwnerSumCols == 0) return owner_reduce_copy<kOwnerSumCols>(q, rows, n, part, *wire, p, out);
     return n % kOwnerSumCols == 0 ? owner_reduce<kOwnerSumCols>(q, rows, n, part, *wire, p, out) : owner_reduce<kCols>(q, rows, n, part, *wire, p, out);
   }
   if (wire->quad.on()) {
     check_quad(wire->quad, "pair_reduce");
     if (wire->i8) throw std::invalid_argument("pair_reduce: the int8 wire is two-card only");
-    if (wire->quad.copy && !wire->bf16)
-      return step_copy_reduce(q, rows, n, part, *wire->quad.copy, wire->quad.card, p, wire->error, wire->wait_cycles, out);
     return reduce_wire<true>(q, rows, n, part, *wire, p, out);
   }
   if (wire->i8) {

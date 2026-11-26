@@ -102,6 +102,17 @@ struct RunPower {
   std::vector<PowerPoint> trace;
 };
 
+// A reply that failed a check with one right answer (a wrong answer). Kept apart from the notes: a report shows each
+// one where the eye lands (a flagged table in its scenario, a link from the checks strip), not as a line of fine print.
+struct Miss {
+  std::string item;  // the check's id ("format-reverse")
+  std::string group;  // the row it counts in ("format")
+  std::string asked;  // the question, without the passage or document it was asked on
+  std::string expected;
+  std::string got;  // the answer given; empty when there was none (then `why`)
+  std::string why;  // why there is no answer ("no ANSWER line"); empty when there is one
+};
+
 struct ScenarioResult {
   std::string id;  // the scenario's id ("prefill")
   std::string title;  // one line for the report
@@ -115,6 +126,7 @@ struct ScenarioResult {
   double started_s = 0;  // since the run's first scenario began
   double seconds = 0;  // wall time of the scenario
   std::optional<PowerUse> power;  // over the scenario
+  std::vector<Miss> misses;  // the replies its checks found wrong, in the order asked
 };
 
 }  // namespace xenithium:bench

@@ -23,7 +23,8 @@ struct BenchRun {
   std::string endpoint;  // env.endpoint
   std::string host;  // env.host
   std::string timestamp;  // env.timestamp
-  std::string corpus;  // config.corpus: the text the long prompts were cut from ("easy", "hard"; older runs "hard")
+  std::string mode;  // config.mode: "easy", "medium", "hard" (runs from before the modes: from their corpus)
+  std::string corpus;  // config.corpus: the text the long prompts were cut from ("medium", "hard"; older runs "hard")
   double decode_tps = 0;  // the decode figure of the categories' mix (summary.decode_tps)
   std::string decode_mix;  // summary.decode_mix: "agent mix"...; empty for older runs (a weighted mean)
   std::vector<std::pair<std::string, double>> per_cat;  // (category, median decode_tps), weight > 0
@@ -32,6 +33,10 @@ struct BenchRun {
   std::vector<std::pair<int, double>> concurrency;  // (level, aggregate_tps)
   double tokens_per_joule = 0;  // at the most efficient stream count; 0 = the run did not sample power
   double quality_pct = -1;  // share of the quality questions answered correctly; -1 = not asked
+  struct Miss {
+    std::string item, expected, got;  // got: the answer given, or why there was none in parentheses
+  };
+  std::vector<Miss> quality_misses;  // summary.quality_misses: its wrong answers
   std::vector<std::pair<std::string, std::string>> notes;  // env.notes (engine, binary...)
 };
 
@@ -53,6 +58,8 @@ struct BenchModel {
 enum class BenchMode { Standard, Quick, Full, Long, Load, Agents, Check, Apps, Decode, Prefill, Concurrency, Streams };
 inline constexpr BenchMode kBenchModes[] = {BenchMode::Standard, BenchMode::Quick, BenchMode::Full,   BenchMode::Long,    BenchMode::Load,        BenchMode::Agents,
                                             BenchMode::Check,    BenchMode::Apps,  BenchMode::Decode, BenchMode::Prefill, BenchMode::Concurrency, BenchMode::Streams};
+// A run's mode for its report: "easy (tasks that repeat or reshape their input)", and the corpus when it is not the mode's own.
+std::string bench_mode_text(const BenchRun &r);
 const char *bench_mode_name(BenchMode m);  // "standard", "quick"... (the run tag's suffix, the bench_mode note)
 const char *bench_mode_title(BenchMode m);  // the menu line: what it runs and about how long it takes
 // The `xenithium-bench run` arguments of the mode: its suite or its scenario.

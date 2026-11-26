@@ -1,6 +1,6 @@
 // Terminal layer of the launcher: a cell canvas drawn by the screens, a terminal that shows it
 // (raw mode, alternate screen, diff rendering, truecolor or 256 colours) and the key decoder.
-// No curses: the build has no ncurses headers, and the user rule is C++ tools without deps.
+// No curses: the build has no ncurses headers, and the project's tools are C++ without dependencies.
 #pragma once
 
 #include <cstdint>

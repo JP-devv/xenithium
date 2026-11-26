@@ -318,6 +318,7 @@ struct Server::Impl final : core::EventSink {
     bool done = false;
     bool echo_sent = false;
     int32_t completion_tokens = 0;
+    int32_t cached_tokens = -1;  // prompt tokens the engine continued from its prefix cache (-1: not known yet)
     const char* finish = "stop";
     text::Detokenizer detok;
     text::StopMatcher stop;
@@ -1705,6 +1706,12 @@ struct Server::Impl final : core::EventSink {
     sse += ",\"stop_reason\":null}]}\n\n";
   }
 
+  // The prompt tokens the request's prefix cache served: the first choice's (the prompt is counted once in the
+  // usage); 0 where the engine never ran it.
+  static int32_t cached_tokens(const Gen& g) {
+    return g.choices.empty() ? 0 : std::clamp(g.choices[0]->cached_tokens, 0, g.prompt_tokens);
+  }
+
   void usage_json(const Gen& g, std::string& s) {
     long long completion = 0;
     for (const auto& ch : g.choices) completion += ch->completion_tokens;
@@ -1714,7 +1721,9 @@ struct Server::Impl final : core::EventSink {
     append_int(s, static_cast<long long>(g.prompt_tokens) + completion);
     s += ",\"completion_tokens\":";
     append_int(s, completion);
-    s += "}";
+    s += ",\"prompt_tokens_details\":{\"cached_tokens\":";
+    append_int(s, cached_tokens(g));
+    s += "}}";
   }
 
   // tool_choice named / required: the collected JSON content -> ch.calls (a named call's arguments
@@ -2025,7 +2034,7 @@ struct Server::Impl final : core::EventSink {
     for (const auto& k : ch.calls) calls.push_back({k.id, k.name, k.arguments});
     output = responses::output_items(ch.reasoning, ch.content, ch.lp_content, g.top_n >= 0, calls);
     const long long reasoning = ch.reasoning.empty() ? 0 : static_cast<long long>(tok.encode(ch.reasoning).size());
-    use = responses::usage(g.prompt_tokens, ch.completion_tokens, reasoning);
+    use = responses::usage(g.prompt_tokens, cached_tokens(g), ch.completion_tokens, reasoning);
     return std::strcmp(ch.finish, "length") == 0 ? "incomplete" : "completed";
   }
 
@@ -2043,6 +2052,7 @@ struct Server::Impl final : core::EventSink {
       return;
     }
 
+    if (ev.cached_tokens >= 0) ch.cached_tokens = ev.cached_tokens;
     if (g.prompt_lp >= 0 && g.prompt_lp_json.empty() && !ev.prompt_logprobs.empty())
       g.prompt_lp_json = prompt_lp_list(g.prompt_ids, ev.prompt_logprobs, ch.token_ids);
     // Logprobs of this event: the echoed prompt's (first event), then each token's.

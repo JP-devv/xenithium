@@ -31,6 +31,10 @@ inline constexpr int kQsaTile = 64;         // attention tokens per work-group
 inline constexpr int kQsaV4Group = 32;  // int8-v4: V dims per scale
 inline constexpr int kQsaV4Scales = kQsaDim / kQsaV4Group;  // bf16 V scales per (token, kv head)
 inline constexpr int kQsaTiles = (kQsaMaxSel + kQsaTile - 1) / kQsaTile;  // 33
+// The KV split by tokens (qsa.hpp): a card attends to its half of a row's selection, two tokens of each block and up to
+// two of the open block; the prefill walks all of that half's tiles in one work-group per row.
+inline constexpr int kQsaSplitSel = (kQsaTopBlocks + 1) * (kQsaCompress / 2);                  // 1,026 tokens
+inline constexpr int kQsaSplitPfTiles = (kQsaSplitSel + kQsaTile - 1) / kQsaTile;  // 17
 
 // ---- rotary table (host) ------------------------------------------------------------------------
 // bf16 [positions][64]: cos of the 32 frequencies | sin of them, times the attention factor.

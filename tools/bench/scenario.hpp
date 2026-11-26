@@ -114,12 +114,14 @@ double seconds_since(Clock::time_point from);
 double exponential_gap_s(double per_second, std::mt19937_64 &rng);
 
 // The decode rate of a mix of kinds of output. `weights` are shares of generated tokens per kind, `tps` each kind's
-// rate. The mix's rate is the weighted harmonic mean over the kinds that have a weight and a rate - each kind's time
-// per token, weighted, inverted: the rate at which that mix of tokens comes out (an arithmetic mean of the rates would
-// read high). `covered` is the weight those kinds hold: 1 when every weighted kind ran; {0, 0} when none did.
+// rate. By default (harmonic) the mix's rate is the weighted harmonic mean over the kinds that have a weight and a rate
+// - each kind's time per token, weighted, inverted: the rate at which that mix of tokens comes out (an arithmetic mean
+// of the rates reads high). `arithmetic` gives that weighted mean of the rates instead, the easy mix's figure. `covered`
+// is the weight those kinds hold: 1 when every weighted kind ran; {0, 0} when none did.
 struct MixRate {
   double tps = 0, covered = 0;
 };
-MixRate mix_rate(std::span<const std::pair<std::string, double>> weights, const std::map<std::string, double, std::less<>> &tps);
+MixRate mix_rate(std::span<const std::pair<std::string, double>> weights, const std::map<std::string, double, std::less<>> &tps,
+                 MixAverage average = MixAverage::harmonic);
 
 }  // namespace xenithium:bench

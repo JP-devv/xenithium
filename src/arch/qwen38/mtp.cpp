@@ -12,7 +12,7 @@ namespace xenithium::arch::qwen38 {
 
 namespace k = xenithium::kernels;
 
-std::vector<model::DenseSpec> mtp_dense_plan(const model::Checkpoint &ck) {
+std::vector<model::DenseSpec> mtp_dense_plan(const model::Checkpoint &ck, bool kv_by_tokens) {
   using S = model::DenseSpec;
   using model::Component;
   std::vector<S> out;
@@ -50,6 +50,10 @@ std::vector<model::DenseSpec> mtp_dense_plan(const model::Checkpoint &ck) {
   add(A + "q_proj.weight", S::Split::rows, S::Store::i8, 0, {A + "k_proj.weight", A + "v_proj.weight"});
   // TP4 = a kv head on two cards (each takes it whole): heads of kQsaDim rows
   out.back().append_heads = static_cast<int>(ck.at(A + "k_proj.weight").dim(0) / kernels::kQsaDim);
+  if (kv_by_tokens) {  // the KV split by tokens (TP4): + the partner's q heads, as the target's QSA layers
+    out.back().peer_block = 2 * kernels::kQsaDim;
+    out.back().peer_keep = kernels::kQsaDim;
+  }
   add(A + "o_proj.weight", S::Split::cols, S::Store::i8, 0);
   add(A + "q_norm.weight", S::Split::replicate, S::Store::raw, 0);
   add(A + "k_norm.weight", S::Split::replicate, S::Store::raw, 0);

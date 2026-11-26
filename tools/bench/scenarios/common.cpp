@@ -34,7 +34,10 @@ void add_decode_metrics(Row &row, const Sample &s) {
 void add_prefill_metrics(Row &row, const Sample &s) {
   row.metric(std::string(metric::kPromptTokens), "tokens", Better::none).samples.push_back(s.prompt_tokens);
   row.metric(std::string(metric::kTtft), "ms", Better::lower).samples.push_back(s.ttft_ms);
-  if (s.usage_reported) row.metric(std::string(metric::kPrefill), "tok/s", Better::higher).samples.push_back(s.prefill_tps());
+  if (s.usage_reported && !s.cached_unknown) row.metric(std::string(metric::kPrefill), "tok/s", Better::higher).samples.push_back(s.prefill_tps());
+  if (s.cached_unknown)
+    row.notes.push_back("prefill tok/s left out where the cached prompt tokens are unknown: the server does not report them per request, and another client's "
+                        "cache hits moved its server-wide counter during the request");
 }
 
 namespace {
@@ -103,15 +106,17 @@ double exponential_gap_s(double per_second, std::mt19937_64 &rng) {
   return -std::log1p(-uniform) / per_second;
 }
 
-MixRate mix_rate(std::span<const std::pair<std::string, double>> weights, const std::map<std::string, double, std::less<>> &tps) {
-  double covered = 0, seconds_per_token = 0;
+MixRate mix_rate(std::span<const std::pair<std::string, double>> weights, const std::map<std::string, double, std::less<>> &tps, MixAverage average) {
+  double covered = 0, seconds_per_token = 0, weighted_tps = 0;
   for (const auto &[kind, weight] : weights) {
     const auto it = tps.find(kind);
     if (weight <= 0 || it == tps.end() || it->second <= 0) continue;
     covered += weight;
     seconds_per_token += weight / it->second;
+    weighted_tps += weight * it->second;
   }
-  return seconds_per_token > 0 ? MixRate{covered / seconds_per_token, covered} : MixRate{};
+  if (covered <= 0) return {};
+  return {average == MixAverage::harmonic ? covered / seconds_per_token : weighted_tps / covered, covered};
 }
 
 }  // namespace xenithium:bench

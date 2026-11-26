@@ -1,7 +1,5 @@
 // xenithium-probe: hardware and kernel measurements on the cards.
 // devices Level Zero topology (cards, EU geometry, peer access)
-// peers [--mib M] [--iters I] the TP wire's peer path on this host, per ordered pair: the driver's peer answer and
-// P2P flags, then the store the wire issues into a peer mailbox against a host-staged copy of the same bytes
 // bw [--device N] [--mib M] [--iters I] plain VRAM read: the floor every kernel is judged by
 // w4 [--device N] [--n N] [--k K] [--iters I] [--ksplit S] int4 W4A16 M=4 GEMM vs its floor
 // dense [--device N] [--iters I] the dense decode GEMM (int8 W8A16 and bf16) on this model's
@@ -52,16 +50,16 @@
 // store --model DIR... [--dense 1] with --dense 1 the non-expert weights load first (the
 // arch's dense plan, int8 trunk) and the hot-expert count comes from the free VRAM left
 // after them minus the KV at the asked context and the reserve; then the dense spot checks
-// store --model DIR [--context N] [--seqs N] [--kv-bytes 1|2] [--drafter 0|1] [--hot N] [--verify 0|1]
+// store --model DIR [--context N] [--seqs N] [--kv-bytes 1|2] [--kv-split heads|tokens] [--drafter 0|1] [--hot N] [--verify 0|1]
 // every routed expert onto both cards (EP2, hot count from the arch budget unless --hot),
 // streamed layer by layer; prints the load phases and the per-card ledger, verifies every
 // blob by hash, and runs W4A16 on a hot and a cold (pinned host, read over PCIe) expert
 // per card against the raw-tensor reference
 // rank --model DIR --prompts F.jsonl --out F.xrc [--gen N] [--context N] a hot-expert ranking (XRC1) for a MoE
 // checkpoint (qwen38) from the decode routes of chat prompts (rank.cpp; scripts/make-hot-rank.sh)
-// model --model DIR [--ppl FILE] [--rows 1,4] [--generate N] [--at P] [--context N] [--kv-bytes 1|2] [--kv-v4 0|1] [--hot N] [--verify 0|1]
+// model --model DIR [--ppl FILE] [--rows 1,4] [--generate N] [--at P] [--context N] [--kv-bytes 1|2] [--kv-v4 0|1] [--kv-split heads|tokens] [--hot N] [--verify 0|1]
 // [--routes-out F] [--hot-rank F] [--reserve GIB] [--lp-out DIR] [--lp-ref F,F] [--bf16 PAT,PAT] [--moe-down-bf16 0|1] [--moe-dn-ks N] [--graphs 0|1]
-// [--moe-tp 0|1] [--hidden-out DIR] [--gen-out F] [--pf-chunk N] [--pf-moe-a8 0|1] [--pf-dense-a8 0|1|2] [--pf-wire fp32|bf16] [--dec-moe-a8 0|1] [--kv-pool N] [--kv-scramble 0|1] [--kv-lend 0|1] [--kv-lend-keep N] [--kv-lend-idle 0|1] [--moe-gu-ks N] [--gdn-scan 0|1] [--pf-cold-stage N] [--pf-route-trace F] [--pf-time-only 0|1] [--pf-sweep N,N]
+// [--moe-tp 0|1] [--hidden-out DIR] [--gen-out F] [--pf-chunk N] [--pf-moe-a8 0|1] [--pf-dense-a8 0|1|2] [--pf-wire fp32|bf16] [--dec-moe-a8 0|1] [--kv-pool N] [--kv-scramble 0|1] [--kv-lend 0|1] [--kv-lend-keep N] [--kv-lend-idle 0|1] [--moe-gu-ks N] [--gdn-scan 0|1] [--pf-cold-stage N] [--pf-fetch N] [--pf-graphs 0|1] [--pf-graph-gate N] [--pf-graph-sizes N,N] [--pf-route-trace F] [--pf-time-only 0|1] [--pf-sweep N,N]
 // the whole model on both cards (model.cpp): teacher-forced perplexity on a token file at
 // each row count, then greedy decode timing; one load for everything
 // Every timed loop warms the card by wall time first (warmup.hpp), uses full-entropy data and
@@ -1679,14 +1677,6 @@ int cmd_store(const Options &o) {
 
 
 int main(int argc, char **argv) {
-  if (argc >= 2 && std::string(argv[1]) == "wiremin") {  // scratch: the two-card pair_reduce mismatch (wiremin.cpp)
-    try {
-      return cmd_wiremin(argc - 2, argv + 2);
-    } catch (const std::exception &e) {
-      std::fprintf(stderr, "error: %s\n", e.what());
-      return 1;
-    }
-  }
   if (argc >= 2 && std::string(argv[1]) == "rank") {  // a hot-expert ranking for a MoE checkpoint (rank.cpp)
     try {
       return cmd_rank(argc - 2, argv + 2);
@@ -1696,7 +1686,7 @@ int main(int argc, char **argv) {
     }
   }
   if (argc < 2) {
-    std::fprintf(stderr, "usage: xenithium-probe devices|peers|bw|w4|dense|pf|load|store|head|hc|moe|gdn|qsa|ple|model|mtp|seqs|serve [--model DIR] [--mtp DIR] [--prompt-len N] [--depth D] [--drafts-ref F] [--mtp-kv-bytes 1|2] [--ppl FILE] [--rows 1,4] [--generate N] [--layers L,L] [--context N] [--seqs N] [--kv-bytes 1|2] [--drafter 0|1] [--hot N] [--verify 0|1] [--routes-out F] [--hot-rank F] [--reserve GIB] [--lp-out DIR] [--lp-ref F,F] [--bf16 PAT,PAT] [--moe-down-bf16 0|1] [--moe-dn-ks N] [--graphs 0|1] [--moe-tp 0|1] [--hidden-out DIR] [--gen-out F] [--pf-chunk N] [--pf-moe-a8 0|1] [--pf-dense-a8 0|1|2] [--pf-wire fp32|bf16] [--dec-moe-a8 0|1] [--kv-pool N] [--kv-scramble 0|1] [--kv-lend 0|1] [--kv-lend-keep N] [--kv-lend-idle 0|1] [--moe-gu-ks N] [--gdn-scan 0|1] [--pf-cold-stage N] [--pf-route-trace F] [--pf-time-only 0|1] [--pf-sweep N,N] [--lp-time N] [--step-rows 4|8] [--two-deep 0|1] [--spec-cap F] [--bucket-gate N] [--bucket-pre 0|1] [--p1-kv-gate A,B] [--layer L] [--threads T] [--device N] [--mib M] [--iters I] [--n N] [--k K] [--ksplit S]\n");
+    std::fprintf(stderr, "usage: xenithium-probe devices|bw|w4|dense|pf|load|store|head|hc|moe|gdn|qsa|ple|model|mtp|seqs|serve [--model DIR] [--mtp DIR] [--prompt-len N] [--depth D] [--drafts-ref F] [--mtp-kv-bytes 1|2] [--ppl FILE] [--rows 1,4] [--generate N] [--layers L,L] [--context N] [--seqs N] [--kv-bytes 1|2] [--drafter 0|1] [--hot N] [--verify 0|1] [--routes-out F] [--hot-rank F] [--reserve GIB] [--lp-out DIR] [--lp-ref F,F] [--bf16 PAT,PAT] [--moe-down-bf16 0|1] [--moe-dn-ks N] [--graphs 0|1] [--moe-tp 0|1] [--hidden-out DIR] [--gen-out F] [--pf-chunk N] [--pf-moe-a8 0|1] [--pf-dense-a8 0|1|2] [--pf-wire fp32|bf16] [--dec-moe-a8 0|1] [--kv-pool N] [--kv-scramble 0|1] [--kv-lend 0|1] [--kv-lend-keep N] [--kv-lend-idle 0|1] [--moe-gu-ks N] [--gdn-scan 0|1] [--pf-cold-stage N] [--pf-fetch N] [--pf-graphs 0|1] [--pf-graph-gate N] [--pf-graph-sizes N,N] [--pf-route-trace F] [--pf-time-only 0|1] [--pf-sweep N,N] [--lp-time N] [--step-rows 4|8] [--two-deep 0|1] [--spec-cap F] [--bucket-gate N] [--bucket-pre 0|1] [--p1-kv-gate A,B] [--layer L] [--threads T] [--device N] [--mib M] [--iters I] [--n N] [--k K] [--ksplit S]\n");
     return 2;
   }
   const std::string cmd = argv[1];
@@ -1780,6 +1770,10 @@ int main(int argc, char **argv) {
     else if (a == "--gdn-cap-every") g_gdn_cap_every = v;
     else if (a == "--gdn-scan") g_gdn_scan = v != 0;
     else if (a == "--pf-cold-stage") g_pf_cold_stage = static_cast<int>(v);
+    else if (a == "--pf-fetch") g_pf_fetch = static_cast<int>(v);
+    else if (a == "--pf-graphs") g_pf_graphs = v != 0;
+    else if (a == "--pf-graph-gate") g_pf_graph_gate = static_cast<int>(v);
+    else if (a == "--pf-graph-sizes") g_pf_graph_sizes = val;
     else if (a == "--moe-cpu") g_moe_cpu = val;
     else if (a == "--moe-cpu-pct") g_moe_cpu_pct = static_cast<int>(v);
     else if (a == "--moe-cpu-threads") g_moe_cpu_threads = static_cast<int>(v);
@@ -1847,6 +1841,10 @@ int main(int argc, char **argv) {
     else if (a == "--pf-merge-at") g_pf_merge_at = std::atoi(val);
     else if (a == "--mtp-defer") g_mtp_defer = std::atoi(val);
     else if (a == "--kv-v4") g_kv_v4 = std::atoi(val) != 0;
+    else if (a == "--kv-split") {
+      if (std::string(val) != "heads" && std::string(val) != "tokens") throw std::invalid_argument("--kv-split heads|tokens");
+      g_kv_tokens = std::string(val) == "tokens";
+    }
     else if (a == "--draft-conf") g_draft_conf = true, g_draft_conf_path = val;
     else if (a == "--seq-tokens") o.seq_tokens = v;
     else if (a == "--pf-prompt-len") o.pf_prompt_len = v;
@@ -1859,7 +1857,6 @@ int main(int argc, char **argv) {
   }
   try {
     if (cmd == "devices") return cmd_devices();
-    if (cmd == "peers") return cmd_peers(o.mib, o.iters);
     if (cmd == "bw") return cmd_bw(o);
     if (cmd == "w4") return cmd_w4(o);
     if (cmd == "load") return cmd_load(o);

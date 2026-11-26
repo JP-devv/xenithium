@@ -67,8 +67,10 @@ struct DeployParams {
   double vram_gib = util::plan_card().free_gib;
   double reserve_gib = 0.75;  // scratch, graphs, runtime
   bool embed_on_host = true;  // the embedding table in pinned host memory (a step gathers rows)
-  // How attention state is split over the cards: by KV head (each card all tokens of its
-  // heads) or by token (each card half of every sequence's tokens, all heads).
+  // How attention state is split over the cards: by KV head (each card all tokens of its heads; with fewer kv heads
+  // than cards, the cards that share a head each hold all of its tokens) or, for those cards, by token (they split the
+  // tokens of their kv head: qwen38 TP4's every other token per card, kernels/attention/qsa.hpp). With whole kv heads
+  // per card both are the same.
   enum class KvShard : uint8_t { heads, tokens } kv_shard = KvShard::heads;
 };
 
@@ -130,6 +132,10 @@ struct DenseSpec {
   // QSA k / v: 2 kv heads); with fewer heads than cards, card c takes head c x append_heads / cards whole (TP4: cards
   // 2h and 2h + 1 hold kv head h), else its own 1/cards. 0 = the plain split.
   int append_heads = 0;
+  // qwen38 TP4 with the KV split by tokens (kernels/attention/qsa.hpp): under a rows split, after this card's own rows
+  // and before the appended ones, the first `peer_keep` rows of every `peer_block` rows of the partner's (card ^ 1) slice
+  // (the partner's q heads without their gates: blocks of q | gate = 512 rows, keep 256). 0 = none.
+  int64_t peer_block = 0, peer_keep = 0;
   Component comp = Component::other;
   int layer = -1;
   // (the MTP drafter's vocabulary subset): Split:rows only, no sections / append: the source rows

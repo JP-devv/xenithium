@@ -129,8 +129,9 @@ struct ModelOptions {
   bool prefill_wire_bf16 = false;
   // YaRN per request. Past the trained positions the rope table holds one sub-table per tier (trained x 2^k positions
   // at that length's factor: 1, 2, ...; the last tier = the whole context at its factor), and a sequence starts at its
-  // tier's first row through the M-RoPE delta (set_rope_tier), so a short request on a 1M server gets factor 1, the bits
-  // of a server at the trained context. false = one factor for every request.
+  // tier's first row through the rope delta (set_rope_tier: the M-RoPE delta word, plain rope too), so a short request
+  // on a 1M server gets factor 1, the bits of a server at the trained context. false = one factor for every request.
+  // Arch flint never scales (yarn_factor 1).
   bool yarn_tiers = true;
   int rope_tier_reset = -1;  // the tier reset() starts a sequence in (-1 = the last: the whole context's factor)
   bool prefill_split = true;  // the many-row two-card sums split over the cards (pair_split_rows) from 64 rows; false = the mailbox
@@ -293,6 +294,8 @@ struct PfProfile {
   double split = 0;           // wall ms of the split two-card sums (pair_split_rows), the producers synced first
 };
 
+namespace trained_qsa { class Device; }
+
 class Model {
  public:
   static constexpr int kRows = kernels::kGdnRows;  // rows per sequence in a step (a step: up to kStepRows32 in all)
@@ -364,6 +367,7 @@ class Model {
   bool kv_reserve(int slot, int64_t tokens);
   void kv_release(int slot);
   int64_t kv_pool_tokens() const { return kvp_.pool_tokens(); }
+  bool trained_qsa() const { return trained_qsa3_ != nullptr; }  // a trained page selection bank is loaded
   int64_t kv_free_tokens() const { return kvp_.free_tokens(); }
   int64_t kv_used_tokens() const { return kvp_.used_tokens(); }
   size_t kv_bytes(int c) const { return kv_bytes_.at(static_cast<size_t>(c)); }  // KV of the target + drafter on card c
@@ -428,6 +432,7 @@ class Model {
   static constexpr int k_page_tokens = model::KvPages::kPageTokens;
 
   void reset();                             // a fresh sequence at position 0
+  void note_prompt(int slot,int64_t total,int64_t restored);
   void step(const int32_t *ids, int rows);  // rows tokens at position(); waits for the cards
   void accept(int n);                       // keep the last step's first n rows (1..rows)
   // A step whose rows are a draft tree (the current slot; DFlash's 8-row verify): parent[r] = row r's parent row
@@ -452,6 +457,10 @@ class Model {
   // draft_after_prefill).
   void prefill(const int32_t *ids, int n, const std::function<void(int64_t, int)> &on_rows = {}, int32_t next = -1);
   int prefill_chunk() const { return opt_.prefill_chunk_run > 0 ? opt_.prefill_chunk_run : opt_.prefill_chunk; }
+  // The prefix cache's alignment (StepModel::snap_align): 64 where a row's bits do not depend on its prefill call's size
+  // (no fa-body context splits, no library GEMM route); else the prefill chunk, so a cached continuation runs the very
+  // calls a cold read runs (the tail splits and the library-vs-own GEMM choice follow the call's rows).
+  int call_align() const;
   // One prefill call in parts (): prefill_begin(ids, n <= prefill_chunk, next) on the current
   // slot, then prefill_advance(layers) runs that many more layers (at least 1) and returns true once all ran (picks /
   // logits / draft_after_prefill then as after prefill()). Same bits as one call. Between parts steps of OTHER slots may
@@ -567,7 +576,11 @@ class Model {
   // the rows the step buffers hold (head, MLP, mixers, drafters): pass_rows() or the load's prefill_short, whichever is
   // more (16 unless 32-row steps or 17-32-row short prefill calls)
   int rows_cap() const { return rows_cap_; }
-  // the most drafts one draft call returns: MTP 3 (passes), DFlash the checkpoint's block - 1 (7)
+  // One MTP layer reused recursively: pass 1 plus further chained passes, up to this many drafts.
+  // DFlash / DSpine still cap at the checkpoint's block - 1 (7 or 15).
+  static constexpr int kMtpDepthMax = 6;
+  static_assert(kMtpDepthMax >= 6 && kMtpDepthMax <= 15, "qwen35 MTP depth 6 fits a segment and kDepthMax 15");
+  // the most drafts one draft call returns: MTP kMtpDepthMax, DFlash the checkpoint's block - 1
   int draft_depth_max() const;
   // both drafters loaded (ModelOptions:mtp_from); which one drafts a call for `seqs` sequences (true: MTP), and
   // the most drafts it returns then
@@ -617,7 +630,7 @@ class Model {
   struct Graphs;
   std::unique_ptr<Graphs> graphs_;
   bool graph_step() const;
-  void run_graph(int rows, int seg_rows);
+  void run_graph(int rows, int seg_rows, int pb = -1);  // pb = the step's attention bound (bucketed); -1 = cap
   int graphs_recorded() const;
   // one sequence's host state; pos_ .. pf_last_row_ below mirror the current slot's (save_seq / load_seq)
   struct Seq {
@@ -667,7 +680,14 @@ class Model {
   // rms_norm over the chunk's rows on card c: with a pending split sum (pend) the card's own rows of `add` first, then
   // proj(lo, hi) of them (the consumer's first GEMM in row parts), the wait for the peer's rows, then the rest likewise
   //. Without pend proj is not called (the consumer projects every row itself).
-  void pf_norm(int c, int m, const bf16 *add, const bf16 *w, uint32_t pend, const std::function<void(int, int)> &proj = {});
+  // codes_only: xn's only readers are W4A8 GEMMs (the norm writes its codes, not its bf16 values; pf_codes_only)
+  // mode (with pend; the sum finished as SplitRows::owner, nothing copied back): owner = the card norms its own rows only
+  // and shares their codes (the peer's arrive the same way; needs codes_only), so the residual's peer rows go stale on
+  // this card; restore = the card norms its own rows, shares their residual, then norms the peer's rows from theirs.
+  enum class PfNorm : uint8_t { both, owner, restore };
+  void pf_norm(int c, int m, const bf16 *add, const bf16 *w, uint32_t pend, const std::function<void(int, int)> &proj = {}, bool codes_only = false,
+               PfNorm mode = PfNorm::both);
+  bool pf_codes_only(int m) const;
   void pf_wait_pending();  // both cards wait for a pending split sum's peer rows
 
   Fabric &fab_;
@@ -677,6 +697,7 @@ class Model {
   double yarn_factor_ = 1.0;
   std::vector<int64_t> tier_limit_, tier_base_;  // per tier its positions and first row in the rope table
   std::vector<double> tier_factor_;
+  bool mrope_cfg_ = false;  // the checkpoint's interleaved M-RoPE (image input); the tiers use the delta without it
   int last_rows_ = 0, pending_accept_ = 0, parity_ = 0, mix_parity_ = 0, pf_parity_ = 0;
   int gdn_accept_max_ = 4;      // the step's largest accept word (GdnState:accept_max)
   bool gdn_commit_ = false;     // this step's GDN rows are final (GdnState:commit)
@@ -705,7 +726,7 @@ class Model {
   std::vector<uint8_t> batch_tree_;  // per segment of the last step, its rows were a tree
   std::vector<std::vector<int>> draft_par_;  // per slot, draft_parents()
   void note_tree(int slot, size_t drafts, int seg = 0);  // the last DFlash pass's tree (its segment seg) for the slot's drafts
-  void accept_counts(const std::vector<int> &n);  // accept_batch's counts (no tree check)
+  void accept_counts(const std::vector<int> &n, const std::vector<const int *> *paths=nullptr);  // paths already validated
   void accept_paths(const std::vector<int> &n, const std::vector<const int *> &paths);  // accept_batch(n, paths) before close_pages
   // One card's KV caches of the attention layers (the accept's launches run over all of them), and the first of those
   // layers: they share attn_.shape_of(card, layer0).
@@ -724,6 +745,17 @@ class Model {
   uint32_t pend_seq_ = 0; // a split sum whose peer rows the consumer has not waited for yet (0: none)
   double load_s_ = 0;
   std::unique_ptr<load::DenseStore> dense_;
+  std::unique_ptr<trained_qsa::Device> trained_qsa3_;  // optional trained index bank
+  int trained_qsa_prefill_min_ = 0;
+  std::array<uint64_t,2> trained_prefill_reported_{};
+  std::vector<int> trained_qsa_layer_;  // model layer -> bank index; -1 is stock dispatch
+  static constexpr int kTrainedQsaShort=8192;
+  std::vector<int64_t> qsa_covered_;  // contiguous logical token count; -1 means disabled/incomplete
+  void qsa_invalidate_snapshots(int slot,int64_t retained=-1);
+  uint32_t qsa_stage_rows_=0;
+  bool qsa_step_sparse_=false;      // some segment of the step runs the trained sparse walk
+  uint32_t qsa_dense_rows_=0;       // rows of the step kept on the dense walk (plan count 0)
+  uint64_t qsa_sparse_slots_=0;     // slots whose segment is sparse this step (route log)
   std::unique_ptr<Head> head_;
   std::unique_ptr<HeadCands> cands_;  // the sampling candidates (logits_cands)
   std::unique_ptr<Mlp> mlp_;
@@ -790,6 +822,7 @@ class Model {
   // the snapshot store (host buffers allocated on first use, kept for reuse)
   struct SnapRec {
     int64_t pos = 0;
+    int qsa_owner=-1;  // exact complete groups still resident in this logical slot
     int64_t rope_delta = 0;
     int parity = 0;
     bool used = false;
@@ -811,6 +844,7 @@ class Model {
   std::vector<uint16_t> pf_rope_host_;
   std::vector<int32_t> vis_ids_;
   int64_t capt_rope_ = 0;
+  bool capt_qsa_ = false;  // the captured call appended trained-QSA keys from its start (covered==pos)
   void pf_rope_rows(const int32_t *ids, int m);  // pf_start: pf_.rope_rows / snap_rope, pf_rope_host_, the slot's delta
   int snap_cap_ = 0;
   std::vector<int32_t *> fork_pages_;  // [card] device: a fork's page pairs [src slot_pages][dst slot_pages]
